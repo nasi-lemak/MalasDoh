@@ -54,6 +54,11 @@ impl AppPaths {
         self.data_dir.join("backups")
     }
 
+    /// The change journal: every save, with its patch.
+    pub fn journal_file(&self) -> PathBuf {
+        self.data_dir.join("journal.jsonl")
+    }
+
     pub fn edit_cache_dir(&self) -> PathBuf {
         self.data_dir.join("edit")
     }

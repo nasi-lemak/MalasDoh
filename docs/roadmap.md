@@ -17,6 +17,11 @@
 - Syntax highlighting for common server config formats
 - Port forwarding: local, remote, SOCKS5
 - Folder compare and sync with a reviewable plan
+- Two-pane local/remote browser, drag both ways, copy between servers,
+  confirmation before anything is overwritten
+- Compare files across servers, with local files and with backups
+- Change journal of every save, with patches, check results and rollbacks
+- Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line
 - Snippets, and running commands on many hosts
 - External editor round trip with the same checks
 - Disconnect detection and reconnect without losing unsaved edits
@@ -27,7 +32,7 @@
 
 1. Code signing for the Windows and macOS builds (needs certificates).
 2. Split panes: two terminals, or a terminal and an editor, side by side.
-3. Editor: go to line, replace, and a minimap of changes since opening.
+3. Editor: a gutter marking lines changed since opening.
 4. Optional SFTP "edit as root" through `sudo sftp-server` where allowed,
    which is faster than the current sudo + cat path for large trees.
 5. Mouse reporting in the terminal (for htop/mc mouse use).

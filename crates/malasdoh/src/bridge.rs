@@ -37,6 +37,8 @@ pub enum EventKind {
     Question(Question),
     Session(crate::session::SessionMsg),
     Multi(crate::multirun::MultiMsg),
+    /// For the compare windows; the session id is not used.
+    Compare(crate::compare::CompareMsg),
 }
 
 #[derive(Clone)]

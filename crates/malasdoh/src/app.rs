@@ -13,10 +13,13 @@ use malasdoh_core::validate::{CheckWhen, ValidationRule, builtin_rules};
 use malasdoh_core::{AppPaths, ssh_config};
 
 use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId};
+use crate::compare::Compares;
+use crate::journal_ui::JournalWindow;
 use crate::multirun::MultiRun;
 use crate::session::{ConnState, Pane, Session, Shared};
 use crate::settings::Settings;
 use crate::snippets::{self, Snippet, SnippetStore, Use};
+use malasdoh_core::journal::Journal;
 
 pub struct App {
     shared: Shared,
@@ -43,6 +46,9 @@ pub struct App {
     show_sidebar: bool,
     last_local_dir: Option<std::path::PathBuf>,
     cross: Option<CrossCopy>,
+    compares: Compares,
+    journal: Journal,
+    journal_win: JournalWindow,
 }
 
 /// "Copy to another server": what, from where, and to where.
@@ -179,6 +185,7 @@ impl App {
             ProfileStore::default()
         });
         let snippets_path = paths.config_dir.join("snippets.toml");
+        let paths_journal = paths.journal_file();
         // Copies made for external editors are kept a week, then tidied away.
         let cache = paths.edit_cache_dir();
         rt.spawn_blocking(move || {
@@ -216,6 +223,9 @@ impl App {
             show_sidebar: true,
             last_local_dir: None,
             cross: None,
+            compares: Compares::default(),
+            journal: Journal::new(paths_journal),
+            journal_win: JournalWindow::default(),
         }
     }
 
@@ -244,6 +254,13 @@ impl App {
 
     fn drain_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
+            let ev = match ev {
+                AppEvent { kind: EventKind::Compare(m), .. } => {
+                    self.compares.handle(m);
+                    continue;
+                }
+                ev => ev,
+            };
             if ev.session == MULTI_RUN {
                 match ev.kind {
                     EventKind::Question(q) => self.multi.questions.push_back(q),
@@ -261,7 +278,7 @@ impl App {
                 }
                 EventKind::Question(q) => s.questions.push_back(q),
                 EventKind::Session(msg) => s.handle(msg, &self.shared, &self.settings),
-                EventKind::Multi(_) => {}
+                EventKind::Multi(_) | EventKind::Compare(_) => {}
             }
         }
     }
@@ -335,6 +352,14 @@ impl App {
                 }
                 if ui.button("Snippets…").clicked() {
                     self.show_snippets = true;
+                    ui.close();
+                }
+                if ui
+                    .button("Change journal…")
+                    .on_hover_text("Every file saved from MalasDoh, with what changed")
+                    .clicked()
+                {
+                    self.journal_win.show(&self.journal, None);
                     ui.close();
                 }
             });
@@ -618,6 +643,13 @@ impl App {
         }
         if let Some(paths) = s.cross_copy.take() {
             self.cross = Some(CrossCopy { from: sid, paths, to: None, dest: String::new(), replace: false });
+        }
+        let compare = s.compare.take();
+        if let Some(path) = s.history.take() {
+            self.journal_win.show(&self.journal, Some(path));
+        }
+        if let Some(req) = compare {
+            self.compares.request(req, sid, &self.sessions, &self.shared);
         }
         if let Some((snippet, how)) = chosen_snippet {
             self.use_snippet(Some(sid), Some(pid), snippet, how, Vec::new());
@@ -1305,6 +1337,10 @@ impl eframe::App for App {
         self.settings_ui(&ctx);
         self.snippet_windows_ui(&ctx);
         self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);
+        if let Some((a, b)) = self.journal_win.ui(&ctx, &self.journal, &self.sessions) {
+            self.compares.open(a, b, &self.sessions, &self.shared);
+        }
+        self.compares.ui(&ctx, &self.sessions, &self.shared);
         self.question_ui(&ctx);
 
         // Keep polling while something is in flight.

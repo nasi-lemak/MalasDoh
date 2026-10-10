@@ -57,7 +57,20 @@ remote-editing loop, where they are weakest:
 - **File browser**: navigate, filter, hidden files, upload (button or drag and
   drop from the desktop) and download (files or whole folders, with progress and
   cancel), new file/folder, rename, delete, chmod, copy path, "cd here in
-  terminal".
+  terminal". Nothing is overwritten without asking first.
+- **Two panes**: "Local files" puts this computer's folders next to the
+  server's, WinSCP style; drag either way, or use the Upload button.
+- **Copy between servers**: send files or folders from one connected server to
+  another (they pass through a private temporary folder on your computer, so the
+  servers do not need to reach each other).
+- **Compare files**: a file against the same (or any) path on another server, a
+  file on your computer, or one of its backups; or two selected files. Context
+  of 3 or 10 lines or the whole file, swap sides, copy as a patch.
+- **Change journal** (Tools → Change journal): every file you save, when, on
+  which server, what changed (as a patch), and how the config check went,
+  including saves that were rolled back. Search it by server, path or changed
+  text, and compare any save's backup with the server's file now. "Change
+  history…" on a file shows just that file.
 - **Folder compare and sync**: local to server, server to local, or both ways
   (newer wins), by size and time and optionally contents. You see every copy
   and deletion first and can untick any of them; deletes are opt-in.
@@ -65,7 +78,8 @@ remote-editing loop, where they are weakest:
   through plain shell commands instead, and everything above still works.
 - **Editor**: syntax highlighting for nginx/Apache/sshd-style configs,
   INI/systemd/TOML, YAML, JSON, shell, `.env`, XML and Dockerfiles; line
-  numbers, find, Ctrl+S, and the save safety above. Or open the file in your
+  numbers, auto-indent, Tab/Shift+Tab on selections, find and replace (Ctrl+F,
+  Ctrl+H), go to line (Ctrl+G), Ctrl+S, and the save safety above. Or open the file in your
   own editor (VS Code, Notepad++, vim…): each save there is uploaded with the
   same checks.
 - **Snippets**: saved commands in folders with `{{placeholders}}` asked for on
@@ -111,6 +125,7 @@ Linux needs the usual desktop libraries at run time (X11 or Wayland, OpenGL,
 | Settings | `settings.toml` beside it |
 | Host keys you accepted | `known_hosts` in the data directory (`~/.ssh/known_hosts` is read but never written) |
 | Backups of edited files | `backups/<host>/<remote path>/<file>.<UTC time>` in the data directory, owner-only permissions |
+| Change journal | `journal.jsonl` in the data directory (one JSON line per save, owner-only permissions; the patches can contain secrets from config files) |
 | Snippets | `snippets.toml` in the config directory |
 | Terminal logs | `logs/<host>/` in the data directory, owner-only permissions |
 

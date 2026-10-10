@@ -5,9 +5,11 @@
 mod app;
 mod bridge;
 mod browser;
+mod compare;
 mod editor;
 mod forwards;
 mod highlight;
+mod journal_ui;
 mod local;
 mod multirun;
 mod session;

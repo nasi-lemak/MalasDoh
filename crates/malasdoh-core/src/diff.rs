@@ -159,11 +159,13 @@ pub fn merge3(base: &str, mine: &str, theirs: &str) -> Option<String> {
 
 /// A `diff -u` style patch, for copying into a ticket or change log.
 pub fn unified(old: &str, new: &str, path: &str) -> String {
-    TextDiff::from_lines(old, new)
-        .unified_diff()
-        .context_radius(3)
-        .header(&format!("a/{}", path.trim_start_matches('/')), &format!("b/{}", path.trim_start_matches('/')))
-        .to_string()
+    let p = path.trim_start_matches('/');
+    unified_labeled(old, new, &format!("a/{p}"), &format!("b/{p}"))
+}
+
+/// A `diff -u` style patch with the given `---`/`+++` names.
+pub fn unified_labeled(old: &str, new: &str, old_name: &str, new_name: &str) -> String {
+    TextDiff::from_lines(old, new).unified_diff().context_radius(3).header(old_name, new_name).to_string()
 }
 
 #[cfg(test)]

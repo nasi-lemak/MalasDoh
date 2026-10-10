@@ -9,6 +9,7 @@ use std::time::{Instant, SystemTime};
 
 use egui::RichText;
 use malasdoh_core::edit::{self, Access, EditSession, RemoteIo, SaveError, SaveOptions, SaveReport, SudoError};
+use malasdoh_core::journal::{self, Journal};
 use malasdoh_core::known_hosts::KnownHosts;
 use malasdoh_core::profile::Profile;
 use malasdoh_core::secrets::SecretStore;
@@ -20,6 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::bridge::{Events, Question, SessionId, UiPrompter};
 use crate::browser::{self, Browser, Transfer};
+use crate::compare::{CompareRequest, Side};
 use crate::editor::{Editor, EditorAction, State as EditorState};
 use crate::forwards::{ForwardMsg, Forwards};
 use crate::local::{LocalAction, LocalBrowser};
@@ -181,6 +183,10 @@ pub struct Session {
     pub cross_copy: Option<Vec<String>>,
     /// A transfer waiting for "replace existing?".
     overwrite: Option<Overwrite>,
+    /// A comparison to open; the app picks it up.
+    pub compare: Option<CompareRequest>,
+    /// A path whose change history to show; the app picks it up.
+    pub history: Option<String>,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -217,6 +223,8 @@ impl Session {
             local: None,
             cross_copy: None,
             overwrite: None,
+            compare: None,
+            history: None,
         }
     }
 
@@ -577,6 +585,11 @@ impl Session {
         Some(RemoteIo { fs: self.fs.clone()?, conn: self.conn.clone()?, access })
     }
 
+    /// For reading files: plain access, and sudo if it was set up already.
+    pub fn readers(&self) -> Option<(RemoteIo, Option<RemoteIo>)> {
+        Some((self.io(Access::Sftp)?, self.sudo.clone().and_then(|a| self.io(a))))
+    }
+
     pub fn navigate(&mut self, path: String, shared: &Shared) {
         let Some(fs) = self.fs.clone() else { return };
         self.browser.loading = true;
@@ -681,8 +694,85 @@ impl Session {
         let validation = if check && ed.check_enabled { ed.check.clone() } else { None };
         let opts = SaveOptions { local_backup_dir: Some(backup_root), remote_backup, force, validation };
         let (events, id) = (shared.events.clone(), self.id);
+        let journal = Journal::new(shared.paths.journal_file());
+        let entry = journal::Entry {
+            time: 0,
+            connection: self.profile.display_name(),
+            user: self.profile.user.clone(),
+            host: self.profile.host.clone(),
+            port: self.profile.port,
+            path: session.path.clone(),
+            outcome: journal::Outcome::Saved,
+            sudo: ed.access.is_sudo(),
+            added: 0,
+            removed: 0,
+            check: None,
+            local_backup: None,
+            remote_backup: None,
+            patch: String::new(),
+            truncated: false,
+        };
         shared.rt.spawn(async move {
-            let result = match io.save(&mut session, &text, &opts).await {
+            let saved = io.save(&mut session, &text, &opts).await;
+            // Record what happened to the server's file, then report.
+            let record = match &saved {
+                Ok(report) => Some(
+                    journal::Entry {
+                        check: report.check.as_ref().map(|c| {
+                            let how = match c.outcome {
+                                CheckOutcome::Passed { .. } => "passed",
+                                CheckOutcome::Unavailable { .. } => "not installed",
+                            };
+                            format!("{}: {how}", c.rule)
+                        }),
+                        local_backup: report.local_backup.clone(),
+                        remote_backup: report.remote_backup.clone(),
+                        ..entry
+                    }
+                    .with_change(&report.previous, &text),
+                ),
+                // After a rollback the session is based on what is back on
+                // the server.
+                Err(e) => match e.downcast_ref::<SaveError>() {
+                    Some(SaveError::ValidationFailed { rule, rolled_back: true, .. }) => Some(
+                        journal::Entry {
+                            outcome: journal::Outcome::RolledBack,
+                            check: Some(format!("{rule}: failed")),
+                            ..entry
+                        }
+                        .with_change(&session.base_text, &text),
+                    ),
+                    Some(SaveError::RollbackFailed { rule, backup, .. }) => Some(
+                        journal::Entry {
+                            outcome: journal::Outcome::RollbackFailed,
+                            check: Some(format!("{rule}: failed")),
+                            local_backup: backup.clone(),
+                            ..entry
+                        }
+                        .with_change(&session.base_text, &text),
+                    ),
+                    Some(SaveError::VerifyFailed { backup }) => Some(
+                        journal::Entry {
+                            outcome: journal::Outcome::VerifyFailed,
+                            local_backup: backup.clone(),
+                            ..entry
+                        }
+                        .with_change(&session.base_text, &text),
+                    ),
+                    _ => None,
+                },
+            };
+            if let Some(mut r) = record {
+                r.time = journal::now();
+                if let Err(e) = journal.append(&r) {
+                    tracing::warn!("could not write the change journal: {e:#}");
+                    let msg = format!(
+                        "The change journal could not be written ({e:#}); the save itself is reported in the editor."
+                    );
+                    events.session(id, SessionMsg::OpDone { result: Err(msg) });
+                }
+            }
+            let result = match saved {
                 Ok(report) => Ok((session, report)),
                 Err(e) => Err(match e.downcast_ref::<SaveError>() {
                     Some(SaveError::Conflict { current }) => SaveFailure::Conflict(current.clone()),
@@ -850,6 +940,13 @@ impl Session {
                 });
             }
             A::CopyToServer(paths) => self.cross_copy = Some(paths),
+            A::Compare(paths) => {
+                self.compare = Some(match paths.as_slice() {
+                    [a, b] => CompareRequest::Pair(Side::remote(self, a), Side::remote(self, b)),
+                    _ => CompareRequest::Pick { path: paths.into_iter().next().unwrap_or_default() },
+                })
+            }
+            A::History(path) => self.history = Some(path),
             A::Download(paths) => {
                 // With the local pane open, download into its folder.
                 let dir = match &self.local {
@@ -1105,6 +1202,7 @@ impl Session {
         let (path, list) = self.backups_view.as_ref()?;
         let mut close = false;
         let mut restore = None;
+        let mut compare = None;
         egui::Modal::new(egui::Id::new(("backups", self.id))).show(ctx, |ui| {
             ui.heading(format!("Local backups of {path}"));
             ui.label(RichText::new("Newest first. Times are UTC.").weak());
@@ -1122,6 +1220,13 @@ impl Session {
                         {
                             restore = Some((path.clone(), b.clone()));
                         }
+                        if ui
+                            .small_button("Compare")
+                            .on_hover_text("Compare this backup with the file on the server now")
+                            .clicked()
+                        {
+                            compare = Some(b.clone());
+                        }
                         if ui.small_button("Copy path").clicked() {
                             ui.ctx().copy_text(b.display().to_string());
                         }
@@ -1132,6 +1237,11 @@ impl Session {
                 close = true;
             }
         });
+        if let Some(b) = compare {
+            let current = Side::remote(self, path);
+            self.compare = Some(CompareRequest::Pair(Side::Local(b), current));
+            close = true;
+        }
         if close || restore.is_some() {
             self.backups_view = None;
         }

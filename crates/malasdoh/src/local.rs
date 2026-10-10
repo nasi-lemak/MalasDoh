@@ -65,6 +65,10 @@ impl LocalBrowser {
         b
     }
 
+    pub fn selection(&self) -> &[PathBuf] {
+        &self.selected
+    }
+
     pub fn navigate(&mut self, to: PathBuf) {
         match std::fs::read_dir(&to) {
             Ok(_) => {

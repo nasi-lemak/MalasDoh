@@ -338,6 +338,7 @@ async fn safe_edit_round_trip() {
 
     assert_eq!(std::fs::read(&path).unwrap(), b"listen 8080\r\nworkers 2\r\n", "line endings preserved");
     assert_eq!(mode_of(&path), 0o640, "permissions preserved");
+    assert_eq!(report.previous, "listen 80\nworkers 2\n", "what was replaced, for the journal");
     assert_eq!(std::fs::read(report.local_backup.unwrap()).unwrap(), b"listen 80\r\nworkers 2\r\n");
     let remote_backup = report.remote_backup.unwrap();
     assert!(remote_backup.starts_with(&format!("{path}.bak-")), "{remote_backup}");
@@ -358,6 +359,7 @@ async fn safe_edit_round_trip() {
     let report =
         io.save(&mut s, "listen 8080\nworkers 4\n", &SaveOptions { force: true, ..opts.clone() }).await.unwrap();
     assert_eq!(std::fs::read(report.local_backup.unwrap()).unwrap(), b"listen 9090\r\nworkers 2\r\n");
+    assert_eq!(report.previous, "listen 9090\nworkers 2\n", "a forced save records their version as replaced");
     assert_eq!(io.remote_state(&s).await.unwrap(), RemoteState::Unchanged);
 
     std::fs::remove_file(&path).unwrap();

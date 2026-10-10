@@ -14,6 +14,10 @@ pub enum Action {
     OpenSync,
     /// Copy to a folder on another connected server.
     CopyToServer(Vec<String>),
+    /// Compare two files, or one with something the user picks.
+    Compare(Vec<String>),
+    /// Show this file's saves in the change journal.
+    History(String),
     Edit {
         path: String,
         sudo: bool,
@@ -329,6 +333,21 @@ impl Browser {
                 }
                 if ui.button("Local backups…").clicked() {
                     actions.push(Action::ShowBackups(e.path.clone()));
+                    ui.close();
+                }
+                if ui.button("Change history…").on_hover_text("Saves of this file in the change journal").clicked() {
+                    actions.push(Action::History(e.path.clone()));
+                    ui.close();
+                }
+                ui.separator();
+                if self.selected.len() == 2 {
+                    if ui.button("Compare the two selected files").clicked() {
+                        actions.push(Action::Compare(self.selected.clone()));
+                        ui.close();
+                    }
+                } else if ui.button("Compare with…").on_hover_text("Another server, a local file or a backup").clicked()
+                {
+                    actions.push(Action::Compare(vec![e.path.clone()]));
                     ui.close();
                 }
             }

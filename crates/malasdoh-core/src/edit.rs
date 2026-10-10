@@ -126,6 +126,9 @@ pub struct SaveReport {
     pub local_backup: Option<PathBuf>,
     pub remote_backup: Option<String>,
     pub check: Option<CheckReport>,
+    /// The text that was replaced (what the server had just before), for the
+    /// change journal. Lossy if it was not valid text.
+    pub previous: String,
 }
 
 #[derive(Debug, Clone)]
@@ -334,7 +337,9 @@ impl RemoteIo {
         s.base_text = text::decode(&new_bytes).map(|(t, _)| t).unwrap_or_else(|_| new_text.to_string());
         s.base_hash = sha256(&new_bytes);
         s.size = new_bytes.len() as u64;
-        Ok(SaveReport { bytes: new_bytes.len(), local_backup, remote_backup, check })
+        let previous =
+            text::decode(&original).map(|(t, _)| t).unwrap_or_else(|_| String::from_utf8_lossy(&original).into());
+        Ok(SaveReport { bytes: new_bytes.len(), local_backup, remote_backup, check, previous })
     }
 
     /// Run a shell command on the server, through sudo when editing as root.

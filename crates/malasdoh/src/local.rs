@@ -116,7 +116,7 @@ impl LocalBrowser {
         {
             use std::os::windows::fs::MetadataExt;
             const HIDDEN: u32 = 0x2;
-            return std::fs::metadata(path).map(|m| m.file_attributes() & HIDDEN != 0).unwrap_or(false);
+            std::fs::metadata(path).is_ok_and(|m| m.file_attributes() & HIDDEN != 0)
         }
         #[cfg(not(windows))]
         {

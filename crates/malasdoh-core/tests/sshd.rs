@@ -831,3 +831,32 @@ fn mode_of(path: &str) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
 }
+
+#[tokio::test]
+async fn generated_key_is_installed_then_logs_in() {
+    use malasdoh_core::keys::{self, Installed};
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("id_new");
+    let line = keys::generate(&key, "test@malasdoh", "").unwrap();
+
+    // The test sshd reads keys from its own folder, never ~/.ssh.
+    let file = env.sshd.dir.path().join("authorized_keys");
+    // A file without a final newline must not get the key glued on.
+    let mut existing = std::fs::read(&file).unwrap();
+    while existing.last() == Some(&b'\n') {
+        existing.pop();
+    }
+    std::fs::write(&file, &existing).unwrap();
+    let target = file.display().to_string();
+    assert_eq!(keys::install(&conn, &line, Some(&target)).await.unwrap(), Installed::Added);
+    assert_eq!(keys::install(&conn, &line, Some(&target)).await.unwrap(), Installed::AlreadyThere);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text.lines().filter(|l| l.contains("test@malasdoh")).count(), 1);
+    assert!(text.ends_with(&format!("\n{line}\n")), "{text:?}");
+
+    let profile = Profile { auth: AuthMethod::Key { path: key.display().to_string() }, ..env.profile() };
+    let conn2 = ssh::connect(vec![profile], &env.ctx(TestPrompter::accepting())).await.unwrap();
+    assert_eq!(conn2.exec("echo new-key-ok", None).await.unwrap().stdout, b"new-key-ok\n");
+}

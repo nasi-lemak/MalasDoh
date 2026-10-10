@@ -934,6 +934,10 @@ impl Session {
         }
     }
 
+    pub fn connection(&self) -> Option<Arc<Connection>> {
+        self.conn.clone()
+    }
+
     pub fn fs(&self) -> Option<RemoteFs> {
         self.fs.clone()
     }

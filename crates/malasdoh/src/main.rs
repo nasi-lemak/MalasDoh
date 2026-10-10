@@ -10,6 +10,7 @@ mod editor;
 mod forwards;
 mod highlight;
 mod journal_ui;
+mod keys_ui;
 mod local;
 mod multirun;
 mod restore;

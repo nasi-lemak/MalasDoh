@@ -39,6 +39,8 @@ pub enum EventKind {
     Multi(crate::multirun::MultiMsg),
     /// For the compare windows; the session id is not used.
     Compare(crate::compare::CompareMsg),
+    /// For the SSH keys window; the session id is not used.
+    Keys(crate::keys_ui::KeysMsg),
 }
 
 #[derive(Clone)]

@@ -34,7 +34,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Platform-only code (registry import, Windows drives) is linted here.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --lib --bins
       - run: cargo build --release -p malasdoh
       - uses: actions/upload-artifact@v4

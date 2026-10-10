@@ -5,7 +5,9 @@
 pub mod diff;
 pub mod edit;
 pub mod forward;
+pub mod import;
 pub mod journal;
+pub mod keys;
 pub mod known_hosts;
 pub mod paths;
 pub mod profile;

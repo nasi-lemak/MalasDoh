@@ -47,6 +47,13 @@ remote-editing loop, where they are weakest:
   its SHA256 fingerprint for you to confirm. A *changed* or `@revoked` key is
   refused outright and never offered as "accept anyway". Host certificates
   signed by a `@cert-authority` you trust are accepted without a prompt.
+- **SSH keys** (Tools → SSH keys): make an Ed25519 key (with a passphrase if
+  you like), put any key on a server like `ssh-copy-id` does (owner-only
+  permissions, never added twice), then switch the connection to log in with
+  it.
+- **Import** connections from `~/.ssh/config`, PuTTY (registry on Windows,
+  `~/.putty/sessions` elsewhere) and WinSCP (registry or `WinSCP.ini`, with
+  its folders). Saved passwords are not imported.
 - **Certificates for you**: `id_ed25519-cert.pub` next to your key, or a
   certificate in your agent, is used automatically.
 - **Terminal**: xterm-256color and truecolor, full-screen programs (vim, nano,

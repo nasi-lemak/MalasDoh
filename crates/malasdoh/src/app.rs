@@ -15,6 +15,7 @@ use malasdoh_core::{AppPaths, ssh_config};
 use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId};
 use crate::compare::Compares;
 use crate::journal_ui::JournalWindow;
+use crate::keys_ui::KeysWindow;
 use crate::multirun::MultiRun;
 use crate::restore::LastSession;
 use crate::session::{ConnState, Pane, Session, Shared};
@@ -50,6 +51,7 @@ pub struct App {
     compares: Compares,
     journal: Journal,
     journal_win: JournalWindow,
+    keys_win: KeysWindow,
     /// What was open when MalasDoh last closed, until it is reopened.
     last: LastSession,
     /// The last state written to disk, so it is only written when it changes.
@@ -235,6 +237,7 @@ impl App {
             compares: Compares::default(),
             journal: Journal::new(paths_journal),
             journal_win: JournalWindow::default(),
+            keys_win: KeysWindow::default(),
             last: LastSession::default(),
             last_written: String::new(),
             last_persist: Instant::now(),
@@ -324,6 +327,10 @@ impl App {
                     self.compares.handle(m);
                     continue;
                 }
+                AppEvent { kind: EventKind::Keys(m), .. } => {
+                    self.keys_win.handle(m, &self.sessions);
+                    continue;
+                }
                 ev => ev,
             };
             if ev.session == MULTI_RUN {
@@ -343,9 +350,47 @@ impl App {
                 }
                 EventKind::Question(q) => s.questions.push_back(q),
                 EventKind::Session(msg) => s.handle(msg, &self.shared, &self.settings),
-                EventKind::Multi(_) | EventKind::Compare(_) => {}
+                EventKind::Multi(_) | EventKind::Compare(_) | EventKind::Keys(_) => {}
             }
         }
+    }
+
+    /// Add imported connections, skipping ones already here (same user,
+    /// host and port), so importing twice is harmless.
+    fn add_imported(&mut self, found: anyhow::Result<Vec<Profile>>, from: &str) {
+        let found = match found {
+            Ok(f) => f,
+            Err(e) => return self.notify(format!("Could not import from {from}: {e:#}"), true),
+        };
+        if found.is_empty() {
+            return self.notify(format!("No saved SSH sessions found in {from}."), false);
+        }
+        let (mut added, mut skipped) = (0, 0);
+        let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
+        for mut p in found {
+            let exists = self
+                .profiles
+                .profiles
+                .iter()
+                .any(|e| e.host == p.host && e.port == p.port && (e.user == p.user || p.user.is_empty()));
+            if exists {
+                skipped += 1;
+                continue;
+            }
+            if p.user.is_empty() {
+                p.user = user.clone();
+            }
+            if self.profiles.upsert(p).is_ok() {
+                added += 1;
+            }
+        }
+        self.save_profiles();
+        let mut msg = format!("Imported {added} connection(s) from {from}.");
+        if skipped > 0 {
+            msg.push_str(&format!(" {skipped} were already here."));
+        }
+        msg.push_str(" Saved passwords are not imported.");
+        self.notify(msg, false);
     }
 
     fn import_ssh_config(&mut self) {
@@ -396,6 +441,25 @@ impl App {
                     self.import_ssh_config();
                     ui.close();
                 }
+                if ui.button("Import from PuTTY").clicked() {
+                    let found = malasdoh_core::import::putty();
+                    self.add_imported(found, "PuTTY");
+                    ui.close();
+                }
+                if ui.button("Import from WinSCP").on_hover_text("Its registry settings or WinSCP.ini").clicked() {
+                    let found = malasdoh_core::import::winscp();
+                    self.add_imported(found, "WinSCP");
+                    ui.close();
+                }
+                if ui.button("Import a WinSCP.ini file…").clicked() {
+                    if let Some(f) = rfd::FileDialog::new().add_filter("WinSCP.ini", &["ini"]).pick_file() {
+                        let found = std::fs::read_to_string(&f)
+                            .map(|t| malasdoh_core::import::parse_winscp_ini(&t))
+                            .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()));
+                        self.add_imported(found, "WinSCP.ini");
+                    }
+                    ui.close();
+                }
                 ui.separator();
                 if ui.button("Settings…").clicked() {
                     self.show_settings = true;
@@ -417,6 +481,14 @@ impl App {
                 }
                 if ui.button("Snippets…").clicked() {
                     self.show_snippets = true;
+                    ui.close();
+                }
+                if ui
+                    .button("SSH keys…")
+                    .on_hover_text("Make a key, and put it on a server (like ssh-copy-id)")
+                    .clicked()
+                {
+                    self.keys_win.show(self.active);
                     ui.close();
                 }
                 if ui
@@ -1437,6 +1509,16 @@ impl eframe::App for App {
             self.compares.open(a, b, &self.sessions, &self.shared);
         }
         self.compares.ui(&ctx, &self.sessions, &self.shared);
+        if let Some((id, key)) = self.keys_win.ui(&ctx, &self.sessions, &self.shared)
+            && let Some(mut p) = self.profiles.get(id).cloned()
+        {
+            p.auth = AuthMethod::Key { path: key.display().to_string() };
+            let name = p.display_name();
+            if self.profiles.upsert(p).is_ok() {
+                self.save_profiles();
+                self.notify(format!("{name} now logs in with {}", key.display()), false);
+            }
+        }
         self.question_ui(&ctx);
 
         if self.last_persist.elapsed() > Duration::from_secs(5) {

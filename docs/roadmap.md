@@ -22,6 +22,7 @@
 - Compare files across servers, with local files and with backups
 - Change journal of every save, with patches, check results and rollbacks
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line
+- SSH key generation and install (ssh-copy-id); import from PuTTY and WinSCP
 - Reopen last session; startup command per connection; browser follows the
   terminal's folder
 - Snippets, and running commands on many hosts
@@ -38,7 +39,6 @@
 4. Optional SFTP "edit as root" through `sudo sftp-server` where allowed,
    which is faster than the current sudo + cat path for large trees.
 5. Mouse reporting in the terminal (for htop/mc mouse use).
-6. Import sessions from PuTTY (Windows registry) and WinSCP (`WinSCP.ini`).
 
 ## Known limitations
 

@@ -235,6 +235,8 @@ pub struct Session {
     pub compare: Option<CompareRequest>,
     /// A path whose change history to show; the app picks it up.
     pub history: Option<String>,
+    /// "Edit on many servers" asked for this file (as root?).
+    pub edit_many: Option<(String, bool)>,
     /// What to reopen once connected (from the last run).
     pub restore: Option<crate::restore::Tab>,
     pub logs: Vec<LogView>,
@@ -294,6 +296,7 @@ impl Session {
             overwrite: None,
             compare: None,
             history: None,
+            edit_many: None,
             restore: None,
             logs: Vec::new(),
             find: FindWindow::default(),
@@ -997,7 +1000,7 @@ impl Session {
     }
 
     /// A journal entry naming this connection and `path`, to be filled in.
-    fn journal_entry(profile: &Profile, path: &str, sudo: bool) -> journal::Entry {
+    pub(crate) fn journal_entry(profile: &Profile, path: &str, sudo: bool) -> journal::Entry {
         journal::Entry {
             time: 0,
             connection: profile.display_name(),
@@ -1231,6 +1234,7 @@ impl Session {
                 })
             }
             A::History(path) => self.history = Some(path),
+            A::EditMany(path) => self.edit_many = Some((path, self.browser.root)),
             A::Chown { paths, owner, recursive, sudo } => match commands::chown(&paths, &owner, recursive) {
                 Ok(cmd) => self.run_op(cmd, "change the owner", format!("Owner set to {owner}"), sudo, shared),
                 Err(e) => self.notify(format!("{e:#}"), true),

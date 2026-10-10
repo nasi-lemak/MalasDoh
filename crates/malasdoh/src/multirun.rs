@@ -162,50 +162,7 @@ impl MultiRun {
             |ui| {
                 let busy = self.running();
                 egui::Panel::left("multi-hosts").resizable(true).default_size(240.0).show(ui, |ui| {
-                    ui.label(RichText::new("Hosts").strong());
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(f32::INFINITY),
-                    );
-                    egui::ScrollArea::vertical().id_salt("multi-host-list").show(ui, |ui| {
-                        for group in profiles.groups() {
-                            let members: Vec<&Profile> = profiles
-                                .profiles
-                                .iter()
-                                .filter(|p| p.group.trim() == group)
-                                .filter(|p| {
-                                    self.filter.is_empty()
-                                        || p.display_name().to_lowercase().contains(&self.filter.to_lowercase())
-                                })
-                                .collect();
-                            if members.is_empty() {
-                                continue;
-                            }
-                            let all = members.iter().all(|p| self.selected.contains(&p.id));
-                            let mut all_now = all;
-                            let label = if group.is_empty() { "Ungrouped".to_string() } else { group.clone() };
-                            if ui.checkbox(&mut all_now, RichText::new(label).strong()).changed() {
-                                for p in &members {
-                                    if all_now {
-                                        self.selected.insert(p.id);
-                                    } else {
-                                        self.selected.remove(&p.id);
-                                    }
-                                }
-                            }
-                            ui.indent(("g", &group), |ui| {
-                                for p in members {
-                                    let mut on = self.selected.contains(&p.id);
-                                    if ui.checkbox(&mut on, p.display_name()).on_hover_text(p.destination()).changed() {
-                                        if on {
-                                            self.selected.insert(p.id);
-                                        } else {
-                                            self.selected.remove(&p.id);
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    });
+                    host_picker(ui, profiles, &mut self.selected, &mut self.filter);
                 });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Command").strong());
@@ -383,4 +340,52 @@ impl MultiRun {
             self.selected.insert(id);
         }
     }
+}
+
+/// Hosts by group with checkboxes (a group's box ticks all its members).
+pub fn host_picker(
+    ui: &mut egui::Ui,
+    profiles: &ProfileStore,
+    selected: &mut BTreeSet<ProfileId>,
+    filter: &mut String,
+) {
+    ui.label(RichText::new("Hosts").strong());
+    ui.add(egui::TextEdit::singleline(filter).hint_text("Filter").desired_width(f32::INFINITY));
+    egui::ScrollArea::vertical().id_salt("multi-host-list").show(ui, |ui| {
+        for group in profiles.groups() {
+            let members: Vec<&Profile> = profiles
+                .profiles
+                .iter()
+                .filter(|p| p.group.trim() == group)
+                .filter(|p| filter.is_empty() || p.display_name().to_lowercase().contains(&filter.to_lowercase()))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let all = members.iter().all(|p| selected.contains(&p.id));
+            let mut all_now = all;
+            let label = if group.is_empty() { "Ungrouped".to_string() } else { group.clone() };
+            if ui.checkbox(&mut all_now, RichText::new(label).strong()).changed() {
+                for p in &members {
+                    if all_now {
+                        selected.insert(p.id);
+                    } else {
+                        selected.remove(&p.id);
+                    }
+                }
+            }
+            ui.indent(("g", &group), |ui| {
+                for p in members {
+                    let mut on = selected.contains(&p.id);
+                    if ui.checkbox(&mut on, p.display_name()).on_hover_text(p.destination()).changed() {
+                        if on {
+                            selected.insert(p.id);
+                        } else {
+                            selected.remove(&p.id);
+                        }
+                    }
+                }
+            });
+        }
+    });
 }

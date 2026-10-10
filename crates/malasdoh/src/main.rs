@@ -14,6 +14,7 @@ mod journal_ui;
 mod keys_ui;
 mod local;
 mod logview;
+mod multiedit;
 mod multirun;
 mod patch_ui;
 mod restore;

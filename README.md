@@ -132,6 +132,16 @@ remote-editing loop, where they are weakest:
   use; insert into the terminal, run, or send to many hosts.
 - **Run on many hosts**: pick hosts or whole groups, run a command in parallel,
   and compare exit codes and output side by side; retry the failures.
+- **Edit a file on many servers** (Tools menu, or "Edit on many servers…" on a
+  file): load the file from one server, change it, and Preview shows what that
+  does to each server's own copy. "Apply my change" carries only the lines you
+  changed, so each server keeps its own differences (names, sizes); a copy
+  that does not match where the change goes is left alone, and one placed by
+  the changed lines alone (its neighbours differ) is marked for a closer look.
+  "Same content everywhere" sends the whole text. Saving goes server by server
+  with the usual conflict check, backup, config check and journal entry,
+  stopping at the first failure unless told to keep going. As root it uses
+  passwordless sudo only.
 - **Resilience**: a dropped connection is detected; open files keep your
   unsaved edits, and Reconnect picks up where you were. Unsaved edits are
   also written to disk every few seconds, so after a crash, a power cut or

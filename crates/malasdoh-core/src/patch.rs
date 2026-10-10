@@ -239,12 +239,23 @@ fn find_block(have: &[&str], want: &[&str], near: usize) -> Option<usize> {
 
 /// Apply one file's hunks to `text`.
 pub fn apply(text: &str, fp: &FilePatch) -> Result<Applied, HunkFailed> {
+    apply_with(text, fp, false)
+}
+
+/// Like [`apply`], but each hunk's lines (context and removed) must occur
+/// exactly once in `text`, wherever that is. For patches made with little
+/// or no context, where "nearest to the old line number" is not safe enough.
+pub fn apply_unique(text: &str, fp: &FilePatch) -> Result<Applied, HunkFailed> {
+    apply_with(text, fp, true)
+}
+
+fn apply_with(text: &str, fp: &FilePatch, unique: bool) -> Result<Applied, HunkFailed> {
     let total = fp.hunks.len();
-    match try_apply(text, &fp.hunks, false) {
+    match try_apply(text, &fp.hunks, false, unique) {
         Ok(t) => Ok(Applied::Changed(t)),
         Err(e) => {
             // Already there? Then the reverse applies cleanly.
-            if try_apply(text, &fp.hunks, true).is_ok() {
+            if try_apply(text, &fp.hunks, true, unique).is_ok() {
                 Ok(Applied::AlreadyApplied)
             } else {
                 Err(HunkFailed { total, ..e })
@@ -253,7 +264,17 @@ pub fn apply(text: &str, fp: &FilePatch) -> Result<Applied, HunkFailed> {
     }
 }
 
-fn try_apply(text: &str, hunks: &[Hunk], reverse: bool) -> Result<String, HunkFailed> {
+/// Where `want` occurs in `have`, if it occurs exactly once.
+fn find_unique(have: &[&str], want: &[&str]) -> Option<usize> {
+    if want.is_empty() || want.len() > have.len() {
+        return None;
+    }
+    let mut hits = (0..=have.len() - want.len()).filter(|&at| have[at..at + want.len()] == *want);
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
+}
+
+fn try_apply(text: &str, hunks: &[Hunk], reverse: bool, unique: bool) -> Result<String, HunkFailed> {
     let have: Vec<&str> = text.split_inclusive('\n').collect();
     let mut out: Vec<String> = Vec::with_capacity(have.len() + 16);
     let mut pos = 0; // next line of `have` not yet copied
@@ -263,7 +284,11 @@ fn try_apply(text: &str, hunks: &[Hunk], reverse: bool) -> Result<String, HunkFa
         let expected = ((h.old_start.max(1) - 1) as isize + shift).max(pos as isize) as usize;
         let fail = HunkFailed { hunk: n + 1, total: hunks.len(), line: h.old_start };
         // Only search forward of what earlier hunks used.
-        let at = find_block(&have[pos..], &old, expected.saturating_sub(pos)).map(|a| a + pos).ok_or(fail)?;
+        let at = if unique {
+            find_unique(&have, &old).filter(|&a| a >= pos).ok_or(fail)?
+        } else {
+            find_block(&have[pos..], &old, expected.saturating_sub(pos)).map(|a| a + pos).ok_or(fail)?
+        };
         out.extend(have[pos..at].iter().map(|s| s.to_string()));
         out.extend(new.iter().map(|s| s.to_string()));
         shift = at as isize - (h.old_start.max(1) - 1) as isize;
@@ -343,5 +368,13 @@ index 1111..2222 100644
         // New file: applies to empty text.
         let f = &parse(PATCH).unwrap()[1];
         assert_eq!(apply("", f).unwrap(), Applied::Changed("Managed by ops\n".into()));
+    }
+
+    #[test]
+    fn unique_needs_exactly_one_match() {
+        let fp = parse("--- a/x\n+++ b/x\n@@ -2,1 +2,1 @@\n-timeout 30\n+timeout 60\n").unwrap().remove(0);
+        assert_eq!(apply_unique("a\ntimeout 30\nb\n", &fp), Ok(Applied::Changed("a\ntimeout 60\nb\n".into())));
+        assert!(apply_unique("timeout 30\nb\ntimeout 30\n", &fp).is_err());
+        assert_eq!(apply_unique("a\ntimeout 60\n", &fp), Ok(Applied::AlreadyApplied));
     }
 }

@@ -18,6 +18,7 @@ use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId}
 use crate::compare::Compares;
 use crate::journal_ui::JournalWindow;
 use crate::keys_ui::KeysWindow;
+use crate::multiedit::MultiEdit;
 use crate::multirun::MultiRun;
 use crate::restore::LastSession;
 use crate::session::{ConnState, Pane, Session, Shared};
@@ -47,6 +48,7 @@ pub struct App {
     show_snippets: bool,
     pending_snippet: Option<PendingSnippet>,
     multi: MultiRun,
+    multi_edit: MultiEdit,
     show_sidebar: bool,
     last_local_dir: Option<std::path::PathBuf>,
     cross: Option<CrossCopy>,
@@ -240,6 +242,7 @@ impl App {
             show_snippets: false,
             pending_snippet: None,
             multi: MultiRun::default(),
+            multi_edit: MultiEdit::default(),
             show_sidebar: true,
             last_local_dir: None,
             cross: None,
@@ -350,6 +353,7 @@ impl App {
                 match ev.kind {
                     EventKind::Question(q) => self.multi.questions.push_back(q),
                     EventKind::Multi(m) => self.multi.handle(m),
+                    EventKind::MultiEdit(m) => self.multi_edit.handle(m),
                     _ => {}
                 }
                 continue;
@@ -363,7 +367,7 @@ impl App {
                 }
                 EventKind::Question(q) => s.questions.push_back(q),
                 EventKind::Session(msg) => s.handle(msg, &self.shared, &self.settings),
-                EventKind::Multi(_) | EventKind::Compare(_) | EventKind::Keys(_) => {}
+                EventKind::Multi(_) | EventKind::MultiEdit(_) | EventKind::Compare(_) | EventKind::Keys(_) => {}
             }
         }
     }
@@ -499,6 +503,14 @@ impl App {
             ui.menu_button("Tools", |ui| {
                 if ui.button("Run on many hosts…").clicked() {
                     self.multi.open = true;
+                    ui.close();
+                }
+                if ui
+                    .button("Edit a file on many servers…")
+                    .on_hover_text("Change it once, check what it does on each server, then save to all")
+                    .clicked()
+                {
+                    self.multi_edit.open = true;
                     ui.close();
                 }
                 if ui.button("Snippets…").clicked() {
@@ -842,6 +854,9 @@ impl App {
         }
         let compare = s.compare.take();
         let bookmarks = std::mem::take(&mut s.bookmarks_changed).then(|| s.profile.bookmarks.clone());
+        if let Some((path, sudo)) = s.edit_many.take() {
+            self.multi_edit.show_with(path, pid, sudo);
+        }
         if let Some(path) = s.history.take() {
             self.journal_win.show(&self.journal, Some(path));
         }
@@ -1775,6 +1790,7 @@ impl eframe::App for App {
         self.settings_ui(&ctx);
         self.snippet_windows_ui(&ctx);
         self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);
+        self.multi_edit.ui(&ctx, &self.profiles, &self.shared, &self.settings.validation_rules);
         if let Some((a, b)) = self.journal_win.ui(&ctx, &self.journal, &self.sessions) {
             self.compares.open(a, b, &self.sessions, &self.shared);
         }

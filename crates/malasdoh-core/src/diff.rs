@@ -163,6 +163,16 @@ pub fn unified(old: &str, new: &str, path: &str) -> String {
     unified_labeled(old, new, &format!("a/{p}"), &format!("b/{p}"))
 }
 
+/// Like [`unified`], with `context` lines around each change.
+pub fn unified_context(old: &str, new: &str, path: &str, context: usize) -> String {
+    let p = path.trim_start_matches('/');
+    TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(context)
+        .header(&format!("a/{p}"), &format!("b/{p}"))
+        .to_string()
+}
+
 /// A `diff -u` style patch with the given `---`/`+++` names.
 pub fn unified_labeled(old: &str, new: &str, old_name: &str, new_name: &str) -> String {
     TextDiff::from_lines(old, new).unified_diff().context_radius(3).header(old_name, new_name).to_string()

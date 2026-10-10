@@ -37,6 +37,7 @@ pub enum EventKind {
     Question(Question),
     Session(crate::session::SessionMsg),
     Multi(crate::multirun::MultiMsg),
+    MultiEdit(crate::multiedit::EditMsg),
     /// For the compare windows; the session id is not used.
     Compare(crate::compare::CompareMsg),
     /// For the SSH keys window; the session id is not used.

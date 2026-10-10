@@ -19,6 +19,8 @@ pub enum Action {
     Compare(Vec<String>),
     /// Show this file's saves in the change journal.
     History(String),
+    /// Change this file on several servers at once.
+    EditMany(String),
     Edit {
         path: String,
         sudo: bool,
@@ -478,6 +480,14 @@ impl Browser {
                 }
                 if ui.button("Edit as root (sudo)").clicked() {
                     actions.push(Action::Edit { path: e.path.clone(), sudo: true });
+                    ui.close();
+                }
+                if ui
+                    .button("Edit on many servers…")
+                    .on_hover_text("Make the same change to this file on other servers too")
+                    .clicked()
+                {
+                    actions.push(Action::EditMany(e.path.clone()));
                     ui.close();
                 }
                 if ui.button("Open in external editor").clicked() {

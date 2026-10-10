@@ -737,6 +737,10 @@ impl App {
                             format!("You already trust a different key type for this host ({}). The server may have added a new key, or this may not be the same server.", p.other_keys.join(", ")),
                         );
                     }
+                    if let Some(w) = &p.warning {
+                        ui.add_space(4.0);
+                        ui.colored_label(ui.visuals().warn_fg_color, w);
+                    }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Trust and connect").clicked() {

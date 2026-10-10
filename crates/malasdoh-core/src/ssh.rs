@@ -36,6 +36,8 @@ pub struct HostKeyPrompt {
     /// Key types already trusted for this host, if any (a server that added a
     /// new key type looks like this).
     pub other_keys: Vec<String>,
+    /// Something the user should know, e.g. why a host certificate was refused.
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,11 +165,21 @@ impl client::Handler for Client {
     }
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        let mut warning = None;
         let key = match key {
             PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
-            // We do not ask for host certificates (see `config_for`), but if one
-            // arrives, judge its key like any other.
-            PublicKeyOrCertificate::Certificate(cert) => PublicKey::new(cert.public_key().clone(), ""),
+            PublicKeyOrCertificate::Certificate(cert) => {
+                // A valid certificate from a trusted CA is enough on its own;
+                // otherwise judge the key inside it like any other.
+                match self.known_hosts.check_certificate(&self.host, self.port, cert) {
+                    Ok(()) => {
+                        *self.verdict.lock().unwrap() = Some(Verdict::Ok);
+                        return Ok(true);
+                    }
+                    Err(why) => warning = Some(format!("The server's host certificate was not accepted: {why}.")),
+                }
+                PublicKey::new(cert.public_key().clone(), "")
+            }
         };
         let presented = fingerprint(&key);
         let verdict = match self.known_hosts.check(&self.host, self.port, &key) {
@@ -179,6 +191,7 @@ impl client::Handler for Client {
                     algorithm: key.algorithm().to_string(),
                     fingerprint: presented,
                     other_keys,
+                    warning,
                 };
                 if (self.confirm)(prompt).await {
                     if let Err(e) = self.known_hosts.learn(&self.host, self.port, &key) {
@@ -216,13 +229,19 @@ fn same_family(a: &Algorithm, b: &Algorithm) -> bool {
     }
 }
 
-fn config_for(known: &[Algorithm]) -> Arc<client::Config> {
+fn config_for(known: &[Algorithm], want_certificates: bool) -> Arc<client::Config> {
     // Offer key types we already trust for this host first, as OpenSSH does,
     // so a server with several host keys presents the one we can verify.
     let mut keys: Vec<Algorithm> = Preferred::DEFAULT.key.to_vec();
     keys.sort_by_key(|a| !known.iter().any(|k| same_family(k, a)));
     Arc::new(client::Config {
-        preferred: Preferred { key: Cow::Owned(keys), host_key_certificates: Cow::Borrowed(&[]), ..Preferred::DEFAULT },
+        // Ask for host certificates only when a CA is trusted for this host;
+        // otherwise a certificate would just be judged as its plain key.
+        preferred: Preferred {
+            host_key_certificates: if want_certificates { Cow::Owned(keys.clone()) } else { Cow::Borrowed(&[]) },
+            key: Cow::Owned(keys),
+            ..Preferred::DEFAULT
+        },
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
         nodelay: true,
@@ -268,7 +287,10 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
             verdict: verdict.clone(),
             remote_forwards: remote_forwards.clone(),
         };
-        let config = config_for(&ctx.known_hosts.known_algorithms(&hop.host, hop.port));
+        let config = config_for(
+            &ctx.known_hosts.known_algorithms(&hop.host, hop.port),
+            !ctx.known_hosts.trusted_cas(&hop.host, hop.port).is_empty(),
+        );
         let result = match hops.last() {
             None => {
                 let tcp = tokio::time::timeout(
@@ -434,13 +456,17 @@ where
 {
     let identities = agent.request_identities().await?;
     for id in identities {
-        let AgentIdentity::PublicKey { key, .. } = id else { continue };
-        let hash = if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
-            h.best_supported_rsa_hash().await?.flatten()
-        } else {
-            None
+        let rsa = match &id {
+            AgentIdentity::PublicKey { key, .. } => matches!(key.algorithm(), Algorithm::Rsa { .. }),
+            AgentIdentity::Certificate { certificate, .. } => matches!(certificate.algorithm(), Algorithm::Rsa { .. }),
         };
-        let res = h.authenticate_publickey_with(user, key, hash, &mut agent).await?;
+        let hash = if rsa { h.best_supported_rsa_hash().await?.flatten() } else { None };
+        let res = match id {
+            AgentIdentity::PublicKey { key, .. } => h.authenticate_publickey_with(user, key, hash, &mut agent).await?,
+            AgentIdentity::Certificate { certificate, .. } => {
+                h.authenticate_certificate_with(user, certificate, hash, &mut agent).await?
+            }
+        };
         if st.update(res) {
             return Ok(true);
         }
@@ -500,12 +526,25 @@ where
         }
         Err(e) => return Err(anyhow::Error::from(e).context(format!("could not load key {}", path.display()))),
     };
+    let key = Arc::new(key);
+    // OpenSSH convention: the certificate for `id_ed25519` is `id_ed25519-cert.pub`.
+    let cert_path = PathBuf::from(format!("{}-cert.pub", path.display()));
+    if cert_path.exists() {
+        match russh::keys::load_openssh_certificate(&cert_path) {
+            Ok(cert) => {
+                if st.update(h.authenticate_openssh_cert(user, key.clone(), cert).await?) {
+                    return Ok(true);
+                }
+            }
+            Err(e) => tracing::warn!("ignoring certificate {}: {e}", cert_path.display()),
+        }
+    }
     let hash = if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
         h.best_supported_rsa_hash().await?.flatten()
     } else {
         None
     };
-    let res = h.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await?;
+    let res = h.authenticate_publickey(user, PrivateKeyWithHashAlg::new(key, hash)).await?;
     Ok(st.update(res))
 }
 
@@ -742,9 +781,10 @@ mod tests {
 
     #[test]
     fn known_key_types_go_first() {
-        let cfg = config_for(&[Algorithm::Rsa { hash: None }]);
+        let cfg = config_for(&[Algorithm::Rsa { hash: None }], false);
         assert!(matches!(cfg.preferred.key[0], Algorithm::Rsa { .. }));
-        let cfg = config_for(&[]);
+        let cfg = config_for(&[], true);
+        assert!(!cfg.preferred.host_key_certificates.is_empty());
         assert_eq!(cfg.preferred.key[0], Algorithm::Ed25519);
     }
 }

@@ -59,6 +59,12 @@ fn keygen(path: &Path, passphrase: &str) {
 }
 
 fn start_sshd() -> Option<Sshd> {
+    start_sshd_with(|_| String::new())
+}
+
+/// `setup` runs after the keys are made (it may sign certificates or change
+/// authorized_keys) and returns extra sshd_config lines.
+fn start_sshd_with(setup: impl FnOnce(&Path) -> String) -> Option<Sshd> {
     let Some(sshd) = find_sshd() else {
         eprintln!("sshd not installed; skipping end-to-end test");
         return None;
@@ -68,11 +74,12 @@ fn start_sshd() -> Option<Sshd> {
     keygen(&d.join("host_ed25519"), "");
     keygen(&d.join("client"), PASSPHRASE);
     std::fs::copy(d.join("client.pub"), d.join("authorized_keys")).unwrap();
+    let extra = setup(d);
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     std::fs::write(
         d.join("sshd_config"),
         format!(
-            "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/host_ed25519\nPidFile {d}/sshd.pid\n\
+            "{extra}\nPort {port}\nListenAddress 127.0.0.1\nHostKey {d}/host_ed25519\nPidFile {d}/sshd.pid\n\
              AuthorizedKeysFile {d}/authorized_keys\nStrictModes no\nUsePAM no\nPasswordAuthentication no\n\
              KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin yes\nAllowTcpForwarding yes\n\
              Subsystem sftp {}\nLogLevel ERROR\n",
@@ -148,7 +155,10 @@ struct Env {
 
 impl Env {
     fn new() -> Option<Self> {
-        let sshd = start_sshd()?;
+        Self::with(start_sshd()?)
+    }
+
+    fn with(sshd: Sshd) -> Option<Self> {
         let known_hosts = KnownHosts::new(sshd.dir.path().join("app_known_hosts"), vec![]);
         Some(Self { sshd, known_hosts, secrets: Arc::new(MemoryStore::default()) })
     }
@@ -544,6 +554,91 @@ async fn folder_sync_plans_then_mirrors() {
     sync::execute(&fs, back.path(), &remote, &plan, &Progress::default()).await.unwrap();
     assert_eq!(std::fs::read_to_string(back.path().join("css/app.css")).unwrap(), "body{}");
     assert!(!back.path().join("same.txt").exists(), "unticked item was skipped");
+}
+
+/// `ssh-keygen -s ca -I id [-h] -n principals key.pub`
+fn sign(dir: &Path, key_pub: &str, host: bool, principals: &str) {
+    let mut c = Command::new("ssh-keygen");
+    c.current_dir(dir).args(["-q", "-s", "ca", "-I", "test"]);
+    if host {
+        c.arg("-h");
+    }
+    let ok = c.args(["-n", principals, key_pub]).status().unwrap().success();
+    assert!(ok, "ssh-keygen -s failed");
+}
+
+#[tokio::test]
+async fn host_certificate_from_trusted_ca_needs_no_prompt() {
+    let Some(sshd) = start_sshd_with(|d| {
+        keygen(&d.join("ca"), "");
+        sign(d, "host_ed25519.pub", true, "127.0.0.1");
+        format!("HostCertificate {}/host_ed25519-cert.pub", d.display())
+    }) else {
+        return;
+    };
+    let ca = std::fs::read_to_string(sshd.dir.path().join("ca.pub")).unwrap();
+    let env = Env::with(sshd).unwrap();
+    std::fs::write(env.known_hosts.app_file(), format!("@cert-authority * {ca}")).unwrap();
+
+    // Declining every prompt still connects: the certificate is enough.
+    let ctx = env.ctx(TestPrompter { accept_host: false, ..TestPrompter::accepting() });
+    ssh::connect(vec![env.profile()], &ctx).await.expect("trusted host certificate");
+    assert!(!ctx.prompter.asked().contains(&"host".to_string()), "no host-key question: {:?}", ctx.prompter.asked());
+
+    // A CA trusted only for other hosts does not count; we fall back to asking.
+    std::fs::write(env.known_hosts.app_file(), format!("@cert-authority *.example.com {ca}")).unwrap();
+    let ctx = env.ctx(TestPrompter { accept_host: false, ..TestPrompter::accepting() });
+    let err = ssh::connect(vec![env.profile()], &ctx).await.err().expect("must ask, and we declined");
+    assert!(matches!(err.downcast_ref::<HostKeyError>(), Some(HostKeyError::Declined { .. })), "{err:#}");
+}
+
+#[tokio::test]
+async fn host_certificate_for_another_name_is_not_trusted() {
+    let Some(sshd) = start_sshd_with(|d| {
+        keygen(&d.join("ca"), "");
+        sign(d, "host_ed25519.pub", true, "other.example.com");
+        format!("HostCertificate {}/host_ed25519-cert.pub", d.display())
+    }) else {
+        return;
+    };
+    let ca = std::fs::read_to_string(sshd.dir.path().join("ca.pub")).unwrap();
+    let env = Env::with(sshd).unwrap();
+    std::fs::write(env.known_hosts.app_file(), format!("@cert-authority * {ca}")).unwrap();
+    let warning = Arc::new(Mutex::new(None));
+    struct P(Arc<Mutex<Option<String>>>);
+    impl Prompter for P {
+        async fn confirm_host_key(&self, p: HostKeyPrompt) -> bool {
+            *self.0.lock().unwrap() = p.warning;
+            false
+        }
+        async fn ask_secret(&self, _: SecretPrompt) -> Option<SecretAnswer> {
+            Some(SecretAnswer { secret: PASSPHRASE.into(), remember: false })
+        }
+        async fn keyboard_interactive(&self, _: KbdPrompt) -> Option<Vec<String>> {
+            None
+        }
+    }
+    let ctx = ConnectContext::new(env.known_hosts.clone(), env.secrets.clone(), Arc::new(P(warning.clone())));
+    assert!(ssh::connect(vec![env.profile()], &ctx).await.is_err());
+    let w = warning.lock().unwrap().clone().expect("the prompt explains the refused certificate");
+    assert!(w.contains("other.example.com"), "{w}");
+}
+
+#[tokio::test]
+async fn user_certificate_logs_in_without_authorized_keys() {
+    let Some(sshd) = start_sshd_with(|d| {
+        keygen(&d.join("ca"), "");
+        let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+        sign(d, "client.pub", false, user.trim());
+        // Only the certificate can work: the plain key is no longer authorized.
+        std::fs::write(d.join("authorized_keys"), "").unwrap();
+        format!("TrustedUserCAKeys {}/ca.pub", d.display())
+    }) else {
+        return;
+    };
+    let env = Env::with(sshd).unwrap();
+    let conn = env.connect().await;
+    assert_eq!(conn.exec("echo cert-ok", None).await.unwrap().stdout, b"cert-ok\n");
 }
 
 fn rule(check: &str, when: CheckWhen, reload: &str) -> ValidationRule {

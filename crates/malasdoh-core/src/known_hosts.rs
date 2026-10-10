@@ -113,6 +113,52 @@ impl KnownHosts {
         }
     }
 
+    /// CA keys trusted (`@cert-authority`) to sign host certificates for this host.
+    pub fn trusted_cas(&self, host: &str, port: u16) -> Vec<PublicKey> {
+        let name = host_port(host, port);
+        let mut out = Vec::new();
+        for file in &self.read {
+            for e in read_entries(file) {
+                if e.marker == Marker::CertAuthority && host_matches(&name, &e.patterns) {
+                    out.push(e.key);
+                }
+            }
+        }
+        out
+    }
+
+    fn is_revoked(&self, key: &ssh_key::public::KeyData) -> bool {
+        self.read.iter().flat_map(|f| read_entries(f)).any(|e| e.marker == Marker::Revoked && e.key.key_data() == key)
+    }
+
+    /// Accept a host certificate the way OpenSSH does: signed by a CA trusted
+    /// for this host, currently valid, a *host* certificate, naming this host
+    /// among its principals (or none), with no critical options, and neither
+    /// the host key nor the CA revoked. `Err` says why not.
+    pub fn check_certificate(&self, host: &str, port: u16, cert: &ssh_key::Certificate) -> Result<(), String> {
+        if self.is_revoked(cert.public_key()) || self.is_revoked(cert.signature_key()) {
+            return Err("the certificate's key or its CA is marked @revoked".into());
+        }
+        let cas = self.trusted_cas(host, port);
+        if cas.is_empty() {
+            return Err("no @cert-authority is trusted for this host".into());
+        }
+        let fps: Vec<_> = cas.iter().map(|k| k.fingerprint(HashAlg::Sha256)).collect();
+        cert.validate(fps.iter())
+            .map_err(|_| "not signed by a trusted CA, or outside its validity period".to_string())?;
+        if cert.cert_type() != ssh_key::certificate::CertType::Host {
+            return Err("this is a user certificate, not a host certificate".into());
+        }
+        let principals = cert.valid_principals();
+        if !principals.is_empty() && !principals.iter().any(|p| p.eq_ignore_ascii_case(host)) {
+            return Err(format!("the certificate is for {}, not {host}", principals.join(", ")));
+        }
+        if !cert.critical_options().is_empty() {
+            return Err("the certificate has critical options this client does not understand".into());
+        }
+        Ok(())
+    }
+
     /// Algorithms already recorded for the host, so negotiation can prefer them
     /// (otherwise a server offering a new key type looks like an unknown host).
     pub fn known_algorithms(&self, host: &str, port: u16) -> Vec<ssh_key::Algorithm> {

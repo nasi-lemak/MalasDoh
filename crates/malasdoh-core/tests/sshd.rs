@@ -1113,3 +1113,31 @@ async fn connects_through_socks_http_and_command_proxies() {
     let err = ssh::connect(vec![Profile { proxy: dead, ..env.profile() }], &ctx).await.err().expect("fails");
     assert!(format!("{err:#}").contains("HTTP proxy"), "{err:#}");
 }
+
+#[tokio::test]
+async fn sftp_through_sudo_reaches_root_only_files() {
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    // sudo must work without a password here (the test runs as root, or
+    // with NOPASSWD); otherwise there is nothing to check.
+    if !conn.exec("sudo -n true", None).await.map(|o| o.success()).unwrap_or(false) {
+        eprintln!("passwordless sudo not available; skipping");
+        return;
+    }
+    let work = env.scratch();
+    let secret = format!("{work}/root-only");
+    conn.exec(
+        &format!("sudo mkdir -m 700 {secret} && echo top > {secret}/key && sudo chown -R root:root {secret}"),
+        None,
+    )
+    .await
+    .unwrap();
+    let fs = conn.open_sftp_sudo(None).await.expect("sftp through sudo");
+    let names: Vec<String> = fs.list(&secret).await.unwrap().into_iter().map(|e| e.name).collect();
+    assert_eq!(names, ["key"]);
+    assert_eq!(fs.read(&format!("{secret}/key"), 100).await.unwrap(), b"top\n");
+    // The id the files are handled as is root's.
+    fs.create_new(&format!("{secret}/new"), b"x", Some(0o600)).await.unwrap();
+    let uid = std::fs::metadata(format!("{secret}/new")).map(|m| std::os::unix::fs::MetadataExt::uid(&m)).unwrap();
+    assert_eq!(uid, 0);
+}

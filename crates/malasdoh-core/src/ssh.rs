@@ -916,6 +916,36 @@ impl Connection {
         Ok(crate::sftp::RemoteFs::new(session))
     }
 
+    /// SFTP as root: the server's own `sftp-server` run through sudo, so the
+    /// browser and transfers can reach root-only folders. `password` is
+    /// sudo's, or `None` when sudo needs none (it is written to the program's
+    /// input first, and must not be when sudo will not read it).
+    pub async fn open_sftp_sudo(&self, password: Option<&str>) -> Result<crate::sftp::RemoteFs> {
+        // Find the program: what sshd is configured with, then the usual places.
+        let find = "for p in \"$(awk '$1==\"Subsystem\" && $2==\"sftp\" {print $3}' /etc/ssh/sshd_config 2>/dev/null)\" \
+                    /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server \
+                    /usr/libexec/sftp-server /usr/lib/sftp-server /usr/local/libexec/sftp-server; do \
+                    if [ -x \"$p\" ]; then echo \"$p\"; exit 0; fi; done; exit 1";
+        let out = self.exec(find, None).await?;
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.success() || path.is_empty() {
+            bail!("no sftp-server program was found on the server (needed to browse as root)");
+        }
+        let ch = self.handle.channel_open_session().await?;
+        ch.exec(true, format!("exec sudo -S -p '' -- {}", shell_quote(&path))).await?;
+        if let Some(p) = password {
+            // sudo reads its password a byte at a time up to the newline;
+            // what follows is left for sftp-server.
+            ch.data(format!("{p}\n").as_bytes()).await?;
+        }
+        let start = russh_sftp::client::SftpSession::new(ch.into_stream());
+        let session = tokio::time::timeout(Duration::from_secs(20), start)
+            .await
+            .map_err(|_| anyhow!("sftp-server did not start through sudo"))?
+            .context("starting SFTP through sudo (does sudo need a terminal here?)")?;
+        Ok(crate::sftp::RemoteFs::new(session))
+    }
+
     /// File access: SFTP when the server offers it, otherwise shell commands
     /// (servers without an SFTP subsystem). Fails only if neither works.
     pub async fn open_fs(self: &Arc<Self>) -> Result<crate::sftp::RemoteFs> {

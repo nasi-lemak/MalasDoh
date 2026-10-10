@@ -64,6 +64,8 @@ pub enum Action {
     OpenFind,
     /// Add or remove the current folder from this connection's bookmarks.
     ToggleBookmark(String),
+    /// Browse as root (SFTP through sudo), or back to your own user.
+    ToggleRoot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,6 +140,10 @@ pub struct Browser {
     pub bookmarks: Vec<String>,
     /// Select this entry once its folder is listed ("show in browser").
     pub reveal: Option<String>,
+    /// Files are being handled as root; double-click edits as root too.
+    pub root: bool,
+    /// Switching to or from root is under way.
+    pub root_pending: bool,
 }
 
 impl Browser {
@@ -192,6 +198,22 @@ impl Browser {
             }
             if ui.button("⟳").on_hover_text("Refresh").clicked() {
                 actions.push(Action::Refresh);
+            }
+            let label = if self.root {
+                RichText::new("root")
+                    .strong()
+                    .color(egui::Color32::WHITE)
+                    .background_color(egui::Color32::from_rgb(0xa0, 0x30, 0x30))
+            } else {
+                RichText::new("root")
+            };
+            let tip = if self.root {
+                "Browsing as root through sudo. Click to go back to your own user."
+            } else {
+                "Browse, transfer and edit as root (SFTP through sudo)"
+            };
+            if ui.add_enabled(!self.root_pending, egui::Button::new(label)).on_hover_text(tip).clicked() {
+                actions.push(Action::ToggleRoot);
             }
             let r = ui
                 .add(egui::TextEdit::singleline(&mut self.path_input).desired_width(f32::INFINITY).hint_text("/path"));
@@ -412,7 +434,7 @@ impl Browser {
             if e.is_dir_like() {
                 actions.push(Action::Navigate(e.path.clone()));
             } else {
-                actions.push(Action::Edit { path: e.path.clone(), sudo: false });
+                actions.push(Action::Edit { path: e.path.clone(), sudo: self.root });
             }
         }
         let tooltip = format!(
@@ -443,7 +465,7 @@ impl Browser {
                 }
             } else {
                 if ui.button("Edit").clicked() {
-                    actions.push(Action::Edit { path: e.path.clone(), sudo: false });
+                    actions.push(Action::Edit { path: e.path.clone(), sudo: self.root });
                     ui.close();
                 }
                 if ui.button("Edit as root (sudo)").clicked() {

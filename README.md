@@ -87,6 +87,11 @@ remote-editing loop, where they are weakest:
   or date; bookmark folders per connection; change owner (`chown`, with sudo)
   and create symlinks; pack a selection into `.tar.gz`/`.tar.xz`/`.zip` and
   unpack archives into a new folder (never over existing files).
+- **Browse as root**: the "root" button in the file browser switches it to
+  SFTP through sudo (the server's own `sftp-server`), so folders like
+  `/etc/ssl/private` or `/root` can be listed, transferred and edited. A red
+  badge shows it is on; files opened then are edited as root, with checks
+  run as root too.
 - **Find files**: by name pattern and/or text inside, from any folder, as
   root if needed; click a result to show it, double-click to edit.
 - **Follow a log** (`tail -F`, also as root): new lines stream in, with a

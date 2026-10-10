@@ -29,6 +29,7 @@
 - Connections: SOCKS5 / HTTP / ProxyCommand proxies, keepalive setting,
   encrypted export and import
 - SSH key generation and install (ssh-copy-id); import from PuTTY and WinSCP
+- Browse as root through `sudo sftp-server`
 - Crash recovery: drafts of unsaved edits, restored through conflict checks
 - Reopen last session; startup command per connection; browser follows the
   terminal's folder
@@ -42,8 +43,6 @@
 
 1. Code signing for the Windows and macOS builds (needs certificates).
 2. Editor: a gutter marking lines changed since opening.
-3. Optional SFTP "edit as root" through `sudo sftp-server` where allowed,
-   which is faster than the current sudo + cat path for large trees.
 
 ## Known limitations
 

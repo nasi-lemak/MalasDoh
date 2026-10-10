@@ -57,6 +57,7 @@ const FOLLOW_HOOK: &str = concat!(
 );
 
 pub enum SessionMsg {
+    RootFs(Result<RemoteFs, String>),
     LogData {
         id: u64,
         data: Vec<u8>,
@@ -150,6 +151,7 @@ pub enum AfterSudo {
     Follow(String),
     Find(String),
     Restore(Box<Draft>),
+    RootBrowse,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,6 +240,8 @@ pub struct Session {
     pub typed: Vec<(u64, Vec<u8>)>,
     /// Unsaved edits from an earlier run, offered once connected.
     pub found_drafts: Vec<Draft>,
+    /// Your own file access, kept while browsing as root.
+    fs_user: Option<RemoteFs>,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -288,6 +292,7 @@ impl Session {
             split: None,
             typed: Vec::new(),
             found_drafts: Vec::new(),
+            fs_user: None,
         }
     }
 
@@ -365,6 +370,8 @@ impl Session {
             shared.rt.spawn(async move { conn.disconnect().await });
         }
         self.fs = None;
+        self.fs_user = None;
+        self.browser.root = false;
         for t in &mut self.terms {
             t.tx = None;
         }
@@ -475,12 +482,27 @@ impl Session {
                 }
             }
             SessionMsg::FindDone { result } => self.find.done(result),
+            SessionMsg::RootFs(result) => {
+                self.browser.root_pending = false;
+                match result {
+                    Ok(fs) => {
+                        self.fs_user = self.fs.replace(fs);
+                        self.browser.root = true;
+                        self.notify("Browsing as root. Changes here are made as root.", false);
+                        self.refresh(shared);
+                    }
+                    Err(e) => self.notify(format!("Could not browse as root: {e}"), true),
+                }
+            }
             SessionMsg::Forward(m) => self.forwards.handle(m),
             SessionMsg::Sync(m) => {
                 self.sync.handle(m);
                 self.refresh(shared);
             }
             SessionMsg::Connected { conn, fs } => {
+                // A new connection starts as your own user.
+                self.fs_user = None;
+                self.browser.root = false;
                 self.forwards.on_connected(&conn, shared, self.id);
                 self.conn = Some(conn);
                 self.state = ConnState::Connected;
@@ -713,6 +735,7 @@ impl Session {
                         AfterSudo::Follow(path) => self.follow(path, true, shared),
                         AfterSudo::Find(cmd) => self.run_find(cmd, true, shared),
                         AfterSudo::Restore(d) => self.restore_draft(*d, shared, settings),
+                        AfterSudo::RootBrowse => self.toggle_root(shared),
                         AfterSudo::Save(id) => {
                             let access = self.sudo.clone().unwrap();
                             if let Some(ed) = self.editors.iter_mut().find(|e| e.id == id) {
@@ -729,6 +752,9 @@ impl Session {
                         ed.state = EditorState::Ready;
                         ed.message = Some((format!("sudo: {e}"), true));
                     } else {
+                        if matches!(then, AfterSudo::RootBrowse) {
+                            self.browser.root_pending = false;
+                        }
                         if matches!(then, AfterSudo::Find(_)) {
                             self.find.done(Err(format!("sudo: {e}")));
                         }
@@ -1185,7 +1211,10 @@ impl Session {
             A::OpenSync => self.sync.show_for(&self.browser.path.clone()),
             A::Edit { path, sudo } => self.open_file(path, sudo, shared),
             A::ExternalEdit(path) => {
-                let Some(io) = self.io(Access::Sftp) else { return };
+                // As root while browsing as root, so checks also run as root.
+                let access = if self.browser.root { self.sudo.clone().unwrap_or(Access::Sftp) } else { Access::Sftp };
+                let ext_access = access.clone();
+                let Some(io) = self.io(access) else { return };
                 let dir = shared.paths.edit_cache_dir().join(uuid::Uuid::new_v4().simple().to_string());
                 let (events, id) = (shared.events.clone(), self.id);
                 shared.rt.spawn(async move {
@@ -1202,7 +1231,7 @@ impl Session {
                     .await;
                     match result {
                         Ok((session, local)) => {
-                            events.session(id, SessionMsg::ExternalReady { session, local, access: Access::Sftp })
+                            events.session(id, SessionMsg::ExternalReady { session, local, access: ext_access })
                         }
                         Err(e) => events
                             .session(id, SessionMsg::OpDone { result: Err(format!("Could not open {path}: {e:#}")) }),
@@ -1235,6 +1264,7 @@ impl Session {
             },
             A::Follow { path, sudo } => self.follow(path, sudo, shared),
             A::OpenFind => self.find.show(&self.browser.path.clone()),
+            A::ToggleRoot => self.toggle_root(shared),
             A::ToggleBookmark(dir) => {
                 let b = &mut self.profile.bookmarks;
                 if let Some(i) = b.iter().position(|x| *x == dir) {
@@ -1369,6 +1399,30 @@ impl Session {
                 self.save_editor(id, false, true, shared, settings);
             }
         }
+    }
+
+    /// Switch the browser to root (SFTP through sudo, set up first if
+    /// needed) or back to your own user.
+    pub fn toggle_root(&mut self, shared: &Shared) {
+        if self.browser.root {
+            if let Some(fs) = self.fs_user.take() {
+                self.fs = Some(fs);
+            }
+            self.browser.root = false;
+            self.notify("Back to your own user.", false);
+            return self.refresh(shared);
+        }
+        let Some(access) = self.access_for(true, AfterSudo::RootBrowse, shared) else {
+            self.browser.root_pending = true;
+            return;
+        };
+        let (Some(conn), Access::Sudo { password }) = (self.conn.clone(), access) else { return };
+        self.browser.root_pending = true;
+        let (events, id) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let result = conn.open_sftp_sudo(password.as_deref()).await.map_err(|e| format!("{e:#}"));
+            events.session(id, SessionMsg::RootFs(result));
+        });
     }
 
     /// Write a draft of every modified file whose text changed since the

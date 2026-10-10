@@ -477,6 +477,75 @@ async fn port_forwards_local_dynamic_and_remote() {
     assert!(tokio::net::TcpStream::connect(("127.0.0.1", rp)).await.is_err(), "-R listener stopped on the server");
 }
 
+#[tokio::test]
+async fn folder_sync_plans_then_mirrors() {
+    use malasdoh_core::sync::{self, Action, Direction, SyncOptions};
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let fs = conn.open_sftp().await.unwrap();
+    let remote = format!("{}/site", env.scratch());
+    let local = tempfile::tempdir().unwrap();
+    let l = local.path();
+
+    std::fs::create_dir_all(l.join("css")).unwrap();
+    std::fs::write(l.join("index.html"), "v2").unwrap();
+    std::fs::write(l.join("css/app.css"), "body{}").unwrap();
+    std::fs::write(l.join("same.txt"), "same").unwrap();
+    std::fs::create_dir_all(l.join(".git")).unwrap();
+    std::fs::write(l.join(".git/HEAD"), "ref").unwrap();
+    std::fs::create_dir_all(format!("{remote}/old")).unwrap();
+    std::fs::write(format!("{remote}/index.html"), "v1").unwrap();
+    std::fs::write(format!("{remote}/old/gone.txt"), "x").unwrap();
+    std::fs::write(format!("{remote}/same.txt"), "same").unwrap();
+    // Same contents and time on both sides: unchanged.
+    let t = std::fs::metadata(l.join("same.txt")).unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(format!("{remote}/same.txt")).unwrap().set_modified(t).unwrap();
+    // index.html: same size, different bytes, written within the same second.
+    // By size and time it looks unchanged; comparing contents finds it.
+    let quick =
+        sync::plan(&fs, l, &remote, &SyncOptions { compare_contents: false, ..Default::default() }).await.unwrap();
+    assert!(!quick.items.iter().any(|i| i.rel == "index.html"));
+
+    let opts =
+        SyncOptions { direction: Direction::Upload, delete_extra: true, compare_contents: true, ..Default::default() };
+    let plan = sync::plan(&fs, l, &remote, &opts).await.unwrap();
+    let mut got: Vec<(String, Action)> = plan.items.iter().map(|i| (i.rel.clone(), i.action.clone())).collect();
+    got.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        got,
+        vec![
+            ("css".into(), Action::MkdirRemote),
+            ("css/app.css".into(), Action::Upload { size: 6 }),
+            ("index.html".into(), Action::Upload { size: 2 }),
+            ("old".into(), Action::DeleteRemote { dir: true }),
+        ],
+        "only the top of a deleted folder is listed; .git is excluded"
+    );
+    assert_eq!(plan.unchanged, 1);
+    // Planning changes nothing.
+    assert_eq!(std::fs::read_to_string(format!("{remote}/index.html")).unwrap(), "v1");
+
+    let report = sync::execute(&fs, l, &remote, &plan, &Progress::default()).await.unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(std::fs::read_to_string(format!("{remote}/index.html")).unwrap(), "v2");
+    assert_eq!(std::fs::read_to_string(format!("{remote}/css/app.css")).unwrap(), "body{}");
+    assert!(!Path::new(&format!("{remote}/old")).exists());
+    assert!(!Path::new(&format!("{remote}/.git")).exists());
+
+    // Times were copied, so a second comparison finds nothing to do.
+    let again = sync::plan(&fs, l, &remote, &opts).await.unwrap();
+    assert!(again.items.is_empty(), "{:?}", again.items);
+
+    // And back the other way into an empty folder, honouring unticked items.
+    let back = tempfile::tempdir().unwrap();
+    let down = SyncOptions { direction: Direction::Download, ..Default::default() };
+    let mut plan = sync::plan(&fs, back.path(), &remote, &down).await.unwrap();
+    plan.items.iter_mut().filter(|i| i.rel == "same.txt").for_each(|i| i.enabled = false);
+    sync::execute(&fs, back.path(), &remote, &plan, &Progress::default()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(back.path().join("css/app.css")).unwrap(), "body{}");
+    assert!(!back.path().join("same.txt").exists(), "unticked item was skipped");
+}
+
 fn rule(check: &str, when: CheckWhen, reload: &str) -> ValidationRule {
     ValidationRule {
         name: "test".into(),

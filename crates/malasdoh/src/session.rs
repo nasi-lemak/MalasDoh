@@ -23,6 +23,7 @@ use crate::browser::{self, Browser, Transfer};
 use crate::editor::{Editor, EditorAction, State as EditorState};
 use crate::forwards::{ForwardMsg, Forwards};
 use crate::settings::Settings;
+use crate::sync_ui::{SyncMsg, SyncWindow};
 use crate::terminal::Terminal;
 
 /// What every session needs from the app.
@@ -37,6 +38,7 @@ pub struct Shared {
 
 pub enum SessionMsg {
     Forward(ForwardMsg),
+    Sync(SyncMsg),
     Connected {
         conn: Arc<Connection>,
         fs: Result<(RemoteFs, String), String>,
@@ -164,6 +166,7 @@ pub struct Session {
     pub toast: Option<(String, bool, Instant)>,
     backups_view: Option<(String, Vec<PathBuf>)>,
     pub forwards: Forwards,
+    pub sync: SyncWindow,
 }
 
 impl Session {
@@ -190,6 +193,7 @@ impl Session {
             toast: None,
             backups_view: None,
             forwards,
+            sync: SyncWindow::default(),
         }
     }
 
@@ -330,6 +334,10 @@ impl Session {
     pub fn handle(&mut self, msg: SessionMsg, shared: &Shared, settings: &Settings) {
         match msg {
             SessionMsg::Forward(m) => self.forwards.handle(m),
+            SessionMsg::Sync(m) => {
+                self.sync.handle(m);
+                self.refresh(shared);
+            }
             SessionMsg::Connected { conn, fs } => {
                 self.forwards.on_connected(&conn, shared, self.id);
                 self.conn = Some(conn);
@@ -716,6 +724,7 @@ impl Session {
         match action {
             A::Navigate(p) => self.navigate(p, shared),
             A::Refresh => self.refresh(shared),
+            A::OpenSync => self.sync.show_for(&self.browser.path.clone()),
             A::Edit { path, sudo } => self.open_file(path, sudo, shared),
             A::ExternalEdit(path) => {
                 let Some(io) = self.io(Access::Sftp) else { return };
@@ -912,6 +921,7 @@ impl Session {
                 ui.centered_and_justified(|ui| ui.label("Open a terminal or double-click a file to edit it."));
             }
         }
+        self.sync.ui(ui.ctx(), self.fs.as_ref(), shared, self.id);
         if let Some((path, backup)) = self.backups_ui(ui.ctx()) {
             self.restore_backup(path, backup, shared);
         }

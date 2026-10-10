@@ -11,6 +11,7 @@ use malasdoh_core::sftp::{self, EntryKind, Progress, RemoteEntry, human_size, mo
 pub enum Action {
     Navigate(String),
     Refresh,
+    OpenSync,
     Edit { path: String, sudo: bool },
     ExternalEdit(String),
     Download(Vec<String>),
@@ -128,6 +129,10 @@ impl Browser {
                     }
                     if ui.button("Upload files…").clicked() {
                         actions.push(Action::UploadPick);
+                    }
+                    ui.separator();
+                    if ui.button("Compare / sync with a local folder…").clicked() {
+                        actions.push(Action::OpenSync);
                     }
                 });
                 if !self.selected.is_empty() && ui.button("⬇").on_hover_text("Download selected").clicked() {

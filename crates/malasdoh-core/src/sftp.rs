@@ -57,7 +57,7 @@ pub struct Progress {
 }
 
 impl Progress {
-    fn check_cancel(&self) -> Result<()> {
+    pub(crate) fn check_cancel(&self) -> Result<()> {
         if self.cancel.load(Ordering::Relaxed) {
             bail!(crate::ssh::Cancelled);
         }
@@ -239,6 +239,14 @@ impl RemoteFs {
         self.s.rename(from, to).await.with_context(|| format!("renaming {from} to {to}"))
     }
 
+    /// Set a file's modification (and access) time, in seconds since the epoch.
+    pub async fn set_mtime(&self, path: &str, mtime: u32) -> Result<()> {
+        let mut attrs = FileAttributes::empty();
+        attrs.mtime = Some(mtime);
+        attrs.atime = Some(mtime);
+        self.s.set_metadata(path, attrs).await.with_context(|| format!("setting the time of {path}"))
+    }
+
     pub async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
         let mut attrs = FileAttributes::empty();
         attrs.permissions = Some(mode & 0o7777);
@@ -290,7 +298,7 @@ impl RemoteFs {
         Ok(dest)
     }
 
-    async fn download_inner(&self, remote: &str, dest: &Path, progress: &Progress) -> Result<()> {
+    pub(crate) async fn download_inner(&self, remote: &str, dest: &Path, progress: &Progress) -> Result<()> {
         progress.check_cancel()?;
         let m = self.stat(remote).await?;
         if m.is_dir() {
@@ -342,7 +350,7 @@ impl RemoteFs {
         Ok(dest)
     }
 
-    async fn upload_inner(&self, local: &Path, dest: &str, progress: &Progress) -> Result<()> {
+    pub(crate) async fn upload_inner(&self, local: &Path, dest: &str, progress: &Progress) -> Result<()> {
         progress.check_cancel()?;
         let meta = tokio::fs::symlink_metadata(local).await?;
         if meta.is_dir() {

@@ -12,6 +12,7 @@ pub mod secrets;
 pub mod sftp;
 pub mod ssh;
 pub mod ssh_config;
+pub mod sync;
 pub mod text;
 pub mod validate;
 

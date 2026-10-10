@@ -10,6 +10,7 @@ mod forwards;
 mod highlight;
 mod session;
 mod settings;
+mod sync_ui;
 mod terminal;
 
 fn main() -> eframe::Result<()> {

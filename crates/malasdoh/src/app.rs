@@ -16,6 +16,7 @@ use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId}
 use crate::compare::Compares;
 use crate::journal_ui::JournalWindow;
 use crate::multirun::MultiRun;
+use crate::restore::LastSession;
 use crate::session::{ConnState, Pane, Session, Shared};
 use crate::settings::Settings;
 use crate::snippets::{self, Snippet, SnippetStore, Use};
@@ -49,6 +50,14 @@ pub struct App {
     compares: Compares,
     journal: Journal,
     journal_win: JournalWindow,
+    /// What was open when MalasDoh last closed, until it is reopened.
+    last: LastSession,
+    /// The last state written to disk, so it is only written when it changes.
+    last_written: String,
+    last_persist: Instant,
+    /// A connection was opened in this run; before that, the saved session
+    /// is left alone so quitting at the start screen does not lose it.
+    touched: bool,
 }
 
 /// "Copy to another server": what, from where, and to where.
@@ -198,7 +207,7 @@ impl App {
             known_hosts: KnownHosts::standard(paths.known_hosts_file()),
             paths,
         };
-        Self {
+        let mut app = Self {
             shared,
             _rt: rt,
             rx,
@@ -226,6 +235,61 @@ impl App {
             compares: Compares::default(),
             journal: Journal::new(paths_journal),
             journal_win: JournalWindow::default(),
+            last: LastSession::default(),
+            last_written: String::new(),
+            last_persist: Instant::now(),
+            touched: false,
+        };
+        let mut last = LastSession::load(&app.shared.paths.config_dir.join("session.toml"));
+        last.retain_profiles(|id| app.profiles.get(id).is_some());
+        app.last_written = last.to_toml();
+        app.last = last;
+        if app.settings.reopen_on_start {
+            app.reopen_last();
+        }
+        app
+    }
+
+    fn reopen_last(&mut self) {
+        let last = std::mem::take(&mut self.last);
+        let mut active = None;
+        for (i, tab) in last.tabs.into_iter().enumerate() {
+            self.connect(tab.profile);
+            if let Some(s) = self.sessions.last_mut()
+                && s.profile.id == tab.profile
+            {
+                if last.active == Some(i) {
+                    active = Some(s.id);
+                }
+                s.restore = Some(tab);
+            }
+        }
+        if active.is_some() {
+            self.active = active;
+        }
+    }
+
+    fn snapshot(&self) -> LastSession {
+        LastSession {
+            tabs: self.sessions.iter().map(|s| s.snapshot()).collect(),
+            active: self.active.and_then(|id| self.sessions.iter().position(|s| s.id == id)),
+        }
+    }
+
+    /// Write what is open, if it changed. Cheap enough to call every few
+    /// seconds; also called on exit.
+    fn persist_session(&mut self) {
+        self.last_persist = Instant::now();
+        if !self.touched {
+            return;
+        }
+        let text = self.snapshot().to_toml();
+        if text != self.last_written {
+            let path = self.shared.paths.config_dir.join("session.toml");
+            match malasdoh_core::paths::write_atomic(&path, text.as_bytes()) {
+                Ok(()) => self.last_written = text,
+                Err(e) => tracing::warn!("could not save the open session: {e:#}"),
+            }
         }
     }
 
@@ -250,6 +314,7 @@ impl App {
         s.connect(&self.shared);
         self.sessions.push(s);
         self.active = Some(sid);
+        self.touched = true;
     }
 
     fn drain_events(&mut self) {
@@ -752,6 +817,23 @@ impl App {
             ui.heading("MalasDoh");
             ui.label("SSH terminal, file browser and safe remote editing.");
             ui.add_space(20.0);
+            if !self.last.tabs.is_empty() {
+                let names: Vec<String> = self
+                    .last
+                    .tabs
+                    .iter()
+                    .filter_map(|t| self.profiles.get(t.profile).map(|p| p.display_name()))
+                    .collect();
+                if ui
+                    .button(RichText::new("Reopen last session").strong())
+                    .on_hover_text("Reconnect and reopen the folders, files and terminals you had open")
+                    .clicked()
+                {
+                    self.reopen_last();
+                }
+                ui.label(RichText::new(names.join(", ")).weak());
+                ui.add_space(10.0);
+            }
             if ui.button("New connection…").clicked() {
                 self.form = Some(ProfileForm::new(Profile::default(), true));
             }
@@ -1010,6 +1092,15 @@ impl App {
                 ui.label("Start folder");
                 ui.add(egui::TextEdit::singleline(&mut p.start_dir).hint_text("home directory"));
                 ui.end_row();
+                ui.label("Startup command");
+                ui.add(egui::TextEdit::singleline(&mut p.startup_command).hint_text("e.g. sudo -i, or cd /var/www"))
+                    .on_hover_text("Typed into each new terminal after login");
+                ui.end_row();
+                ui.label("");
+                ui.checkbox(&mut p.follow_terminal, "File browser follows the terminal's folder").on_hover_text(
+                    "After each command the browser moves to the terminal's current folder (bash and zsh, or shells that report it themselves)",
+                );
+                ui.end_row();
                 ui.label("Backups");
                 ui.checkbox(&mut p.remote_backup, "Also keep a .bak copy next to edited files on the server");
                 ui.end_row();
@@ -1259,6 +1350,7 @@ impl App {
                         ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=28.0).text("Editor font size"));
                         ui.checkbox(&mut s.review_before_save, "Show changes and ask before saving a remote file");
                         ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
+                        ui.checkbox(&mut s.reopen_on_start, "Reopen last session's connections and files on start");
                         ui.checkbox(&mut s.dark_mode, "Dark mode");
                         ui.label("External editor command ({file} = path; empty = system default):");
                         ui.add(egui::TextEdit::singleline(&mut s.external_editor).hint_text("code --wait {file}"));
@@ -1310,6 +1402,10 @@ impl ProfileForm {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_session();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         let ctx = ui.ctx().clone();
@@ -1342,6 +1438,10 @@ impl eframe::App for App {
         }
         self.compares.ui(&ctx, &self.sessions, &self.shared);
         self.question_ui(&ctx);
+
+        if self.last_persist.elapsed() > Duration::from_secs(5) {
+            self.persist_session();
+        }
 
         // Keep polling while something is in flight.
         let busy = self.sessions.iter().any(|s| {

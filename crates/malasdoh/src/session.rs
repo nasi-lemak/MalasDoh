@@ -39,6 +39,18 @@ pub struct Shared {
     pub paths: AppPaths,
 }
 
+/// Typed into a new terminal when "follow the terminal" is on: bash and zsh
+/// then report their folder (OSC 7) at each prompt. The screen is cleared so
+/// the typed line does not stay; the leading space keeps it out of history
+/// where the shell ignores such lines.
+const FOLLOW_HOOK: &str = concat!(
+    r#" if [ -n "$ZSH_VERSION" ]; then _malasdoh_cwd() { printf '\033]7;file://%s%s\007' "$HOST" "$PWD"; };"#,
+    // `eval`: POSIX sh cannot even parse zsh's array syntax.
+    r#" eval 'precmd_functions+=(_malasdoh_cwd)'; elif [ -n "$BASH_VERSION" ]; then"#,
+    r#" PROMPT_COMMAND='printf "\033]7;file://%s%s\007" "$HOSTNAME" "$PWD"'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; fi; clear"#,
+    "\r"
+);
+
 pub enum SessionMsg {
     Forward(ForwardMsg),
     Sync(SyncMsg),
@@ -187,6 +199,8 @@ pub struct Session {
     pub compare: Option<CompareRequest>,
     /// A path whose change history to show; the app picks it up.
     pub history: Option<String>,
+    /// What to reopen once connected (from the last run).
+    pub restore: Option<crate::restore::Tab>,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -225,6 +239,7 @@ impl Session {
             overwrite: None,
             compare: None,
             history: None,
+            restore: None,
         }
     }
 
@@ -313,6 +328,16 @@ impl Session {
         let Some(conn) = self.conn.clone() else { return };
         let id = self.next();
         let (tx, mut rx) = mpsc::unbounded_channel();
+        // Queued before the shell is open; the shell reads them as typed-ahead
+        // input. The folder hook goes first, so a startup command like
+        // `sudo -i` cannot swallow it as a password.
+        if self.profile.follow_terminal {
+            let _ = tx.send(ShellCmd::Input(FOLLOW_HOOK.as_bytes().to_vec()));
+        }
+        let startup = self.profile.startup_command.trim();
+        if !startup.is_empty() {
+            let _ = tx.send(ShellCmd::Input(format!("{startup}\r").into_bytes()));
+        }
         self.terms.push(TermPane { id, term: Terminal::new(settings.terminal_font_size), tx: Some(tx) });
         self.active = Some(Pane::Term(id));
         let events = shared.events.clone();
@@ -349,6 +374,21 @@ impl Session {
         });
     }
 
+    /// What to reopen next time.
+    pub fn snapshot(&self) -> crate::restore::Tab {
+        crate::restore::Tab {
+            profile: self.profile.id,
+            dir: self.browser.path.clone(),
+            files: self
+                .editors
+                .iter()
+                .map(|e| crate::restore::OpenFile { path: e.session.path.clone(), sudo: e.access.is_sudo() })
+                .collect(),
+            terminals: self.terms.len().max(1),
+            local_dir: self.local.as_ref().map(|l| l.path.clone()),
+        }
+    }
+
     pub fn send_to_terminal(&mut self, bytes: Vec<u8>) {
         let target = match self.active {
             Some(Pane::Term(id)) => Some(id),
@@ -379,6 +419,10 @@ impl Session {
                             .is_shell()
                             .then(|| "No SFTP on this server: files go through shell commands.".to_string());
                         self.fs = Some(fs);
+                        let dir = match &self.restore {
+                            Some(r) if !r.dir.is_empty() => r.dir.clone(),
+                            _ => dir,
+                        };
                         self.navigate(dir, shared);
                     }
                     Err(e) => self.browser.error = Some(format!("SFTP is not available: {e}")),
@@ -392,18 +436,42 @@ impl Session {
                 if self.active.is_none() || matches!(self.active, Some(Pane::Term(id)) if old.contains(&id)) {
                     self.active = self.terms.first().map(|t| Pane::Term(t.id));
                 }
+                if let Some(r) = self.restore.take() {
+                    while self.terms.len() < r.terminals.min(8) {
+                        self.open_terminal(shared, settings);
+                    }
+                    if let Some(d) = r.local_dir {
+                        self.local = Some(LocalBrowser::new(Some(d)));
+                    }
+                    for f in r.files {
+                        self.open_file(f.path, f.sudo, shared);
+                    }
+                    self.active = self.terms.first().map(|t| Pane::Term(t.id));
+                }
             }
             SessionMsg::Failed { error, forgettable_key } => {
                 self.state = ConnState::Failed { error, forgettable_key };
             }
             SessionMsg::ShellOutput { term, data } => {
+                let mut follow = None;
                 if let Some(t) = self.terms.iter_mut().find(|t| t.id == term) {
+                    let before = t.term.cwd.clone();
                     let reply = t.term.feed(&data);
+                    // The first report is where the shell started; follow
+                    // changes after that, so a start folder is kept.
+                    if self.profile.follow_terminal && t.term.cwd_reports > 1 && t.term.cwd != before {
+                        follow = t.term.cwd.clone();
+                    }
                     if !reply.is_empty()
                         && let Some(tx) = &t.tx
                     {
                         let _ = tx.send(ShellCmd::Input(reply));
                     }
+                }
+                if let Some(dir) = follow
+                    && dir != self.browser.path
+                {
+                    self.navigate(dir, shared);
                 }
             }
             SessionMsg::ShellExited { term, status } => {

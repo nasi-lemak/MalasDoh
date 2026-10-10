@@ -12,6 +12,7 @@ mod highlight;
 mod journal_ui;
 mod local;
 mod multirun;
+mod restore;
 mod session;
 mod settings;
 mod snippets;

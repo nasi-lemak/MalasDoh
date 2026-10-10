@@ -88,6 +88,13 @@ remote-editing loop, where they are weakest:
   and compare exit codes and output side by side; retry the failures.
 - **Resilience**: a dropped connection is detected; open files keep your
   unsaved edits, and Reconnect picks up where you were.
+- **Pick up where you left off**: the start screen offers "Reopen last
+  session" (or turn on reopening automatically in Settings): connections come
+  back with their folders, open files, terminals and local pane. Only paths
+  are kept, never file contents.
+- **Per connection**: a startup command typed into each new terminal
+  (`sudo -i`, `cd /var/www`), and "File browser follows the terminal's
+  folder" (bash and zsh, or any shell that reports its folder with OSC 7).
 - **Portable mode**: put a file named `malasdoh.portable` next to the
   executable and everything (profiles, known hosts, backups) is kept in a
   `data` folder beside it.
@@ -127,6 +134,7 @@ Linux needs the usual desktop libraries at run time (X11 or Wayland, OpenGL,
 | Backups of edited files | `backups/<host>/<remote path>/<file>.<UTC time>` in the data directory, owner-only permissions |
 | Change journal | `journal.jsonl` in the data directory (one JSON line per save, owner-only permissions; the patches can contain secrets from config files) |
 | Snippets | `snippets.toml` in the config directory |
+| What was open last time | `session.toml` in the config directory (paths only) |
 | Terminal logs | `logs/<host>/` in the data directory, owner-only permissions |
 
 Settings → shows the exact paths. `MALASDOH_HOME=/some/dir` overrides all of

@@ -37,6 +37,11 @@ pub struct Terminal {
     search: Option<Search>,
     log: Option<(std::path::PathBuf, std::io::BufWriter<std::fs::File>)>,
     strip: AnsiStrip,
+    osc7: Osc7,
+    /// The shell's folder, as last reported with OSC 7.
+    pub cwd: Option<String>,
+    /// How many reports there have been; the first is where the shell started.
+    pub cwd_reports: u64,
 }
 
 impl Terminal {
@@ -50,6 +55,9 @@ impl Terminal {
             search: None,
             log: None,
             strip: AnsiStrip::default(),
+            osc7: Osc7::default(),
+            cwd: None,
+            cwd_reports: 0,
         }
     }
 
@@ -68,6 +76,11 @@ impl Terminal {
             if w.write_all(&text).and_then(|_| w.flush()).is_err() {
                 self.log = None;
             }
+        }
+        let (dir, n) = self.osc7.scan(bytes);
+        if let Some(dir) = dir {
+            self.cwd = Some(dir);
+            self.cwd_reports += n;
         }
         let mut reply = Vec::new();
         let mut rest = bytes;
@@ -683,9 +696,111 @@ pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// Finds `ESC ] 7 ; file://host/path` (ended by BEL or ESC \\), the way
+/// shells report their folder, across chunk boundaries.
+#[derive(Default)]
+struct Osc7 {
+    /// An unfinished sequence from the previous chunk.
+    pending: Vec<u8>,
+}
+
+impl Osc7 {
+    const START: &'static [u8] = b"\x1b]7;";
+    const MAX: usize = 4096;
+
+    /// The last folder reported in `bytes`, if any, and how many reports
+    /// there were.
+    fn scan(&mut self, bytes: &[u8]) -> (Option<String>, u64) {
+        let mut buf = std::mem::take(&mut self.pending);
+        buf.extend_from_slice(bytes);
+        let mut found = None;
+        let mut count = 0;
+        let mut pos = 0;
+        while let Some(i) = find(&buf[pos..], Self::START) {
+            let start = pos + i + Self::START.len();
+            let end = buf[start..].iter().position(|&b| b == 0x07 || b == 0x1b);
+            match end {
+                Some(e) if buf[start + e] == 0x07 || buf.get(start + e + 1) == Some(&b'\\') => {
+                    if let Some(dir) = osc7_path(&buf[start..start + e]) {
+                        found = Some(dir);
+                        count += 1;
+                    }
+                    pos = start + e + 1;
+                }
+                // ESC at the very end: the backslash may be in the next chunk.
+                Some(e) if start + e + 1 == buf.len() => {
+                    self.keep(&buf[pos + i..]);
+                    return (found, count);
+                }
+                Some(e) => pos = start + e,
+                None => {
+                    self.keep(&buf[pos + i..]);
+                    return (found, count);
+                }
+            }
+        }
+        // A chunk can end part-way through the introducer itself.
+        for n in (1..Self::START.len()).rev() {
+            if buf.ends_with(&Self::START[..n]) {
+                self.keep(&buf[buf.len() - n..]);
+                break;
+            }
+        }
+        (found, count)
+    }
+
+    fn keep(&mut self, b: &[u8]) {
+        if b.len() <= Self::MAX {
+            self.pending = b.to_vec();
+        }
+    }
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// `file://host/some%20dir` → `/some dir`.
+fn osc7_path(url: &[u8]) -> Option<String> {
+    let url = std::str::from_utf8(url).ok()?;
+    let rest = url.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let mut out = Vec::with_capacity(path.len());
+    let b = path.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = b.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osc7_folder_reports() {
+        let mut o = Osc7::default();
+        let mut last = |b: &[u8]| o.scan(b).0;
+        assert_eq!(last(b"ls\r\n\x1b]7;file://web-1/var/www\x07$ "), Some("/var/www".into()));
+        assert_eq!(last(b"\x1b]7;file://h/a%20b\x1b\\"), Some("/a b".into()), "ST terminator, percent-encoding");
+        // Split across chunks, including inside the introducer and the ST.
+        assert_eq!(last(b"out\x1b]"), None);
+        assert_eq!(last(b"7;file://h/et"), None);
+        assert_eq!(last(b"c\x1b"), None);
+        assert_eq!(last(b"\\more"), Some("/etc".into()));
+        assert_eq!(last(b"\x1b]7;http://x/y\x07"), None);
+        // The last of several wins and all are counted; other OSCs are ignored.
+        assert_eq!(o.scan(b"\x1b]0;title\x07\x1b]7;file://h/a\x07\x1b]7;file://h/b\x07"), (Some("/b".into()), 2));
+    }
 
     const NONE: Modifiers = Modifiers::NONE;
     const CTRL: Modifiers = Modifiers::CTRL;

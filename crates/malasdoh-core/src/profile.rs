@@ -79,6 +79,13 @@ pub struct Profile {
     /// saving an edit. Local backups are always made.
     pub remote_backup: bool,
     pub notes: String,
+    /// Typed into each new terminal after login, e.g. `sudo -i` or
+    /// `cd /var/www`. Empty: nothing.
+    pub startup_command: String,
+    /// Move the file browser to the terminal's folder after each command.
+    /// Works with bash and zsh (a prompt hook is set up quietly), and with any
+    /// shell that reports its folder itself (OSC 7).
+    pub follow_terminal: bool,
     /// Port forwards for this connection.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<crate::forward::ForwardSpec>,
@@ -98,6 +105,8 @@ impl Default for Profile {
             start_dir: String::new(),
             remote_backup: false,
             notes: String::new(),
+            startup_command: String::new(),
+            follow_terminal: false,
             forwards: Vec::new(),
         }
     }

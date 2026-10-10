@@ -136,8 +136,33 @@ impl Editor {
     pub fn ui(&mut self, ui: &mut egui::Ui, font_size: f32, review: bool) -> Option<EditorAction> {
         let mut action = None;
 
+        // Row 1: the file, and the actions on the right. The path is cut
+        // rather than pushing the buttons out of a narrow pane.
         ui.horizontal(|ui| {
-            ui.monospace(&self.session.path);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let busy = matches!(self.state, State::Busy(_));
+                if ui.add_enabled(!busy, egui::Button::new("💾 Save")).on_hover_text("Ctrl+S").clicked() {
+                    action = self.request_save(review);
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("⟳ Reload"))
+                    .on_hover_text("Discard changes and load the server copy")
+                    .clicked()
+                {
+                    action = Some(EditorAction::Reload);
+                }
+                if ui.button("🔍").on_hover_text("Find (Ctrl+F), replace (Ctrl+H), go to line (Ctrl+G)").clicked() {
+                    self.find.open = !self.find.open;
+                    self.find.focus = self.find.open;
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(&self.session.path).monospace()).truncate())
+                        .on_hover_text(&self.session.path);
+                });
+            });
+        });
+        // Row 2: how the file is read and checked; wraps when narrow.
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 RichText::new(format!(
                     "{} · {}{}",
@@ -163,35 +188,17 @@ impl Editor {
                     }
                 },
             );
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let busy = matches!(self.state, State::Busy(_));
-                if ui.add_enabled(!busy, egui::Button::new("💾 Save")).on_hover_text("Ctrl+S").clicked() {
-                    action = self.request_save(review);
+            if let Some(rule) = &self.check {
+                let when = match rule.when {
+                    CheckWhen::BeforeWrite => "on a copy before writing; nothing is written if it fails",
+                    CheckWhen::AfterWrite => "after writing; the original is put back if it fails",
+                };
+                let mut tip = format!("Runs `{}` {when}.", rule.check);
+                if !rule.reload.trim().is_empty() {
+                    tip.push_str(&format!("\nThen: `{}`", rule.reload));
                 }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("⟳ Reload"))
-                    .on_hover_text("Discard changes and load the server copy")
-                    .clicked()
-                {
-                    action = Some(EditorAction::Reload);
-                }
-                if ui.button("🔍").on_hover_text("Find (Ctrl+F), replace (Ctrl+H), go to line (Ctrl+G)").clicked() {
-                    self.find.open = !self.find.open;
-                    self.find.focus = self.find.open;
-                }
-                if let Some(rule) = &self.check {
-                    let when = match rule.when {
-                        CheckWhen::BeforeWrite => "on a copy before writing; nothing is written if it fails",
-                        CheckWhen::AfterWrite => "after writing; the original is put back if it fails",
-                    };
-                    let mut tip = format!("Runs `{}` {when}.", rule.check);
-                    if !rule.reload.trim().is_empty() {
-                        tip.push_str(&format!("\nThen: `{}`", rule.reload));
-                    }
-                    ui.checkbox(&mut self.check_enabled, format!("Check: {}", rule.name)).on_hover_text(tip);
-                }
-            });
+                ui.checkbox(&mut self.check_enabled, format!("Check: {}", rule.name)).on_hover_text(tip);
+            }
         });
 
         if let Some((msg, is_err)) = &self.message {

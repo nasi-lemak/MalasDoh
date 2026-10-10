@@ -19,6 +19,9 @@ pub struct Settings {
     pub dark_mode: bool,
     /// Ask before deleting remote files.
     pub confirm_delete: bool,
+    /// Reconnect to what was open last time when MalasDoh starts. Off: the
+    /// start screen offers it instead.
+    pub reopen_on_start: bool,
     /// Config checks run when saving matching files; first match wins.
     pub validation_rules: Vec<ValidationRule>,
 }
@@ -32,6 +35,7 @@ impl Default for Settings {
             external_editor: String::new(),
             dark_mode: true,
             confirm_delete: true,
+            reopen_on_start: false,
             validation_rules: builtin_rules(),
         }
     }

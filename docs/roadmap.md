@@ -22,6 +22,8 @@
 - Compare files across servers, with local files and with backups
 - Change journal of every save, with patches, check results and rollbacks
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line
+- Reopen last session; startup command per connection; browser follows the
+  terminal's folder
 - Snippets, and running commands on many hosts
 - External editor round trip with the same checks
 - Disconnect detection and reconnect without losing unsaved edits

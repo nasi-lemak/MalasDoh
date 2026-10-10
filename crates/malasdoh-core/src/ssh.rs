@@ -15,6 +15,7 @@ use russh::{ChannelMsg, ChannelWriteHalf, Disconnect, MethodKind, MethodSet, Pre
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+use crate::forward::RemoteForwards;
 use crate::known_hosts::{HostKeyStatus, KnownHosts, fingerprint};
 use crate::paths::{expand_tilde, user_ssh_dir};
 use crate::profile::{AuthMethod, Profile};
@@ -135,10 +136,31 @@ pub struct Client {
     known_hosts: KnownHosts,
     confirm: ConfirmHostKey,
     verdict: Arc<Mutex<Option<Verdict>>>,
+    remote_forwards: RemoteForwards,
 }
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // Only connections for forwards we asked for are accepted.
+        if self.remote_forwards.lock().unwrap().contains_key(&connected_port) {
+            reply.accept().await;
+            crate::forward::accept_forwarded(&self.remote_forwards, connected_port, channel);
+        } else {
+            reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
+        }
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let key = match key {
@@ -217,6 +239,7 @@ pub struct Connection {
     handle: Handle<Client>,
     hops: Vec<Handle<Client>>,
     pub profile: Profile,
+    remote_forwards: RemoteForwards,
 }
 
 /// Connect through `chain` (outermost hop first, target last), as produced by
@@ -229,17 +252,21 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
         Box::pin(async move { prompter.confirm_host_key(prompt).await })
     });
     let mut hops: Vec<Handle<Client>> = Vec::new();
+    let mut remote_forwards = RemoteForwards::default();
     for hop in &chain {
         let via =
             if hops.is_empty() { String::new() } else { format!(" via {}", chain[hops.len() - 1].display_name()) };
         ctx.prompter.status(&format!("Connecting to {}{via}…", hop.destination()));
         let verdict = Arc::new(Mutex::new(None));
+        // Each hop gets its own table; only the target's is ever filled.
+        remote_forwards = RemoteForwards::default();
         let handler = Client {
             host: hop.host.clone(),
             port: hop.port,
             known_hosts: ctx.known_hosts.clone(),
             confirm: confirm.clone(),
             verdict: verdict.clone(),
+            remote_forwards: remote_forwards.clone(),
         };
         let config = config_for(&ctx.known_hosts.known_algorithms(&hop.host, hop.port));
         let result = match hops.last() {
@@ -276,7 +303,7 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
         hops.push(handle);
     }
     let handle = hops.pop().expect("chain is not empty");
-    Ok(Connection { handle, hops, profile: target })
+    Ok(Connection { handle, hops, profile: target, remote_forwards })
 }
 
 async fn secret_get(store: &Arc<dyn SecretStore>, key: SecretKey) -> Option<String> {
@@ -619,6 +646,14 @@ impl ExecOutput {
 }
 
 impl Connection {
+    pub(crate) fn handle(&self) -> &Handle<Client> {
+        &self.handle
+    }
+
+    pub(crate) fn remote_forwards(&self) -> &RemoteForwards {
+        &self.remote_forwards
+    }
+
     pub fn is_closed(&self) -> bool {
         self.handle.is_closed()
     }

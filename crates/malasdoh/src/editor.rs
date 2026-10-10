@@ -81,7 +81,7 @@ impl Editor {
     pub fn title(&self) -> String {
         let name = malasdoh_core::sftp::file_name(&self.session.path).to_string();
         let root = if self.access.is_sudo() { " (root)" } else { "" };
-        let dirty = if self.is_modified() { " ●" } else { "" };
+        let dirty = if self.is_modified() { " •" } else { "" };
         format!("{name}{root}{dirty}")
     }
 

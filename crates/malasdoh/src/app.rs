@@ -504,6 +504,10 @@ impl App {
             if s.state == ConnState::Connected && ui.button("+ Terminal").clicked() {
                 s.open_terminal(&shared, &settings);
             }
+            let fw = format!("🔌 Forwards {}/{}", s.forwards.running(), s.forwards.len());
+            if ui.selectable_label(s.forwards.open, fw).on_hover_text("Port forwarding (-L, -R, SOCKS)").clicked() {
+                s.forwards.open = !s.forwards.open;
+            }
             if let Some(id) = close_term {
                 s.close_terminal(id);
             }
@@ -521,9 +525,19 @@ impl App {
         });
         ui.separator();
         s.pane_ui(ui, &shared, &settings);
+        let save_forwards = s.forwards_ui(ui.ctx(), &shared).map(|specs| (s.profile.id, specs));
 
         if let Some((msg, err, _)) = s.toast.take() {
             self.toast = Some((msg, err, Instant::now()));
+        }
+        if let Some((id, specs)) = save_forwards
+            && let Some(mut p) = self.profiles.get(id).cloned()
+        {
+            p.forwards = specs;
+            if self.profiles.upsert(p).is_ok() {
+                self.save_profiles();
+                self.notify("Saved port forwards to the connection.", false);
+            }
         }
     }
 
@@ -780,6 +794,28 @@ impl App {
                 ui.label("Notes");
                 ui.add(egui::TextEdit::multiline(&mut p.notes).desired_rows(2));
                 ui.end_row();
+            });
+            let p = &mut form.profile;
+            egui::CollapsingHeader::new(format!("Port forwards ({})", p.forwards.len())).show(ui, |ui| {
+                let mut remove = None;
+                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    for (i, f) in p.forwards.iter_mut().enumerate() {
+                        egui::Grid::new(("fwd", i)).num_columns(2).show(ui, |ui| crate::forwards::spec_editor(ui, f));
+                        if let Err(e) = f.validate() {
+                            ui.colored_label(ui.visuals().warn_fg_color, e.to_string());
+                        }
+                        if ui.small_button("Remove this forward").clicked() {
+                            remove = Some(i);
+                        }
+                        ui.separator();
+                    }
+                });
+                if let Some(i) = remove {
+                    p.forwards.remove(i);
+                }
+                if ui.button("+ Add forward").clicked() {
+                    p.forwards.push(Default::default());
+                }
             });
             if let Some(e) = &form.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);

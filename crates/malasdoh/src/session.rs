@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::bridge::{Events, Question, SessionId, UiPrompter};
 use crate::browser::{self, Browser, Transfer};
 use crate::editor::{Editor, EditorAction, State as EditorState};
+use crate::forwards::{ForwardMsg, Forwards};
 use crate::settings::Settings;
 use crate::terminal::Terminal;
 
@@ -35,6 +36,7 @@ pub struct Shared {
 }
 
 pub enum SessionMsg {
+    Forward(ForwardMsg),
     Connected {
         conn: Arc<Connection>,
         fs: Result<(RemoteFs, String), String>,
@@ -161,11 +163,13 @@ pub struct Session {
     saves_done: u64,
     pub toast: Option<(String, bool, Instant)>,
     backups_view: Option<(String, Vec<PathBuf>)>,
+    pub forwards: Forwards,
 }
 
 impl Session {
     pub fn new(id: SessionId, chain: Vec<Profile>) -> Self {
         let profile = chain.last().cloned().expect("chain has a target");
+        let forwards = Forwards::new(&profile.forwards);
         Self {
             id,
             profile,
@@ -185,6 +189,7 @@ impl Session {
             saves_done: 0,
             toast: None,
             backups_view: None,
+            forwards,
         }
     }
 
@@ -265,6 +270,7 @@ impl Session {
         for t in &mut self.terms {
             t.tx = None;
         }
+        self.forwards.on_disconnected();
         self.state = ConnState::Disconnected;
     }
 
@@ -323,7 +329,9 @@ impl Session {
 
     pub fn handle(&mut self, msg: SessionMsg, shared: &Shared, settings: &Settings) {
         match msg {
+            SessionMsg::Forward(m) => self.forwards.handle(m),
             SessionMsg::Connected { conn, fs } => {
+                self.forwards.on_connected(&conn, shared, self.id);
                 self.conn = Some(conn);
                 self.state = ConnState::Connected;
                 match fs {
@@ -953,7 +961,20 @@ impl Session {
             for t in &mut self.terms {
                 t.tx = None;
             }
+            self.forwards.on_disconnected();
         }
+    }
+
+    /// The forwards window. Returns the list to save to the profile, if the
+    /// user changed what is saved.
+    pub fn forwards_ui(
+        &mut self,
+        ctx: &egui::Context,
+        shared: &Shared,
+    ) -> Option<Vec<malasdoh_core::forward::ForwardSpec>> {
+        let title = self.profile.display_name();
+        let conn = self.conn.clone().filter(|_| self.state == ConnState::Connected);
+        self.forwards.ui(ctx, &title, conn.as_ref(), shared, self.id).then(|| self.forwards.saved_specs())
     }
 }
 

@@ -4,6 +4,7 @@
 
 pub mod diff;
 pub mod edit;
+pub mod forward;
 pub mod known_hosts;
 pub mod paths;
 pub mod profile;

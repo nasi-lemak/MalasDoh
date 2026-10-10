@@ -406,6 +406,77 @@ async fn jump_host_chain() {
     assert_eq!(ctx.prompter.asked(), ["host", "passphrase retry=false"]);
 }
 
+/// A TCP echo server; returns its port.
+async fn echo_server() -> u16 {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (mut r, mut w) = s.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    port
+}
+
+async fn round_trip(mut s: tokio::net::TcpStream, msg: &[u8]) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    s.write_all(msg).await.unwrap();
+    let mut buf = vec![0u8; msg.len()];
+    tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut buf)).await.expect("timed out").unwrap();
+    buf
+}
+
+#[tokio::test]
+async fn port_forwards_local_dynamic_and_remote() {
+    use malasdoh_core::forward::{ForwardKind, ForwardSpec};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let echo = echo_server().await;
+
+    // -L: connect here, the server connects to the echo server.
+    let local = ForwardSpec { kind: ForwardKind::Local, target_port: echo, ..Default::default() };
+    let h = conn.start_forward(&local).await.unwrap();
+    let s = tokio::net::TcpStream::connect(("127.0.0.1", h.port)).await.unwrap();
+    assert_eq!(round_trip(s, b"through -L").await, b"through -L");
+
+    // -D: a SOCKS5 CONNECT to the echo server by name.
+    let socks = ForwardSpec { kind: ForwardKind::Dynamic, ..Default::default() };
+    let d = conn.start_forward(&socks).await.unwrap();
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", d.port)).await.unwrap();
+    s.write_all(&[5, 1, 0]).await.unwrap();
+    let mut r = [0u8; 2];
+    s.read_exact(&mut r).await.unwrap();
+    let mut req = vec![5, 1, 0, 3, 9];
+    req.extend_from_slice(b"localhost");
+    req.extend_from_slice(&echo.to_be_bytes());
+    s.write_all(&req).await.unwrap();
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).await.unwrap();
+    assert_eq!(rep[1], 0, "SOCKS reply: success");
+    assert_eq!(round_trip(s, b"through -D").await, b"through -D");
+
+    // -R: the server listens; connecting there reaches the echo server here.
+    let remote = ForwardSpec { kind: ForwardKind::Remote, target_port: echo, ..Default::default() };
+    let r = conn.start_forward(&remote).await.unwrap();
+    assert_ne!(r.port, 0, "server picked a port");
+    let s = tokio::net::TcpStream::connect(("127.0.0.1", r.port)).await.unwrap();
+    assert_eq!(round_trip(s, b"through -R").await, b"through -R");
+    assert!(r.stats.total.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+
+    // Stopping closes the listeners.
+    let (lp, rp) = (h.port, r.port);
+    conn.stop_forward(h).await;
+    conn.stop_forward(r).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", lp)).await.is_err(), "-L listener stopped");
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", rp)).await.is_err(), "-R listener stopped on the server");
+}
+
 fn rule(check: &str, when: CheckWhen, reload: &str) -> ValidationRule {
     ValidationRule {
         name: "test".into(),

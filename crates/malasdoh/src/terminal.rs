@@ -143,7 +143,7 @@ impl Terminal {
 
         self.paint(ui, rect, &font, cell_w, cell_h, focused);
         if self.parser.screen().scrollback() > 0 {
-            let label = format!("↑ {} lines", self.parser.screen().scrollback());
+            let label = format!("⬆ {} lines", self.parser.screen().scrollback());
             ui.painter().text(
                 rect.right_top() + Vec2::new(-8.0, 4.0),
                 egui::Align2::RIGHT_TOP,

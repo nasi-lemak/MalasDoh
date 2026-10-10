@@ -5,6 +5,8 @@ use malasdoh_core::diff::{self, Diff, LineKind};
 use malasdoh_core::edit::{Access, EditSession};
 use malasdoh_core::validate::{CheckWhen, ValidationRule};
 
+use crate::highlight;
+
 pub enum State {
     Ready,
     Busy(String),
@@ -51,6 +53,8 @@ pub struct Editor {
     /// The config check that applies to this file, and whether to run it.
     pub check: Option<ValidationRule>,
     pub check_enabled: bool,
+    pub lang: highlight::Lang,
+    hl_cache: Option<(u64, egui::text::LayoutJob)>,
     find: String,
     show_find: bool,
 }
@@ -58,6 +62,8 @@ pub struct Editor {
 impl Editor {
     pub fn new(id: u64, session: EditSession, access: Access, check: Option<ValidationRule>) -> Self {
         Self {
+            lang: highlight::detect(&session.path, &session.base_text),
+            hl_cache: None,
             check_enabled: check.is_some(),
             check,
             id,
@@ -110,6 +116,14 @@ impl Editor {
                     if self.access.is_sudo() { " · via sudo" } else { "" }
                 ))
                 .weak(),
+            );
+            egui::ComboBox::from_id_salt(("lang", self.id)).selected_text(self.lang.label()).width(130.0).show_ui(
+                ui,
+                |ui| {
+                    for l in highlight::Lang::ALL {
+                        ui.selectable_value(&mut self.lang, l, l.label());
+                    }
+                },
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let busy = matches!(self.state, State::Busy(_));
@@ -175,8 +189,26 @@ impl Editor {
         ui.separator();
         let find = if self.show_find { self.find.clone() } else { String::new() };
         let font = egui::FontId::monospace(font_size);
+        let lang = self.lang;
+        let mut cache = std::mem::take(&mut self.hl_cache);
         let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = highlight(buf.as_str(), &find, &font, ui.visuals().text_color());
+            // Re-tokenize only when something that affects colours changed.
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (buf.as_str(), &find, lang as u8, font.size.to_bits(), ui.visuals().dark_mode).hash(&mut h);
+                h.finish()
+            };
+            let job = match &cache {
+                Some((k, job)) if *k == key => job.clone(),
+                _ => {
+                    let pal = highlight::Palette::new(ui.visuals().dark_mode, ui.visuals().text_color());
+                    let job = highlight::layout(buf.as_str(), lang, &find, &font, &pal);
+                    cache = Some((key, job.clone()));
+                    job
+                }
+            };
+            let mut job = job;
             job.wrap.max_width = wrap_width;
             ui.ctx().fonts_mut(|f| f.layout_job(job))
         };
@@ -195,6 +227,8 @@ impl Editor {
                 );
             });
         });
+
+        self.hl_cache = cache;
 
         if let Some(a) = self.modal_ui(ui.ctx()) {
             action = Some(a);
@@ -226,6 +260,13 @@ impl Editor {
                         }
                     });
                     ui.label(RichText::new("The original is backed up on this computer before writing.").weak());
+                    if let Some(rule) = self.check.as_ref().filter(|_| self.check_enabled) {
+                        let when = match rule.when {
+                            CheckWhen::BeforeWrite => "before writing",
+                            CheckWhen::AfterWrite => "after writing (rolled back if it fails)",
+                        };
+                        ui.label(RichText::new(format!("{} check `{}` runs {when}.", rule.name, rule.check)).weak());
+                    }
                 });
             }
             State::Conflict { diff: d, theirs, merged } => {
@@ -327,25 +368,6 @@ impl Editor {
         }
         action
     }
-}
-
-/// Plain text with search matches highlighted.
-fn highlight(text: &str, find: &str, font: &egui::FontId, color: Color32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    let normal = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
-    if find.is_empty() {
-        job.append(text, 0.0, normal);
-        return job;
-    }
-    let hit = egui::TextFormat { background: Color32::from_rgb(0x8a, 0x6d, 0x1f), ..normal.clone() };
-    let mut rest = text;
-    while let Some(i) = rest.find(find) {
-        job.append(&rest[..i], 0.0, normal.clone());
-        job.append(&rest[i..i + find.len()], 0.0, hit.clone());
-        rest = &rest[i + find.len()..];
-    }
-    job.append(rest, 0.0, normal);
-    job
 }
 
 pub fn diff_ui(ui: &mut egui::Ui, d: &Diff, id: egui::Id) {

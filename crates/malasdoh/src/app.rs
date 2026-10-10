@@ -61,13 +61,13 @@ fn checks_ui(ui: &mut egui::Ui, rules: &mut Vec<ValidationRule>) {
             ui.end_row();
             for (i, r) in rules.iter_mut().enumerate() {
                 ui.checkbox(&mut r.enabled, "");
-                ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(110.0));
+                ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(140.0));
                 ui.add(
                     egui::TextEdit::singleline(&mut r.pattern)
                         .desired_width(170.0)
                         .hint_text("/etc/nginx/** or *.json"),
                 );
-                ui.add(egui::TextEdit::singleline(&mut r.check).desired_width(180.0).font(egui::TextStyle::Monospace));
+                ui.add(egui::TextEdit::singleline(&mut r.check).desired_width(250.0).font(egui::TextStyle::Monospace));
                 egui::ComboBox::from_id_salt(("when", i))
                     .width(70.0)
                     .selected_text(match r.when {
@@ -80,7 +80,7 @@ fn checks_ui(ui: &mut egui::Ui, rules: &mut Vec<ValidationRule>) {
                     });
                 ui.add(
                     egui::TextEdit::singleline(&mut r.reload)
-                        .desired_width(150.0)
+                        .desired_width(190.0)
                         .hint_text("systemctl reload …")
                         .font(egui::TextStyle::Monospace),
                 );
@@ -890,7 +890,7 @@ impl App {
         let mut open = true;
         let paths = self.shared.paths.clone();
         let tab = &mut self.settings_tab;
-        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(true).default_width(760.0).show(
+        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(true).default_width(1040.0).show(
             ctx,
             |ui| {
                 ui.horizontal(|ui| {

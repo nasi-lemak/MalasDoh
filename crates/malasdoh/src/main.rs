@@ -6,6 +6,7 @@ mod app;
 mod bridge;
 mod browser;
 mod editor;
+mod highlight;
 mod session;
 mod settings;
 mod terminal;

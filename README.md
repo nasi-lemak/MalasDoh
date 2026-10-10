@@ -121,7 +121,10 @@ remote-editing loop, where they are weakest:
 - **Run on many hosts**: pick hosts or whole groups, run a command in parallel,
   and compare exit codes and output side by side; retry the failures.
 - **Resilience**: a dropped connection is detected; open files keep your
-  unsaved edits, and Reconnect picks up where you were.
+  unsaved edits, and Reconnect picks up where you were. Unsaved edits are
+  also written to disk every few seconds, so after a crash, a power cut or
+  quitting with changes, the next connect offers them back; if the server's
+  copy changed meanwhile, saving goes through the usual conflict and merge.
 - **Pick up where you left off**: the start screen offers "Reopen last
   session" (or turn on reopening automatically in Settings): connections come
   back with their folders, open files, terminals and local pane. Only paths
@@ -169,6 +172,7 @@ Linux needs the usual desktop libraries at run time (X11 or Wayland, OpenGL,
 | Change journal | `journal.jsonl` in the data directory (one JSON line per save, owner-only permissions; the patches can contain secrets from config files) |
 | Snippets | `snippets.toml` in the config directory |
 | What was open last time | `session.toml` in the config directory (paths only) |
+| Unsaved edits | `drafts/` in the data directory, owner-only, removed when saved or discarded |
 | Terminal logs | `logs/<host>/` in the data directory, owner-only permissions |
 
 Settings → shows the exact paths. `MALASDOH_HOME=/some/dir` overrides all of

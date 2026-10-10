@@ -29,6 +29,7 @@
 - Connections: SOCKS5 / HTTP / ProxyCommand proxies, keepalive setting,
   encrypted export and import
 - SSH key generation and install (ssh-copy-id); import from PuTTY and WinSCP
+- Crash recovery: drafts of unsaved edits, restored through conflict checks
 - Reopen last session; startup command per connection; browser follows the
   terminal's folder
 - Snippets, and running commands on many hosts

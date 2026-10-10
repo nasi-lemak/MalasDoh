@@ -4,7 +4,7 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LineEnding {
     Lf,
     CrLf,
@@ -19,7 +19,7 @@ impl LineEnding {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextFormat {
     pub line_ending: LineEnding,
     pub bom: bool,

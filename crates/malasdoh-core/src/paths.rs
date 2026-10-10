@@ -54,6 +54,11 @@ impl AppPaths {
         self.data_dir.join("backups")
     }
 
+    /// Unsaved edits, kept while a file is modified so a crash loses nothing.
+    pub fn drafts_dir(&self) -> PathBuf {
+        self.data_dir.join("drafts")
+    }
+
     /// The change journal: every save, with its patch.
     pub fn journal_file(&self) -> PathBuf {
         self.data_dir.join("journal.jsonl")
@@ -87,6 +92,18 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+/// Like [`write_atomic`], but the file is readable only by the current user
+/// (drafts of edited files can hold secrets).
+pub fn write_private_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let dir = path.parent().context("path has no parent directory")?;
+    create_private_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    write_private(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }

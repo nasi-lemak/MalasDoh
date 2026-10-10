@@ -63,6 +63,7 @@ pub struct App {
     /// The last state written to disk, so it is only written when it changes.
     last_written: String,
     last_persist: Instant,
+    last_draft_save: Instant,
     /// A connection was opened in this run; before that, the saved session
     /// is left alone so quitting at the start screen does not lose it.
     touched: bool,
@@ -210,6 +211,7 @@ impl App {
             malasdoh_core::paths::remove_older_than(&cache, std::time::Duration::from_secs(7 * 86400))
         });
         let shared = Shared {
+            drafts: malasdoh_core::drafts::Drafts::new(paths.drafts_dir()),
             rt: rt.handle().clone(),
             events,
             secrets: Arc::new(OsKeychain) as Arc<dyn SecretStore>,
@@ -251,6 +253,7 @@ impl App {
             last: LastSession::default(),
             last_written: String::new(),
             last_persist: Instant::now(),
+            last_draft_save: Instant::now(),
             touched: false,
         };
         let mut last = LastSession::load(&app.shared.paths.config_dir.join("session.toml"));
@@ -1460,23 +1463,34 @@ impl App {
             let mut result = None;
             egui::Modal::new("confirm-close".into()).show(ctx, |ui| {
                 ui.heading("Unsaved changes");
-                ui.label("Some open files have changes that are not saved to the server. Close anyway and lose them?");
+                ui.label("Some open files have changes that are not saved to the server.");
                 ui.horizontal(|ui| {
+                    if ui
+                        .button("Close, keep the edits")
+                        .on_hover_text("They are offered again the next time you connect")
+                        .clicked()
+                    {
+                        result = Some(false);
+                    }
                     if ui.button("Close and discard").clicked() {
                         result = Some(true);
                     }
                     if ui.button("Cancel").clicked() {
-                        result = Some(false);
+                        result = None;
+                        self.confirm_close = None;
                     }
                 });
             });
-            match result {
-                Some(true) => {
-                    self.close_session(id);
-                    self.confirm_close = None;
+            if let Some(discard) = result {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
+                    if discard {
+                        s.discard_drafts(&self.shared);
+                    } else {
+                        s.autosave_drafts(&self.shared);
+                    }
                 }
-                Some(false) => self.confirm_close = None,
-                None => {}
+                self.close_session(id);
+                self.confirm_close = None;
             }
         }
     }
@@ -1718,6 +1732,9 @@ fn apply_fonts(ctx: &egui::Context, file: &str) -> Result<(), String> {
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_session();
+        for s in &mut self.sessions {
+            s.autosave_drafts(&self.shared);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1731,7 +1748,11 @@ impl eframe::App for App {
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_warned = Some(Instant::now());
-            self.notify("Some files have unsaved changes. Close the window again to quit and lose them.", true);
+            self.notify(
+                "Some files have unsaved changes. Close the window again to quit; they are kept as drafts and offered \
+                 next time you connect.",
+                true,
+            );
         }
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
@@ -1772,6 +1793,12 @@ impl eframe::App for App {
 
         if self.last_persist.elapsed() > Duration::from_secs(5) {
             self.persist_session();
+        }
+        if self.last_draft_save.elapsed() > Duration::from_secs(3) {
+            self.last_draft_save = Instant::now();
+            for s in &mut self.sessions {
+                s.autosave_drafts(&self.shared);
+            }
         }
 
         // Keep polling while something is in flight.

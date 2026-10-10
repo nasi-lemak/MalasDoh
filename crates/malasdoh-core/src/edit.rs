@@ -78,13 +78,13 @@ pub enum SudoError {
 }
 
 /// An open remote file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EditSession {
     pub path: String,
     pub format: TextFormat,
     /// The text as opened (or as last saved), `\n` line endings.
     pub base_text: String,
-    base_hash: [u8; 32],
+    pub(crate) base_hash: [u8; 32],
     pub size: u64,
 }
 

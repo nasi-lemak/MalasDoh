@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use egui::RichText;
+use malasdoh_core::drafts::Draft;
 use malasdoh_core::edit::{self, Access, EditSession, RemoteIo, SaveError, SaveOptions, SaveReport, SudoError};
 use malasdoh_core::journal::{self, Journal};
 use malasdoh_core::known_hosts::KnownHosts;
@@ -35,6 +36,7 @@ use malasdoh_core::commands;
 /// What every session needs from the app.
 #[derive(Clone)]
 pub struct Shared {
+    pub drafts: malasdoh_core::drafts::Drafts,
     pub rt: tokio::runtime::Handle,
     pub events: Events,
     pub secrets: Arc<dyn SecretStore>,
@@ -147,6 +149,7 @@ pub enum AfterSudo {
     },
     Follow(String),
     Find(String),
+    Restore(Box<Draft>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +236,8 @@ pub struct Session {
     /// What was typed into terminals this frame (terminal id, bytes), for
     /// sending to other servers too.
     pub typed: Vec<(u64, Vec<u8>)>,
+    /// Unsaved edits from an earlier run, offered once connected.
+    pub found_drafts: Vec<Draft>,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -282,6 +287,7 @@ impl Session {
             bookmarks_changed: false,
             split: None,
             typed: Vec::new(),
+            found_drafts: Vec::new(),
         }
     }
 
@@ -501,6 +507,15 @@ impl Session {
                 if self.active.is_none() || matches!(self.active, Some(Pane::Term(id)) if old.contains(&id)) {
                     self.active = self.terms.first().map(|t| Pane::Term(t.id));
                 }
+                // Unsaved edits left from a crash or a quit, not already open.
+                let open: Vec<(String, bool)> =
+                    self.editors.iter().map(|e| (e.session.path.clone(), e.access.is_sudo())).collect();
+                self.found_drafts = shared
+                    .drafts
+                    .for_profile(self.profile.id)
+                    .into_iter()
+                    .filter(|d| !open.contains(&(d.session.path.clone(), d.sudo)))
+                    .collect();
                 if let Some(r) = self.restore.take() {
                     while self.terms.len() < r.terminals.min(8) {
                         self.open_terminal(shared, settings);
@@ -606,6 +621,9 @@ impl Session {
                     Ok((session, report)) => {
                         ed.session = session;
                         ed.state = EditorState::Ready;
+                        if ed.draft_saved.take().is_some() {
+                            shared.drafts.remove(self.profile.id, &ed.session.path, ed.access.is_sudo());
+                        }
                         self.saves_done += 1;
                         let mut msg =
                             format!("Saved {} (save #{}).", sftp::human_size(report.bytes as u64), self.saves_done);
@@ -694,6 +712,7 @@ impl Session {
                         AfterSudo::Run { cmd, what, done } => self.run_op(cmd, what, done, true, shared),
                         AfterSudo::Follow(path) => self.follow(path, true, shared),
                         AfterSudo::Find(cmd) => self.run_find(cmd, true, shared),
+                        AfterSudo::Restore(d) => self.restore_draft(*d, shared, settings),
                         AfterSudo::Save(id) => {
                             let access = self.sudo.clone().unwrap();
                             if let Some(ed) = self.editors.iter_mut().find(|e| e.id == id) {
@@ -1352,6 +1371,70 @@ impl Session {
         }
     }
 
+    /// Write a draft of every modified file whose text changed since the
+    /// last one, and remove drafts of files that are no longer modified.
+    pub fn autosave_drafts(&mut self, shared: &Shared) {
+        use std::hash::{Hash, Hasher};
+        let profile = self.profile.id;
+        for ed in &mut self.editors {
+            if ed.is_modified() {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                ed.text.hash(&mut h);
+                let h = h.finish();
+                if ed.draft_saved != Some(h) {
+                    let d = Draft {
+                        profile,
+                        sudo: ed.access.is_sudo(),
+                        session: ed.session.clone(),
+                        text: ed.text.clone(),
+                        saved: journal::now(),
+                    };
+                    match shared.drafts.save(&d) {
+                        Ok(()) => ed.draft_saved = Some(h),
+                        Err(e) => tracing::warn!("{e:#}"),
+                    }
+                }
+            } else if ed.draft_saved.take().is_some() {
+                shared.drafts.remove(profile, &ed.session.path, ed.access.is_sudo());
+            }
+        }
+    }
+
+    /// Throw away the unsaved edits of every open file (closing on purpose).
+    pub fn discard_drafts(&mut self, shared: &Shared) {
+        for ed in &mut self.editors {
+            if ed.draft_saved.take().is_some() || ed.is_modified() {
+                shared.drafts.remove(self.profile.id, &ed.session.path, ed.access.is_sudo());
+            }
+        }
+    }
+
+    /// Reopen a draft: the editor gets the version it was based on, so a
+    /// save notices if the server's copy changed and offers the merge.
+    pub fn restore_draft(&mut self, d: Draft, shared: &Shared, settings: &Settings) {
+        let access = if d.sudo {
+            match &self.sudo {
+                Some(a) => a.clone(),
+                None => return self.ensure_sudo(AfterSudo::Restore(Box::new(d)), shared),
+            }
+        } else {
+            Access::Sftp
+        };
+        let id = self.next();
+        let check = find_rule(&settings.validation_rules, &d.session.path).cloned();
+        let mut ed = Editor::new(id, d.session, access, check);
+        ed.text = d.text;
+        ed.message = Some((
+            format!(
+                "Restored unsaved edits from {}. Saving checks the server's copy first.",
+                journal::format_time(d.saved)
+            ),
+            false,
+        ));
+        self.editors.push(ed);
+        self.active = Some(Pane::Editor(id));
+    }
+
     pub fn close_editor(&mut self, id: u64) {
         self.editors.retain(|e| e.id != id);
         if self.active == Some(Pane::Editor(id)) {
@@ -1397,7 +1480,41 @@ impl Session {
         }
     }
 
+    fn drafts_ui(&mut self, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
+        if self.found_drafts.is_empty() {
+            return;
+        }
+        let mut restore = None;
+        let mut discard = None;
+        egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
+            ui.label(RichText::new("Unsaved edits from last time").strong());
+            for (i, d) in self.found_drafts.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.monospace(&d.session.path);
+                    if d.sudo {
+                        ui.label(RichText::new("as root").weak());
+                    }
+                    ui.label(RichText::new(journal::format_time(d.saved)).weak());
+                    if ui.button("Restore").clicked() {
+                        restore = Some(i);
+                    }
+                    if ui.button("Discard").on_hover_text("Delete these edits for good").clicked() {
+                        discard = Some(i);
+                    }
+                });
+            }
+        });
+        if let Some(i) = restore {
+            let d = self.found_drafts.remove(i);
+            self.restore_draft(d, shared, settings);
+        } else if let Some(i) = discard {
+            let d = self.found_drafts.remove(i);
+            shared.drafts.remove(d.profile, &d.session.path, d.sudo);
+        }
+    }
+
     pub fn pane_ui(&mut self, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
+        self.drafts_ui(ui, shared, settings);
         let panes = self.panes();
         // A split side that closed, or became the active pane, goes away.
         if self.split.is_some_and(|s| Some(s) == self.active || !panes.iter().any(|(p, _)| *p == s)) {

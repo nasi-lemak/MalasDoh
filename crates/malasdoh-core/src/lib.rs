@@ -4,6 +4,7 @@
 
 pub mod commands;
 pub mod diff;
+pub mod drafts;
 pub mod edit;
 pub mod export;
 pub mod forward;

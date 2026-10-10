@@ -43,6 +43,8 @@ pub enum EditorAction {
 }
 
 pub struct Editor {
+    /// Hash of the text last written as a draft, while one exists on disk.
+    pub draft_saved: Option<u64>,
     pub id: u64,
     pub session: EditSession,
     pub text: String,
@@ -87,6 +89,7 @@ impl Editor {
     pub fn new(id: u64, session: EditSession, access: Access, check: Option<ValidationRule>) -> Self {
         let indent = detect_indent(&session.base_text);
         Self {
+            draft_saved: None,
             lang: highlight::detect(&session.path, &session.base_text),
             hl_cache: None,
             check_enabled: check.is_some(),

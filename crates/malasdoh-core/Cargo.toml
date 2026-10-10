@@ -4,7 +4,6 @@ description = "Connections, SSH sessions, SFTP and safe remote editing for Malas
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]

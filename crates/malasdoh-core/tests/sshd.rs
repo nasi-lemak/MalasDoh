@@ -82,7 +82,7 @@ fn start_sshd() -> Option<Sshd> {
     .unwrap();
     // Running as root, sshd insists on its privilege-separation directory.
     let _ = std::fs::create_dir_all("/run/sshd");
-    let child = Command::new(sshd)
+    let mut child = Command::new(sshd)
         .args(["-D", "-e", "-f"])
         .arg(d.join("sshd_config"))
         .stdout(Stdio::null())
@@ -96,6 +96,8 @@ fn start_sshd() -> Option<Sshd> {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    let _ = child.kill();
+    let _ = child.wait();
     panic!("sshd did not start");
 }
 
@@ -341,7 +343,8 @@ async fn safe_edit_round_trip() {
     assert_eq!(std::fs::read(&path).unwrap(), b"listen 9090\r\nworkers 2\r\n", "conflicting save wrote nothing");
 
     // The user decides to overwrite anyway; the other person's version is backed up.
-    let report = io.save(&mut s, "listen 8080\nworkers 4\n", &SaveOptions { force: true, ..opts.clone() }).await.unwrap();
+    let report =
+        io.save(&mut s, "listen 8080\nworkers 4\n", &SaveOptions { force: true, ..opts.clone() }).await.unwrap();
     assert_eq!(std::fs::read(report.local_backup.unwrap()).unwrap(), b"listen 9090\r\nworkers 2\r\n");
     assert_eq!(io.remote_state(&s).await.unwrap(), RemoteState::Unchanged);
 

@@ -1,0 +1,91 @@
+//! How background tasks talk to the UI thread.
+//!
+//! Tasks run on a tokio runtime and report back through one channel of
+//! [`AppEvent`]s, which the UI drains every frame. Questions for the user
+//! (host keys, passwords) travel the same way with a oneshot for the answer.
+
+use std::sync::mpsc;
+
+use malasdoh_core::ssh::{HostKeyPrompt, KbdPrompt, Prompter, SecretAnswer, SecretPrompt};
+use tokio::sync::oneshot;
+
+pub type SessionId = u64;
+
+pub enum Question {
+    HostKey(HostKeyPrompt, oneshot::Sender<bool>),
+    Secret(SecretPrompt, oneshot::Sender<Option<SecretAnswer>>),
+    Keyboard(KbdPrompt, oneshot::Sender<Option<Vec<String>>>),
+    /// The sudo password for `host`; `retry` after a wrong one.
+    Sudo {
+        host: String,
+        retry: bool,
+        reply: oneshot::Sender<Option<String>>,
+    },
+}
+
+pub struct AppEvent {
+    pub session: SessionId,
+    pub kind: EventKind,
+}
+
+pub enum EventKind {
+    Status(String),
+    Question(Question),
+    Session(crate::session::SessionMsg),
+}
+
+#[derive(Clone)]
+pub struct Events {
+    tx: mpsc::Sender<AppEvent>,
+    ctx: egui::Context,
+}
+
+impl Events {
+    pub fn new(ctx: egui::Context) -> (Self, mpsc::Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (Self { tx, ctx }, rx)
+    }
+
+    pub fn send(&self, session: SessionId, kind: EventKind) {
+        let _ = self.tx.send(AppEvent { session, kind });
+        self.ctx.request_repaint();
+    }
+
+    pub fn session(&self, session: SessionId, msg: crate::session::SessionMsg) {
+        self.send(session, EventKind::Session(msg));
+    }
+
+    pub fn repaint(&self) {
+        self.ctx.request_repaint();
+    }
+}
+
+/// The [`Prompter`] the core sees: every question becomes a dialog.
+pub struct UiPrompter {
+    pub events: Events,
+    pub session: SessionId,
+}
+
+impl Prompter for UiPrompter {
+    async fn confirm_host_key(&self, prompt: HostKeyPrompt) -> bool {
+        let (tx, rx) = oneshot::channel();
+        self.events.send(self.session, EventKind::Question(Question::HostKey(prompt, tx)));
+        rx.await.unwrap_or(false)
+    }
+
+    async fn ask_secret(&self, prompt: SecretPrompt) -> Option<SecretAnswer> {
+        let (tx, rx) = oneshot::channel();
+        self.events.send(self.session, EventKind::Question(Question::Secret(prompt, tx)));
+        rx.await.ok().flatten()
+    }
+
+    async fn keyboard_interactive(&self, prompt: KbdPrompt) -> Option<Vec<String>> {
+        let (tx, rx) = oneshot::channel();
+        self.events.send(self.session, EventKind::Question(Question::Keyboard(prompt, tx)));
+        rx.await.ok().flatten()
+    }
+
+    fn status(&self, message: &str) {
+        self.events.send(self.session, EventKind::Status(message.to_string()));
+    }
+}

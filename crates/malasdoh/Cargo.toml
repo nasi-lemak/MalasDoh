@@ -1,6 +1,21 @@
 [package]
 name = "malasdoh"
-version = "0.1.0"
-edition = "2024"
+description = "SSH terminal, SFTP browser and safe remote file editing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 
 [dependencies]
+malasdoh-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+eframe.workspace = true
+egui.workspace = true
+vt100.workspace = true
+rfd.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+toml.workspace = true
+uuid.workspace = true

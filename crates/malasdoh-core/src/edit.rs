@@ -82,6 +82,18 @@ pub struct EditSession {
 }
 
 impl EditSession {
+    /// Treat `current` (the server's bytes now) as what was opened, e.g. after
+    /// merging the user's edits onto someone else's newer version. Fails if it
+    /// is not editable text.
+    pub fn rebase(&mut self, current: &[u8]) -> Result<()> {
+        let (text, format) = text::decode(current)?;
+        self.base_text = text;
+        self.format = format;
+        self.base_hash = sha256(current);
+        self.size = current.len() as u64;
+        Ok(())
+    }
+
     /// Does `text` differ from what is on the server (as far as we know)?
     pub fn is_modified(&self, text: &str) -> bool {
         text != self.base_text
@@ -302,7 +314,7 @@ fn sanitize(s: &str) -> String {
 
 fn write_local_backup(host_dir: &Path, remote_path: &str, original: &[u8]) -> Result<PathBuf> {
     let dir = backup_dir_for(host_dir, remote_path);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating backup folder {}", dir.display()))?;
+    crate::paths::create_private_dir(&dir).with_context(|| format!("creating backup folder {}", dir.display()))?;
     let stem = format!("{}.{}", sanitize(file_name(remote_path)), timestamp());
     let mut path = dir.join(&stem);
     // Two saves in the same second must not overwrite each other's backup.
@@ -311,7 +323,7 @@ fn write_local_backup(host_dir: &Path, remote_path: &str, original: &[u8]) -> Re
         path = dir.join(format!("{stem}-{n}"));
         n += 1;
     }
-    std::fs::write(&path, original).with_context(|| format!("writing backup {}", path.display()))?;
+    crate::paths::write_private(&path, original).with_context(|| format!("writing backup {}", path.display()))?;
     Ok(path)
 }
 
@@ -352,6 +364,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let b = write_local_backup(dir.path(), "/etc/hosts", b"two").unwrap();
         write_local_backup(dir.path(), "/etc/hostname", b"other").unwrap();
-        assert_eq!(list_local_backups(dir.path(), "/etc/hosts"), vec![b, a]);
+        assert_eq!(list_local_backups(dir.path(), "/etc/hosts"), vec![b.clone(), a]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Backups hold config files and secrets: owner-only.
+            assert_eq!(std::fs::metadata(&b).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(b.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        }
     }
 }

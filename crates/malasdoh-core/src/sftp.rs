@@ -285,7 +285,7 @@ impl RemoteFs {
     pub async fn download(&self, remote: &str, local_dir: &Path, progress: &Progress) -> Result<PathBuf> {
         let (bytes, _) = self.measure(remote).await?;
         progress.total_bytes.fetch_add(bytes, Ordering::Relaxed);
-        let dest = local_dir.join(file_name(remote));
+        let dest = local_dir.join(local_name(file_name(remote))?);
         self.download_inner(remote, &dest, progress).await?;
         Ok(dest)
     }
@@ -297,7 +297,7 @@ impl RemoteFs {
             tokio::fs::create_dir_all(dest).await.with_context(|| format!("creating {}", dest.display()))?;
             for e in self.list(remote).await? {
                 if matches!(e.kind, EntryKind::Dir | EntryKind::File) {
-                    Box::pin(self.download_inner(&e.path, &dest.join(&e.name), progress)).await?;
+                    Box::pin(self.download_inner(&e.path, &dest.join(local_name(&e.name)?), progress)).await?;
                 }
             }
             return Ok(());
@@ -389,6 +389,21 @@ impl RemoteFs {
     }
 }
 
+/// A remote file name that is safe to use as one local path component. The
+/// name comes from the server, so a hostile one like `../../.bashrc` must not
+/// be able to write outside the download folder.
+pub fn local_name(name: &str) -> Result<&str> {
+    let bad = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', '\0'])
+        || (cfg!(windows) && (name.contains([':', '<', '>', '"', '|', '?', '*']) || name.ends_with([' ', '.'])));
+    if bad {
+        bail!("refusing to save a file with the unsafe name {name:?} on this computer");
+    }
+    Ok(name)
+}
+
 fn local_size(path: &Path) -> Result<u64> {
     let m = std::fs::symlink_metadata(path).with_context(|| format!("reading {}", path.display()))?;
     if m.is_dir() {
@@ -438,6 +453,15 @@ mod tests {
         assert_eq!(parent("/etc"), "/");
         assert_eq!(parent("/"), "/");
         assert_eq!(file_name("/etc/nginx/nginx.conf"), "nginx.conf");
+    }
+
+    #[test]
+    fn hostile_names_are_refused() {
+        for bad in ["..", ".", "", "../../.bashrc", "a/b", "a\\b", "nul\0byte"] {
+            assert!(local_name(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(local_name("nginx.conf").unwrap(), "nginx.conf");
+        assert_eq!(local_name("..hidden").unwrap(), "..hidden");
     }
 
     #[test]

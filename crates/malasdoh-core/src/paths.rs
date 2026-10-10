@@ -85,3 +85,33 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
+
+/// Create a directory (and parents) readable only by the current user. Backups
+/// and edit copies of remote files can contain passwords and keys.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        // An existing directory keeps its mode under DirBuilder; tighten it.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows the per-user profile directory is already private.
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Write a new file readable only by the current user.
+pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(contents)
+}

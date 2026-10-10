@@ -12,16 +12,27 @@ pub enum Action {
     Navigate(String),
     Refresh,
     OpenSync,
-    Edit { path: String, sudo: bool },
+    /// Copy to a folder on another connected server.
+    CopyToServer(Vec<String>),
+    Edit {
+        path: String,
+        sudo: bool,
+    },
     ExternalEdit(String),
     Download(Vec<String>),
     UploadPick,
     Upload(Vec<std::path::PathBuf>),
     Mkdir(String),
     NewFile(String),
-    Rename { from: String, to: String },
+    Rename {
+        from: String,
+        to: String,
+    },
     Delete(Vec<String>),
-    Chmod { path: String, mode: u32 },
+    Chmod {
+        path: String,
+        mode: u32,
+    },
     CdInTerminal(String),
     ShowBackups(String),
 }
@@ -66,9 +77,15 @@ pub struct Browser {
     going_back: Option<String>,
     dialog: Dialog,
     pub transfers: Vec<Transfer>,
+    /// The owning session, for drag and drop.
+    pub session: crate::bridge::SessionId,
 }
 
 impl Browser {
+    pub fn new(session: crate::bridge::SessionId) -> Self {
+        Self { session, ..Default::default() }
+    }
+
     pub fn set_listing(&mut self, path: String, result: Result<Vec<RemoteEntry>, String>) {
         self.loading = false;
         match result {
@@ -168,11 +185,24 @@ impl Browser {
             .collect();
 
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, visible.len(), |ui, range| {
-            for e in &visible[range] {
-                self.row_ui(ui, e, row_h, &mut actions);
-            }
-        });
+        let pane = egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+            ui,
+            row_h,
+            visible.len(),
+            |ui, range| {
+                for e in &visible[range] {
+                    self.row_ui(ui, e, row_h, &mut actions);
+                }
+            },
+        );
+        // Local files dragged from the local pane upload into this folder.
+        let drop = ui.interact(pane.inner_rect, egui::Id::new(("remote-drop", self.session)), Sense::hover());
+        if drop.dnd_hover_payload::<crate::local::LocalDrag>().is_some() {
+            ui.painter().rect_stroke(pane.inner_rect, 4.0, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
+        }
+        if let Some(p) = drop.dnd_release_payload::<crate::local::LocalDrag>() {
+            actions.push(Action::Upload(p.0.clone()));
+        }
 
         // Files dropped from the desktop upload into the current folder.
         let dropped: Vec<_> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
@@ -193,7 +223,7 @@ impl Browser {
             EntryKind::File => "🗋",
             EntryKind::Other => "?",
         };
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click_and_drag());
         if selected {
             ui.painter().rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
         } else if resp.hovered() {
@@ -237,6 +267,11 @@ impl Browser {
             name_color,
         );
 
+        if resp.drag_started() && !selected {
+            self.selected = vec![e.path.clone()];
+        }
+        let dragged = if selected { self.selected.clone() } else { vec![e.path.clone()] };
+        resp.dnd_set_drag_payload(crate::local::RemoteDrag { session: self.session, paths: dragged });
         if resp.clicked() {
             let multi = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
             if multi {
@@ -302,6 +337,10 @@ impl Browser {
                 actions.push(Action::Download(self.selected.clone()));
                 ui.close();
             }
+            if ui.button("Copy to another server…").clicked() {
+                actions.push(Action::CopyToServer(self.selected.clone()));
+                ui.close();
+            }
             if ui.button("Copy path").clicked() {
                 ui.ctx().copy_text(e.path.clone());
                 ui.close();
@@ -329,6 +368,14 @@ impl Browser {
         }
         let mut clear = false;
         for t in &self.transfers {
+            // Errors wrap so the reason is readable; the rest stays one line.
+            if let Some(Err(e)) = &t.result {
+                ui.add(
+                    egui::Label::new(RichText::new(format!("✖ {}: {e}", t.label)).color(ui.visuals().error_fg_color))
+                        .wrap(),
+                );
+                continue;
+            }
             ui.horizontal(|ui| {
                 let total = t.progress.total_bytes.load(Ordering::Relaxed).max(1);
                 let done = t.progress.done_bytes.load(Ordering::Relaxed);
@@ -337,17 +384,15 @@ impl Browser {
                         ui.add(
                             egui::ProgressBar::new(done as f32 / total as f32).desired_width(120.0).show_percentage(),
                         );
-                        ui.label(&t.label);
                         if ui.small_button("✖").on_hover_text("Cancel").clicked() {
                             t.progress.cancel.store(true, Ordering::Relaxed);
                         }
+                        ui.add(egui::Label::new(&t.label).truncate());
                     }
                     Some(Ok(msg)) => {
-                        ui.label(format!("✔ {msg}"));
+                        ui.add(egui::Label::new(format!("✔ {msg}")).truncate()).on_hover_text(msg);
                     }
-                    Some(Err(e)) => {
-                        ui.colored_label(ui.visuals().error_fg_color, format!("✖ {}: {e}", t.label));
-                    }
+                    Some(Err(_)) => {}
                 }
             });
         }

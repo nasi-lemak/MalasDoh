@@ -8,6 +8,7 @@ mod browser;
 mod editor;
 mod forwards;
 mod highlight;
+mod local;
 mod multirun;
 mod session;
 mod settings;

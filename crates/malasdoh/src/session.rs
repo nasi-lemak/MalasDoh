@@ -22,6 +22,7 @@ use crate::bridge::{Events, Question, SessionId, UiPrompter};
 use crate::browser::{self, Browser, Transfer};
 use crate::editor::{Editor, EditorAction, State as EditorState};
 use crate::forwards::{ForwardMsg, Forwards};
+use crate::local::{LocalAction, LocalBrowser};
 use crate::settings::Settings;
 use crate::sync_ui::{SyncMsg, SyncWindow};
 use crate::terminal::Terminal;
@@ -174,6 +175,18 @@ pub struct Session {
     backups_view: Option<(String, Vec<PathBuf>)>,
     pub forwards: Forwards,
     pub sync: SyncWindow,
+    /// The local file pane, when shown.
+    pub local: Option<LocalBrowser>,
+    /// Paths the user asked to copy to another server; the app picks it up.
+    pub cross_copy: Option<Vec<String>>,
+    /// A transfer waiting for "replace existing?".
+    overwrite: Option<Overwrite>,
+}
+
+/// A transfer whose destination already has some of the same names.
+enum Overwrite {
+    Upload { files: Vec<PathBuf>, dir: String, existing: Vec<String> },
+    Download { paths: Vec<String>, dir: PathBuf, existing: Vec<String> },
 }
 
 impl Session {
@@ -190,7 +203,7 @@ impl Session {
             terms: Vec::new(),
             editors: Vec::new(),
             active: None,
-            browser: Browser::default(),
+            browser: Browser::new(id),
             questions: VecDeque::new(),
             sudo: None,
             externals: Vec::new(),
@@ -201,6 +214,9 @@ impl Session {
             backups_view: None,
             forwards,
             sync: SyncWindow::default(),
+            local: None,
+            cross_copy: None,
+            overwrite: None,
         }
     }
 
@@ -511,6 +527,9 @@ impl Session {
                 if let Some(t) = self.browser.transfers.get_mut(index) {
                     t.result = Some(result);
                 }
+                if let Some(l) = &mut self.local {
+                    l.refresh();
+                }
                 self.refresh(shared);
             }
             SessionMsg::ExternalReady { session, local, access } => {
@@ -716,6 +735,70 @@ impl Session {
         });
     }
 
+    /// Download into a local folder, asking first if that would replace
+    /// anything there.
+    pub fn download_to(&mut self, paths: Vec<String>, dir: PathBuf, shared: &Shared) {
+        let existing: Vec<String> = paths
+            .iter()
+            .map(|p| sftp::file_name(p).to_string())
+            .filter(|n| sftp::local_name(n).is_ok_and(|n| dir.join(n).symlink_metadata().is_ok()))
+            .collect();
+        if existing.is_empty() {
+            self.start_download(paths, dir, shared);
+        } else {
+            self.overwrite = Some(Overwrite::Download { paths, dir, existing });
+        }
+    }
+
+    fn start_upload(&mut self, files: Vec<PathBuf>, dir: String, shared: &Shared) {
+        for f in files {
+            let dir = dir.clone();
+            let label = format!("⬆ {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            self.transfer(label, shared, move |fs, progress| {
+                Box::pin(async move {
+                    let dest = fs.upload(&f, &dir, &progress).await?;
+                    Ok(format!("Uploaded {dest}"))
+                })
+            });
+        }
+    }
+
+    fn start_download(&mut self, paths: Vec<String>, dir: PathBuf, shared: &Shared) {
+        for p in paths {
+            let dir = dir.clone();
+            let label = format!("⬇ {}", sftp::file_name(&p));
+            self.transfer(label, shared, move |fs, progress| {
+                Box::pin(async move {
+                    let dest = fs.download(&p, &dir, &progress).await?;
+                    Ok(format!("Downloaded {}", dest.display()))
+                })
+            });
+        }
+    }
+
+    pub fn fs(&self) -> Option<RemoteFs> {
+        self.fs.clone()
+    }
+
+    /// A transfer run by someone else (a copy between servers), shown in this
+    /// session's list; finish it with `SessionMsg::TransferDone { index, .. }`.
+    pub fn add_transfer(&mut self, label: String) -> (usize, Arc<Progress>) {
+        let progress = Arc::new(Progress::default());
+        self.browser.transfers.push(Transfer { label, progress: progress.clone(), result: None });
+        (self.browser.transfers.len() - 1, progress)
+    }
+
+    /// Show the local pane's actions in this session.
+    pub fn local_ui(&mut self, ui: &mut egui::Ui, shared: &Shared) {
+        let Some(local) = &mut self.local else { return };
+        for a in local.ui(ui, self.id) {
+            match a {
+                LocalAction::Upload(paths) => self.browser_action(browser::Action::Upload(paths), shared),
+                LocalAction::Download { paths, dir } => self.download_to(paths, dir, shared),
+            }
+        }
+    }
+
     fn transfer(
         &mut self,
         label: String,
@@ -766,18 +849,17 @@ impl Session {
                     }
                 });
             }
+            A::CopyToServer(paths) => self.cross_copy = Some(paths),
             A::Download(paths) => {
-                let Some(dir) = rfd::FileDialog::new().set_title("Download to folder").pick_folder() else { return };
-                for p in paths {
-                    let dir = dir.clone();
-                    let label = format!("⬇ {}", sftp::file_name(&p));
-                    self.transfer(label, shared, move |fs, progress| {
-                        Box::pin(async move {
-                            let dest = fs.download(&p, &dir, &progress).await?;
-                            Ok(format!("Downloaded {}", dest.display()))
-                        })
-                    });
-                }
+                // With the local pane open, download into its folder.
+                let dir = match &self.local {
+                    Some(l) => l.path.clone(),
+                    None => match rfd::FileDialog::new().set_title("Download to folder").pick_folder() {
+                        Some(d) => d,
+                        None => return,
+                    },
+                };
+                self.download_to(paths, dir, shared);
             }
             A::UploadPick => {
                 if let Some(files) = rfd::FileDialog::new().set_title("Upload files").pick_files() {
@@ -786,16 +868,15 @@ impl Session {
             }
             A::Upload(files) => {
                 let dir = self.browser.path.clone();
-                for f in files {
-                    let dir = dir.clone();
-                    let label =
-                        format!("⬆ {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-                    self.transfer(label, shared, move |fs, progress| {
-                        Box::pin(async move {
-                            let dest = fs.upload(&f, &dir, &progress).await?;
-                            Ok(format!("Uploaded {dest}"))
-                        })
-                    });
+                let existing: Vec<String> = files
+                    .iter()
+                    .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .filter(|n| self.browser.entries.iter().any(|e| &e.name == n))
+                    .collect();
+                if existing.is_empty() {
+                    self.start_upload(files, dir, shared);
+                } else {
+                    self.overwrite = Some(Overwrite::Upload { files, dir, existing });
                 }
             }
             A::Mkdir(p) => self.fs_op(shared, format!("Created {p}"), move |fs| async move { fs.mkdir(&p).await }),
@@ -954,6 +1035,69 @@ impl Session {
         self.sync.ui(ui.ctx(), self.fs.as_ref(), shared, self.id);
         if let Some((path, backup)) = self.backups_ui(ui.ctx()) {
             self.restore_backup(path, backup, shared);
+        }
+        self.overwrite_ui(ui.ctx(), shared);
+    }
+
+    fn overwrite_ui(&mut self, ctx: &egui::Context, shared: &Shared) {
+        let Some(o) = &self.overwrite else { return };
+        let (existing, place) = match o {
+            Overwrite::Upload { existing, dir, .. } => (existing, format!("{dir} on {}", self.profile.name)),
+            Overwrite::Download { existing, dir, .. } => (existing, dir.display().to_string()),
+        };
+        #[derive(PartialEq)]
+        enum Choice {
+            Replace,
+            Skip,
+            Cancel,
+        }
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new(("overwrite", self.id))).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.heading("Replace existing items?");
+            ui.label(format!("Already in {place}:"));
+            egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                for n in existing {
+                    ui.monospace(n);
+                }
+            });
+            ui.label(
+                RichText::new("Files with the same name are overwritten; folders are merged, replacing files inside.")
+                    .weak(),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Replace").clicked() {
+                    choice = Some(Choice::Replace);
+                }
+                if ui.button("Skip these").on_hover_text("Transfer only the items that are not there yet").clicked() {
+                    choice = Some(Choice::Skip);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+        let Some(choice) = choice else { return };
+        let Some(o) = self.overwrite.take() else { return };
+        if choice == Choice::Cancel {
+            return;
+        }
+        let skip = choice == Choice::Skip;
+        match o {
+            Overwrite::Upload { mut files, dir, existing } => {
+                if skip {
+                    files
+                        .retain(|f| !f.file_name().is_some_and(|n| existing.iter().any(|e| *e == n.to_string_lossy())));
+                }
+                self.start_upload(files, dir, shared);
+            }
+            Overwrite::Download { mut paths, dir, existing } => {
+                if skip {
+                    paths.retain(|p| !existing.iter().any(|e| e == sftp::file_name(p)));
+                }
+                self.start_download(paths, dir, shared);
+            }
         }
     }
 

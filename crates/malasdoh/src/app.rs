@@ -40,6 +40,19 @@ pub struct App {
     show_snippets: bool,
     pending_snippet: Option<PendingSnippet>,
     multi: MultiRun,
+    show_sidebar: bool,
+    last_local_dir: Option<std::path::PathBuf>,
+    cross: Option<CrossCopy>,
+}
+
+/// "Copy to another server": what, from where, and to where.
+struct CrossCopy {
+    from: SessionId,
+    paths: Vec<String>,
+    to: Option<SessionId>,
+    dest: String,
+    /// Overwrite items that already exist at the destination.
+    replace: bool,
 }
 
 /// A snippet waiting for its `{{placeholders}}` to be filled in.
@@ -200,6 +213,9 @@ impl App {
             show_snippets: false,
             pending_snippet: None,
             multi: MultiRun::default(),
+            show_sidebar: true,
+            last_local_dir: None,
+            cross: None,
         }
     }
 
@@ -308,6 +324,10 @@ impl App {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+            if ui.selectable_label(self.show_sidebar, "☰").on_hover_text("Show or hide the connection list").clicked()
+            {
+                self.show_sidebar = !self.show_sidebar;
+            }
             ui.menu_button("Tools", |ui| {
                 if ui.button("Run on many hosts…").clicked() {
                     self.multi.open = true;
@@ -512,6 +532,11 @@ impl App {
             return;
         }
 
+        if s.local.is_some() {
+            egui::Panel::left(egui::Id::new(("local", s.id))).resizable(true).default_size(300.0).show(ui, |ui| {
+                s.local_ui(ui, &shared);
+            });
+        }
         egui::Panel::left(egui::Id::new(("browser", s.id))).resizable(true).default_size(320.0).show(ui, |ui| {
             let actions = s.browser.ui(ui, settings.confirm_delete);
             for a in actions {
@@ -543,6 +568,16 @@ impl App {
                 }
                 if s.active == Some(Pane::Editor(e.id)) && ui.small_button("✖").clicked() {
                     close_editor = Some(e.id);
+                }
+            }
+            if ui
+                .selectable_label(s.local.is_some(), "🖥 Local files")
+                .on_hover_text("Show this computer's files beside the server's")
+                .clicked()
+            {
+                match s.local.take() {
+                    Some(l) => self.last_local_dir = Some(l.path),
+                    None => s.local = Some(crate::local::LocalBrowser::new(self.last_local_dir.clone())),
                 }
             }
             if s.state == ConnState::Connected && ui.button("+ Terminal").clicked() {
@@ -580,6 +615,9 @@ impl App {
 
         if let Some((msg, err, _)) = s.toast.take() {
             self.toast = Some((msg, err, Instant::now()));
+        }
+        if let Some(paths) = s.cross_copy.take() {
+            self.cross = Some(CrossCopy { from: sid, paths, to: None, dest: String::new(), replace: false });
         }
         if let Some((snippet, how)) = chosen_snippet {
             self.use_snippet(Some(sid), Some(pid), snippet, how, Vec::new());
@@ -1012,6 +1050,102 @@ impl App {
         }
     }
 
+    fn cross_copy_ui(&mut self, ctx: &egui::Context) {
+        let Some(c) = &mut self.cross else { return };
+        let targets: Vec<(SessionId, String, String)> = self
+            .sessions
+            .iter()
+            .filter(|s| s.id != c.from && s.state == ConnState::Connected && s.fs().is_some())
+            .map(|s| (s.id, s.profile.display_name(), s.browser.path.clone()))
+            .collect();
+        let mut result = None;
+        egui::Modal::new("cross-copy".into()).show(ctx, |ui| {
+            ui.set_min_width(460.0);
+            ui.heading("Copy to another server");
+            for p in c.paths.iter().take(8) {
+                ui.monospace(p);
+            }
+            if c.paths.len() > 8 {
+                ui.label(format!("…and {} more", c.paths.len() - 8));
+            }
+            if targets.is_empty() {
+                ui.colored_label(ui.visuals().warn_fg_color, "Connect to the destination server in another tab first.");
+            }
+            for (id, name, dir) in &targets {
+                if ui.radio(c.to == Some(*id), name).clicked() {
+                    c.to = Some(*id);
+                    c.dest = dir.clone();
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.label("Into folder");
+                ui.add(egui::TextEdit::singleline(&mut c.dest).desired_width(320.0));
+            });
+            ui.checkbox(&mut c.replace, "Replace items that already exist there");
+            ui.label(RichText::new("Files pass through this computer (a private temporary folder), so both servers only need to reach you.").weak().small());
+            ui.horizontal(|ui| {
+                let ok = c.to.is_some() && !c.dest.trim().is_empty();
+                if ui.add_enabled(ok, egui::Button::new("Copy")).clicked() {
+                    result = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    result = Some(false);
+                }
+            });
+        });
+        match result {
+            Some(true) => {
+                let c = self.cross.take().unwrap();
+                self.start_cross_copy(c);
+            }
+            Some(false) => self.cross = None,
+            None => {}
+        }
+    }
+
+    fn start_cross_copy(&mut self, c: CrossCopy) {
+        let Some(to) = c.to else { return };
+        let src =
+            self.sessions.iter().find(|s| s.id == c.from).and_then(|s| s.fs().map(|fs| (fs, s.profile.display_name())));
+        let Some((src_fs, src_name)) = src else { return self.notify("The source connection is gone", true) };
+        let Some(dst) = self.sessions.iter_mut().find(|s| s.id == to) else { return };
+        let Some(dst_fs) = dst.fs() else { return };
+        let dest = c.dest.trim().to_string();
+        let replace = c.replace;
+        let tmp_root = self.shared.paths.edit_cache_dir();
+        let events = self.shared.events.clone();
+        for p in c.paths {
+            let (index, progress) =
+                dst.add_transfer(format!("⬇⬆ {} from {src_name}", malasdoh_core::sftp::file_name(&p)));
+            let (src_fs, dst_fs, dest, tmp) = (
+                src_fs.clone(),
+                dst_fs.clone(),
+                dest.clone(),
+                tmp_root.join(format!("copy-{}", uuid::Uuid::new_v4().simple())),
+            );
+            let events = events.clone();
+            self.shared.rt.spawn(async move {
+                let result = async {
+                    let target = malasdoh_core::sftp::join(&dest, malasdoh_core::sftp::file_name(&p));
+                    if !replace && dst_fs.exists(&target).await? {
+                        anyhow::bail!("{target} already exists (tick \"Replace\" to overwrite it)");
+                    }
+                    malasdoh_core::paths::create_private_dir(&tmp)?;
+                    let local = src_fs.download(&p, &tmp, &progress).await?;
+                    let done = dst_fs.upload(&local, &dest, &progress).await?;
+                    anyhow::Ok(format!("Copied to {done}"))
+                }
+                .await;
+                let _ = std::fs::remove_dir_all(&tmp);
+                events.session(
+                    to,
+                    crate::session::SessionMsg::TransferDone { index, result: result.map_err(|e| format!("{e:#}")) },
+                );
+            });
+        }
+        self.active = Some(to);
+    }
+
     fn confirm_ui(&mut self, ctx: &egui::Context) {
         if let Some(id) = self.confirm_delete {
             let name = self.profiles.get(id).map(|p| p.display_name()).unwrap_or_default();
@@ -1160,11 +1294,14 @@ impl eframe::App for App {
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
-        egui::Panel::left("connections").resizable(true).default_size(230.0).show(ui, |ui| self.sidebar_ui(ui));
+        if self.show_sidebar {
+            egui::Panel::left("connections").resizable(true).default_size(230.0).show(ui, |ui| self.sidebar_ui(ui));
+        }
         egui::CentralPanel::default().show(ui, |ui| self.session_ui(ui));
 
         self.form_ui(&ctx);
         self.confirm_ui(&ctx);
+        self.cross_copy_ui(&ctx);
         self.settings_ui(&ctx);
         self.snippet_windows_ui(&ctx);
         self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);

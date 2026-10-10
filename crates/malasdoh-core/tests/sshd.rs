@@ -6,6 +6,7 @@
 
 #![cfg(unix)]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -859,4 +860,114 @@ async fn generated_key_is_installed_then_logs_in() {
     let profile = Profile { auth: AuthMethod::Key { path: key.display().to_string() }, ..env.profile() };
     let conn2 = ssh::connect(vec![profile], &env.ctx(TestPrompter::accepting())).await.unwrap();
     assert_eq!(conn2.exec("echo new-key-ok", None).await.unwrap().stdout, b"new-key-ok\n");
+}
+
+#[tokio::test]
+async fn file_commands_links_owner_archives_find_and_follow() {
+    use malasdoh_core::commands::{self, Archive};
+    use malasdoh_core::ssh::StreamEvent;
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let work = format!("{}/ops", env.scratch());
+    std::fs::create_dir_all(format!("{work}/sub")).unwrap();
+    std::fs::write(format!("{work}/a.conf"), "listen 80;\n").unwrap();
+    std::fs::write(format!("{work}/sub/b.conf"), "server_name shop;\n").unwrap();
+    std::fs::write(format!("{work}/c.txt"), "plain\n").unwrap();
+    let run = |cmd: String| {
+        let conn = conn.clone();
+        async move { conn.exec(&cmd, None).await.unwrap() }
+    };
+
+    // Symlinks: made once, never replacing anything.
+    let link = format!("{work}/current.conf");
+    assert!(run(commands::symlink("a.conf", &link).unwrap()).await.success());
+    assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("a.conf"));
+    assert!(!run(commands::symlink("c.txt", &link).unwrap()).await.success());
+    assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("a.conf"));
+
+    // Owner: to ourselves, which needs no privilege.
+    let me = String::from_utf8(run("id -un".into()).await.stdout).unwrap().trim().to_string();
+    let out = run(commands::chown(&[format!("{work}/c.txt")], &me, false).unwrap()).await;
+    assert!(out.success(), "{}", out.stderr_text());
+
+    // Find by name and by contents (before any archive is unpacked).
+    let mut by_name: Vec<String> =
+        String::from_utf8(run(commands::find(&work, "*.CONF", "", None, 50).unwrap()).await.stdout)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+    by_name.sort();
+    assert_eq!(by_name, [format!("{work}/a.conf"), format!("{work}/current.conf"), format!("{work}/sub/b.conf")]);
+    let by_text = run(commands::find(&work, "", "SERVER_NAME", None, 50).unwrap()).await;
+    assert_eq!(String::from_utf8(by_text.stdout).unwrap().trim(), format!("{work}/sub/b.conf"));
+
+    // Pack, refuse to replace the archive, unpack into a new folder only.
+    let names = vec!["a.conf".to_string(), "sub".to_string()];
+    let out = run(commands::create(&work, &names, "pack.tar.gz", Archive::TarGz).unwrap()).await;
+    assert!(out.success(), "{}", out.stderr_text());
+    let again = run(commands::create(&work, &names, "pack.tar.gz", Archive::TarGz).unwrap()).await;
+    assert!(!again.success() && again.stderr_text().contains("already exists"));
+    let (cmd, dest) = commands::extract(&format!("{work}/pack.tar.gz")).unwrap();
+    assert!(run(cmd.clone()).await.success());
+    assert_eq!(std::fs::read_to_string(format!("{dest}/sub/b.conf")).unwrap(), "server_name shop;\n");
+    std::fs::write(format!("{dest}/a.conf"), "edited\n").unwrap();
+    assert!(!run(cmd).await.success(), "the folder exists now");
+    assert_eq!(std::fs::read_to_string(format!("{dest}/a.conf")).unwrap(), "edited\n", "nothing overwritten");
+
+    // A single .gz: refused while the plain file exists, then restored.
+    assert!(run(format!("cd '{work}' && gzip -k c.txt")).await.success());
+    let (cmd, dest) = commands::extract(&format!("{work}/c.txt.gz")).unwrap();
+    let out = run(cmd.clone()).await;
+    assert!(!out.success() && out.stderr_text().contains("already exists"), "{}", out.stderr_text());
+    std::fs::write(&dest, "changed\n").unwrap();
+    assert!(!run(cmd.clone()).await.success());
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "changed\n");
+    std::fs::remove_file(&dest).unwrap();
+    assert!(run(cmd).await.success());
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "plain\n");
+
+    if Command::new("zip").arg("-v").output().is_ok() && Command::new("unzip").arg("-v").output().is_ok() {
+        let out = run(commands::create(&work, &names, "bundle.zip", Archive::Zip).unwrap()).await;
+        assert!(out.success(), "{}", out.stderr_text());
+        let (cmd, dest) = commands::extract(&format!("{work}/bundle.zip")).unwrap();
+        assert!(run(cmd).await.success());
+        assert!(Path::new(&format!("{dest}/sub/b.conf")).exists());
+    }
+
+    // Follow a log: the last lines, then new ones; dropping the stream stops tail.
+    let log = format!("{work}/app.log");
+    std::fs::write(&log, "old 1\nold 2\n").unwrap();
+    let mut stream = conn.exec_stream(&commands::follow(&log, 1), None).await.unwrap();
+    let mut seen = String::new();
+    let mut wait_for = async |want: &str, seen: &mut String| {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !seen.contains(want) {
+                match stream.events.recv().await {
+                    Some(StreamEvent::Stdout(b)) => seen.push_str(&String::from_utf8_lossy(&b)),
+                    Some(StreamEvent::Exited(s)) => panic!("tail ended: {s:?}"),
+                    Some(_) => {}
+                    None => panic!("stream closed"),
+                }
+            }
+        })
+        .await
+        .expect("output in time");
+    };
+    wait_for("old 2", &mut seen).await;
+    assert!(!seen.contains("old 1"), "only the last line: {seen:?}");
+    std::fs::OpenOptions::new().append(true).open(&log).unwrap().write_all(b"new 3\n").unwrap();
+    wait_for("new 3", &mut seen).await;
+    drop(stream);
+    let gone = async {
+        for _ in 0..50 {
+            let out = Command::new("pgrep").args(["-f", &format!("tail -n 1 -F -- {log}")]).output().unwrap();
+            if out.stdout.is_empty() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    };
+    assert!(gone.await, "tail was stopped on the server");
 }

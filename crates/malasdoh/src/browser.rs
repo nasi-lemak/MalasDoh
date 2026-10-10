@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use egui::{Align, Layout, RichText, Sense};
+use malasdoh_core::commands::Archive;
 use malasdoh_core::sftp::{self, EntryKind, Progress, RemoteEntry, human_size, mode_string};
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,38 @@ pub enum Action {
     },
     CdInTerminal(String),
     ShowBackups(String),
+    Chown {
+        paths: Vec<String>,
+        owner: String,
+        recursive: bool,
+        sudo: bool,
+    },
+    Symlink {
+        target: String,
+        link: String,
+    },
+    Extract(String),
+    Compress {
+        names: Vec<String>,
+        out: String,
+        kind: Archive,
+    },
+    /// Follow a file as it grows.
+    Follow {
+        path: String,
+        sudo: bool,
+    },
+    OpenFind,
+    /// Add or remove the current folder from this connection's bookmarks.
+    ToggleBookmark(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Name,
+    Size,
+    Modified,
 }
 
 pub struct Transfer {
@@ -62,6 +95,22 @@ enum Dialog {
         mode: String,
     },
     ConfirmDelete(Vec<String>),
+    Owner {
+        paths: Vec<String>,
+        owner: String,
+        recursive: bool,
+        sudo: bool,
+        has_dir: bool,
+    },
+    Symlink {
+        name: String,
+        target: String,
+    },
+    Compress {
+        names: Vec<String>,
+        out: String,
+        kind: Archive,
+    },
 }
 
 #[derive(Default)]
@@ -83,6 +132,12 @@ pub struct Browser {
     pub transfers: Vec<Transfer>,
     /// The owning session, for drag and drop.
     pub session: crate::bridge::SessionId,
+    sort: SortBy,
+    descending: bool,
+    /// This connection's saved folders.
+    pub bookmarks: Vec<String>,
+    /// Select this entry once its folder is listed ("show in browser").
+    pub reveal: Option<String>,
 }
 
 impl Browser {
@@ -106,6 +161,11 @@ impl Browser {
                 self.path = path;
                 self.error = None;
                 self.selected.retain(|s| self.entries.iter().any(|e| &e.path == s));
+                if let Some(r) = self.reveal.take()
+                    && self.entries.iter().any(|e| e.path == r)
+                {
+                    self.selected = vec![r];
+                }
             }
             Err(e) => {
                 if let Some(prev) = self.going_back.take() {
@@ -140,7 +200,7 @@ impl Browser {
             }
         });
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(120.0));
+            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(110.0));
             ui.checkbox(&mut self.show_hidden, "Hidden");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.menu_button("+ New", |ui| {
@@ -149,6 +209,9 @@ impl Browser {
                     }
                     if ui.button("New folder…").clicked() {
                         self.dialog = Dialog::NewFolder(String::new());
+                    }
+                    if ui.button("New symlink…").clicked() {
+                        self.dialog = Dialog::Symlink { name: String::new(), target: String::new() };
                     }
                     if ui.button("Upload files…").clicked() {
                         actions.push(Action::UploadPick);
@@ -161,6 +224,50 @@ impl Browser {
                 if !self.selected.is_empty() && ui.button("⬇").on_hover_text("Download selected").clicked() {
                     actions.push(Action::Download(self.selected.clone()));
                 }
+                if ui.button("🔍").on_hover_text("Find files by name or contents").clicked() {
+                    actions.push(Action::OpenFind);
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            let here = self.path.clone();
+            let marked = self.bookmarks.contains(&here);
+            ui.menu_button("Bookmarks", |ui| {
+                let label = if marked { "Remove this folder" } else { "Bookmark this folder" };
+                if ui.add_enabled(!here.is_empty(), egui::Button::new(label)).clicked() {
+                    actions.push(Action::ToggleBookmark(here.clone()));
+                    ui.close();
+                }
+                if !self.bookmarks.is_empty() {
+                    ui.separator();
+                }
+                for b in &self.bookmarks {
+                    if ui.selectable_label(*b == here, b).clicked() {
+                        actions.push(Action::Navigate(b.clone()));
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Saved folders for this connection");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let arrow = if self.descending { "⬇" } else { "⬆" };
+                if ui.small_button(arrow).on_hover_text("Reverse the order").clicked() {
+                    self.descending = !self.descending;
+                }
+                egui::ComboBox::from_id_salt(("sort", self.session))
+                    .selected_text(match self.sort {
+                        SortBy::Name => "Name",
+                        SortBy::Size => "Size",
+                        SortBy::Modified => "Modified",
+                    })
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.sort, SortBy::Name, "Name");
+                        ui.selectable_value(&mut self.sort, SortBy::Size, "Size");
+                        ui.selectable_value(&mut self.sort, SortBy::Modified, "Modified");
+                    });
+                ui.label("Sort");
             });
         });
         if let Some(n) = &self.note {
@@ -180,13 +287,16 @@ impl Browser {
         self.transfers_ui(ui);
 
         let filter = self.filter.to_lowercase();
-        let visible: Vec<RemoteEntry> = self
+        let mut visible: Vec<RemoteEntry> = self
             .entries
             .iter()
             .filter(|e| self.show_hidden || !e.name.starts_with('.'))
             .filter(|e| filter.is_empty() || e.name.to_lowercase().contains(&filter))
             .cloned()
             .collect();
+        sort_entries(&mut visible, self.sort, self.descending);
+        // The date column only when there is room for it.
+        let show_time = ui.available_width() > 430.0 || self.sort == SortBy::Modified;
 
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
         let pane = egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
@@ -195,7 +305,7 @@ impl Browser {
             visible.len(),
             |ui, range| {
                 for e in &visible[range] {
-                    self.row_ui(ui, e, row_h, &mut actions);
+                    self.row_ui(ui, e, row_h, show_time, &mut actions);
                 }
             },
         );
@@ -218,7 +328,7 @@ impl Browser {
         actions
     }
 
-    fn row_ui(&mut self, ui: &mut egui::Ui, e: &RemoteEntry, row_h: f32, actions: &mut Vec<Action>) {
+    fn row_ui(&mut self, ui: &mut egui::Ui, e: &RemoteEntry, row_h: f32, show_time: bool, actions: &mut Vec<Action>) {
         let selected = self.selected.contains(&e.path);
         let icon = match e.kind {
             EntryKind::Dir => "🗀",
@@ -245,6 +355,16 @@ impl Browser {
                 egui::pos2(right, inner.center().y),
                 egui::Align2::RIGHT_CENTER,
                 mode_string(m),
+                small.clone(),
+                weak,
+            );
+            right = r.left() - 10.0;
+        }
+        if show_time && let Some(t) = e.mtime {
+            let r = painter.text(
+                egui::pos2(right, inner.center().y),
+                egui::Align2::RIGHT_CENTER,
+                short_time(t),
                 small.clone(),
                 weak,
             );
@@ -296,8 +416,11 @@ impl Browser {
             }
         }
         let tooltip = format!(
-            "{}\n{}{}",
+            "{}{}\n{}{}",
             e.path,
+            e.mtime
+                .map(|t| format!("\nModified {}", malasdoh_core::journal::format_time(t as i64)))
+                .unwrap_or_default(),
             e.mode.map(|m| format!("{} ({:o})  ", mode_string(m), m)).unwrap_or_default(),
             match (e.uid, e.gid) {
                 (Some(u), Some(g)) => format!("uid {u} gid {g}"),
@@ -339,6 +462,27 @@ impl Browser {
                     actions.push(Action::History(e.path.clone()));
                     ui.close();
                 }
+                ui.menu_button("Follow (tail -f)", |ui| {
+                    if ui.button("Follow").on_hover_text("Show new lines as they are written").clicked() {
+                        actions.push(Action::Follow { path: e.path.clone(), sudo: false });
+                        ui.close();
+                    }
+                    if ui.button("Follow as root (sudo)").clicked() {
+                        actions.push(Action::Follow { path: e.path.clone(), sudo: true });
+                        ui.close();
+                    }
+                });
+                if let Some((_, stem)) = Archive::detect(&e.name) {
+                    let what = if Archive::detect(&e.name).is_some_and(|(k, _)| k == Archive::Gz) {
+                        format!("Unpack to {stem}")
+                    } else {
+                        format!("Unpack into {stem}/")
+                    };
+                    if ui.button(what).on_hover_text("Into a new folder next to it; nothing is overwritten").clicked() {
+                        actions.push(Action::Extract(e.path.clone()));
+                        ui.close();
+                    }
+                }
                 ui.separator();
                 if self.selected.len() == 2 {
                     if ui.button("Compare the two selected files").clicked() {
@@ -370,6 +514,24 @@ impl Browser {
             }
             if ui.button("Permissions…").clicked() {
                 self.dialog = Dialog::Chmod { path: e.path.clone(), mode: format!("{:o}", e.mode.unwrap_or(0o644)) };
+                ui.close();
+            }
+            if ui.button("Owner…").on_hover_text("chown").clicked() {
+                let has_dir = self.entries.iter().any(|x| self.selected.contains(&x.path) && x.is_dir_like());
+                self.dialog = Dialog::Owner {
+                    paths: self.selected.clone(),
+                    owner: String::new(),
+                    recursive: false,
+                    sudo: true,
+                    has_dir,
+                };
+                ui.close();
+            }
+            if ui.button("Compress…").on_hover_text("Pack the selection into a .tar.gz or .zip here").clicked() {
+                let names: Vec<String> = self.selected.iter().map(|p| sftp::file_name(p).to_string()).collect();
+                let base = if names.len() == 1 { names[0].clone() } else { sftp::file_name(&self.path).to_string() };
+                let base = if base.is_empty() { "archive".to_string() } else { base };
+                self.dialog = Dialog::Compress { names, out: format!("{base}.tar.gz"), kind: Archive::TarGz };
                 ui.close();
             }
             ui.separator();
@@ -491,11 +653,141 @@ impl Browser {
                     close = true;
                 }
             }
+            Dialog::Owner { paths, owner, recursive, sudo, has_dir } => {
+                egui::Modal::new("owner-dialog".into()).show(ctx, |ui| {
+                    ui.heading("Change owner");
+                    for p in paths.iter().take(6) {
+                        ui.monospace(p);
+                    }
+                    if paths.len() > 6 {
+                        ui.label(format!("…and {} more", paths.len() - 6));
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Owner");
+                        let r = ui.add(egui::TextEdit::singleline(owner).hint_text("user, user:group or :group"));
+                        r.request_focus();
+                    });
+                    if *has_dir {
+                        ui.checkbox(recursive, "Also everything inside the folders");
+                    }
+                    ui.checkbox(sudo, "As root (sudo)").on_hover_text("Changing the owner usually needs root");
+                    let valid = malasdoh_core::commands::check_owner(owner.trim());
+                    if let Err(e) = &valid
+                        && !owner.trim().is_empty()
+                    {
+                        ui.colored_label(ui.visuals().warn_fg_color, e.to_string());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(valid.is_ok(), egui::Button::new("Change")).clicked() {
+                            actions.push(Action::Chown {
+                                paths: std::mem::take(paths),
+                                owner: owner.trim().to_string(),
+                                recursive: *recursive,
+                                sudo: *sudo,
+                            });
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            close = true;
+                        }
+                    });
+                });
+            }
+            Dialog::Symlink { name, target } => {
+                egui::Modal::new("symlink-dialog".into()).show(ctx, |ui| {
+                    ui.heading("New symlink");
+                    egui::Grid::new("symlink-grid").num_columns(2).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(name).hint_text("current"));
+                        ui.end_row();
+                        ui.label("Points to");
+                        ui.add(egui::TextEdit::singleline(target).hint_text("releases/2026-10-10 or /etc/app.conf"));
+                        ui.end_row();
+                    });
+                    ui.label(RichText::new(format!("Created in {dir}. An existing name is never replaced.")).weak());
+                    ui.horizontal(|ui| {
+                        let ok = !name.trim().is_empty() && !target.trim().is_empty() && !name.contains('/');
+                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked() {
+                            actions.push(Action::Symlink {
+                                target: target.trim().to_string(),
+                                link: sftp::join(&dir, name.trim()),
+                            });
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            close = true;
+                        }
+                    });
+                });
+            }
+            Dialog::Compress { names, out, kind } => {
+                egui::Modal::new("compress-dialog".into()).show(ctx, |ui| {
+                    ui.heading("Compress");
+                    ui.label(format!("{} item(s) from {dir}", names.len()));
+                    ui.horizontal(|ui| {
+                        ui.label("Archive");
+                        ui.add(egui::TextEdit::singleline(out).desired_width(240.0));
+                        let before = *kind;
+                        egui::ComboBox::from_id_salt("archive-kind").selected_text(kind.suffix()).show_ui(ui, |ui| {
+                            for k in [Archive::TarGz, Archive::TarXz, Archive::TarBz2, Archive::Tar, Archive::Zip] {
+                                ui.selectable_value(kind, k, k.suffix());
+                            }
+                        });
+                        // Keep the name's ending in step with the chosen type.
+                        if *kind != before {
+                            let stem = Archive::detect(out).map(|(_, s)| s.to_string()).unwrap_or_else(|| out.clone());
+                            *out = format!("{stem}{}", kind.suffix());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let ok = !out.trim().is_empty() && !out.contains('/');
+                        if ui.add_enabled(ok, egui::Button::new("Compress")).clicked() {
+                            actions.push(Action::Compress {
+                                names: std::mem::take(names),
+                                out: out.trim().to_string(),
+                                kind: *kind,
+                            });
+                            close = true;
+                        }
+                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            close = true;
+                        }
+                    });
+                });
+            }
         }
         if close {
             self.dialog = Dialog::None;
         }
     }
+}
+
+/// Folders first, then by the chosen key (name breaks ties).
+pub fn sort_entries(v: &mut [RemoteEntry], by: SortBy, descending: bool) {
+    v.sort_by(|a, b| {
+        let dirs = b.is_dir_like().cmp(&a.is_dir_like());
+        let name = || a.name.to_lowercase().cmp(&b.name.to_lowercase());
+        let key = match by {
+            SortBy::Name => name(),
+            SortBy::Size => a.size.cmp(&b.size).then_with(name),
+            SortBy::Modified => a.mtime.cmp(&b.mtime).then_with(name),
+        };
+        dirs.then(if descending { key.reverse() } else { key })
+    });
+}
+
+/// "11:23" today, "Oct 03" this year, "2024-05-01" before (UTC).
+fn short_time(t: u32) -> String {
+    let Ok(d) = time::OffsetDateTime::from_unix_timestamp(t as i64) else { return String::new() };
+    let now = time::OffsetDateTime::now_utc();
+    let fmt = if d.date() == now.date() {
+        time::macros::format_description!("[hour]:[minute]")
+    } else if d.year() == now.year() {
+        time::macros::format_description!("[month repr:short] [day]")
+    } else {
+        time::macros::format_description!("[year]-[month]-[day]")
+    };
+    d.format(&fmt).unwrap_or_default()
 }
 
 /// A one-field dialog. `Some(true)` = OK, `Some(false)` = cancelled.
@@ -518,4 +810,34 @@ fn name_dialog(ctx: &egui::Context, title: &str, value: &mut String) -> Option<b
         });
     });
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, dir: bool, size: u64, mtime: u32) -> RemoteEntry {
+        RemoteEntry {
+            name: name.into(),
+            path: format!("/x/{name}"),
+            kind: if dir { EntryKind::Dir } else { EntryKind::File },
+            size,
+            mtime: Some(mtime),
+            mode: None,
+            uid: None,
+            gid: None,
+        }
+    }
+
+    #[test]
+    fn sorting_keeps_folders_first() {
+        let mut v = vec![entry("b.log", false, 10, 3), entry("z", true, 0, 1), entry("A.conf", false, 99, 2)];
+        let names = |v: &[RemoteEntry]| v.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        sort_entries(&mut v, SortBy::Name, false);
+        assert_eq!(names(&v), ["z", "A.conf", "b.log"]);
+        sort_entries(&mut v, SortBy::Size, true);
+        assert_eq!(names(&v), ["z", "A.conf", "b.log"]);
+        sort_entries(&mut v, SortBy::Modified, true);
+        assert_eq!(names(&v), ["z", "b.log", "A.conf"]);
+    }
 }

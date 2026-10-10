@@ -86,6 +86,9 @@ pub struct Profile {
     /// Works with bash and zsh (a prompt hook is set up quietly), and with any
     /// shell that reports its folder itself (OSC 7).
     pub follow_terminal: bool,
+    /// Saved folders in the file browser.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bookmarks: Vec<String>,
     /// Port forwards for this connection.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<crate::forward::ForwardSpec>,
@@ -107,6 +110,7 @@ impl Default for Profile {
             notes: String::new(),
             startup_command: String::new(),
             follow_terminal: false,
+            bookmarks: Vec::new(),
             forwards: Vec::new(),
         }
     }

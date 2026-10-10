@@ -720,6 +720,19 @@ impl App {
                     close_term = Some(t.id);
                 }
             }
+            let mut close_log = None;
+            for l in &s.logs {
+                if ui.selectable_label(s.active == Some(Pane::Log(l.id)), l.title()).on_hover_text(&l.path).clicked() {
+                    s.active = Some(Pane::Log(l.id));
+                }
+                if s.active == Some(Pane::Log(l.id)) && ui.small_button("✖").on_hover_text("Stop following").clicked()
+                {
+                    close_log = Some(l.id);
+                }
+            }
+            if let Some(id) = close_log {
+                s.close_log(id);
+            }
             for e in &s.editors {
                 if ui
                     .selectable_label(s.active == Some(Pane::Editor(e.id)), format!("📝 {}", e.title()))
@@ -782,8 +795,18 @@ impl App {
             self.cross = Some(CrossCopy { from: sid, paths, to: None, dest: String::new(), replace: false });
         }
         let compare = s.compare.take();
+        let bookmarks = std::mem::take(&mut s.bookmarks_changed).then(|| s.profile.bookmarks.clone());
         if let Some(path) = s.history.take() {
             self.journal_win.show(&self.journal, Some(path));
+        }
+        // Bookmarks belong to the saved connection.
+        if let Some(b) = bookmarks
+            && let Some(mut p) = self.profiles.get(pid).cloned()
+        {
+            p.bookmarks = b;
+            if self.profiles.upsert(p).is_ok() {
+                self.save_profiles();
+            }
         }
         if let Some(req) = compare {
             self.compares.request(req, sid, &self.sessions, &self.shared);

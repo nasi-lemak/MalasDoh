@@ -23,11 +23,14 @@ use crate::bridge::{Events, Question, SessionId, UiPrompter};
 use crate::browser::{self, Browser, Transfer};
 use crate::compare::{CompareRequest, Side};
 use crate::editor::{Editor, EditorAction, State as EditorState};
+use crate::find_ui::{FindAction, FindWindow};
 use crate::forwards::{ForwardMsg, Forwards};
 use crate::local::{LocalAction, LocalBrowser};
+use crate::logview::{LogAction, LogView};
 use crate::settings::Settings;
 use crate::sync_ui::{SyncMsg, SyncWindow};
 use crate::terminal::Terminal;
+use malasdoh_core::commands;
 
 /// What every session needs from the app.
 #[derive(Clone)]
@@ -52,6 +55,17 @@ const FOLLOW_HOOK: &str = concat!(
 );
 
 pub enum SessionMsg {
+    LogData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    LogEnded {
+        id: u64,
+        why: String,
+    },
+    FindDone {
+        result: Result<Vec<String>, String>,
+    },
     Forward(ForwardMsg),
     Sync(SyncMsg),
     Connected {
@@ -125,6 +139,14 @@ pub enum SaveFailure {
 pub enum AfterSudo {
     Open(String),
     Save(u64),
+    /// A file operation command, and what to say when it worked.
+    Run {
+        cmd: String,
+        what: &'static str,
+        done: String,
+    },
+    Follow(String),
+    Find(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +179,7 @@ impl TermPane {
 pub enum Pane {
     Term(u64),
     Editor(u64),
+    Log(u64),
 }
 
 /// A file opened in the user's own editor, watched for saves.
@@ -201,6 +224,10 @@ pub struct Session {
     pub history: Option<String>,
     /// What to reopen once connected (from the last run).
     pub restore: Option<crate::restore::Tab>,
+    pub logs: Vec<LogView>,
+    pub find: FindWindow,
+    /// The bookmarks changed; the app saves them to the connection.
+    pub bookmarks_changed: bool,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -213,6 +240,7 @@ impl Session {
     pub fn new(id: SessionId, chain: Vec<Profile>) -> Self {
         let profile = chain.last().cloned().expect("chain has a target");
         let forwards = Forwards::new(&profile.forwards);
+        let bookmarks = profile.bookmarks.clone();
         Self {
             id,
             profile,
@@ -223,7 +251,11 @@ impl Session {
             terms: Vec::new(),
             editors: Vec::new(),
             active: None,
-            browser: Browser::new(id),
+            browser: {
+                let mut b = Browser::new(id);
+                b.bookmarks = bookmarks;
+                b
+            },
             questions: VecDeque::new(),
             sudo: None,
             externals: Vec::new(),
@@ -240,6 +272,9 @@ impl Session {
             compare: None,
             history: None,
             restore: None,
+            logs: Vec::new(),
+            find: FindWindow::default(),
+            bookmarks_changed: false,
         }
     }
 
@@ -404,6 +439,17 @@ impl Session {
 
     pub fn handle(&mut self, msg: SessionMsg, shared: &Shared, settings: &Settings) {
         match msg {
+            SessionMsg::LogData { id, data } => {
+                if let Some(l) = self.logs.iter_mut().find(|l| l.id == id) {
+                    l.push(&data);
+                }
+            }
+            SessionMsg::LogEnded { id, why } => {
+                if let Some(l) = self.logs.iter_mut().find(|l| l.id == id) {
+                    l.end(why);
+                }
+            }
+            SessionMsg::FindDone { result } => self.find.done(result),
             SessionMsg::Forward(m) => self.forwards.handle(m),
             SessionMsg::Sync(m) => {
                 self.sync.handle(m);
@@ -626,6 +672,9 @@ impl Session {
                     self.sudo = Some(Access::Sudo { password });
                     match then {
                         AfterSudo::Open(path) => self.open_file(path, true, shared),
+                        AfterSudo::Run { cmd, what, done } => self.run_op(cmd, what, done, true, shared),
+                        AfterSudo::Follow(path) => self.follow(path, true, shared),
+                        AfterSudo::Find(cmd) => self.run_find(cmd, true, shared),
                         AfterSudo::Save(id) => {
                             let access = self.sudo.clone().unwrap();
                             if let Some(ed) = self.editors.iter_mut().find(|e| e.id == id) {
@@ -642,6 +691,9 @@ impl Session {
                         ed.state = EditorState::Ready;
                         ed.message = Some((format!("sudo: {e}"), true));
                     } else {
+                        if matches!(then, AfterSudo::Find(_)) {
+                            self.find.done(Err(format!("sudo: {e}")));
+                        }
                         self.notify(format!("sudo: {e}"), true);
                     }
                 }
@@ -684,6 +736,114 @@ impl Session {
     }
 
     /// Run a quick filesystem operation and report the result as a toast.
+    /// The access to use: plain, or sudo once it is set up. When sudo is
+    /// asked for but not ready, it is set up first and `then` runs after.
+    fn access_for(&mut self, sudo: bool, then: AfterSudo, shared: &Shared) -> Option<Access> {
+        if !sudo {
+            return Some(Access::Sftp);
+        }
+        match &self.sudo {
+            Some(a) => Some(a.clone()),
+            None => {
+                self.ensure_sudo(then, shared);
+                None
+            }
+        }
+    }
+
+    /// Run a shell command for a file operation, report how it went, and
+    /// refresh the listing.
+    /// `what` completes "Could not …" when it fails.
+    fn run_op(&mut self, cmd: String, what: &'static str, done: String, sudo: bool, shared: &Shared) {
+        let Some(access) = self.access_for(sudo, AfterSudo::Run { cmd: cmd.clone(), what, done: done.clone() }, shared)
+        else {
+            return;
+        };
+        let Some(io) = self.io(access) else { return self.notify("Not connected", true) };
+        let (events, id) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let result = match io.run(&cmd).await {
+                Ok(out) if out.success() => Ok(done),
+                Ok(out) => {
+                    let why = out.stderr_text();
+                    let why = if why.is_empty() { format!("exit status {:?}", out.status) } else { why };
+                    Err(format!("Could not {what}: {why}"))
+                }
+                Err(e) => Err(format!("Could not {what}: {e:#}")),
+            };
+            events.session(id, SessionMsg::OpDone { result });
+        });
+    }
+
+    fn run_find(&mut self, cmd: String, sudo: bool, shared: &Shared) {
+        let Some(access) = self.access_for(sudo, AfterSudo::Find(cmd.clone()), shared) else { return };
+        let Some(io) = self.io(access) else {
+            return self.find.done(Err("Not connected".into()));
+        };
+        let (events, id) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let result = match io.run(&cmd).await {
+                Ok(out) => Ok(String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect()),
+                Err(e) => Err(format!("{e:#}")),
+            };
+            events.session(id, SessionMsg::FindDone { result });
+        });
+    }
+
+    /// Open a pane following `path` as it grows.
+    pub fn follow(&mut self, path: String, sudo: bool, shared: &Shared) {
+        let Some(access) = self.access_for(sudo, AfterSudo::Follow(path.clone()), shared) else { return };
+        let Some(conn) = self.conn.clone() else { return self.notify("Not connected", true) };
+        let tail = commands::follow(&path, 500);
+        let (cmd, stdin) = match &access {
+            Access::Sftp => (tail, None),
+            Access::Sudo { password } => (
+                format!("sudo -S -p '' -- sh -c {}", ssh::shell_quote(&tail)),
+                password.as_ref().map(|p| format!("{p}\n").into_bytes()),
+            ),
+        };
+        let id = self.next();
+        let (stop, mut stopped) = oneshot::channel::<()>();
+        self.logs.push(LogView::new(id, path, access.is_sudo(), stop));
+        self.active = Some(Pane::Log(id));
+        let (events, session) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let mut stream = match conn.exec_stream(&cmd, stdin).await {
+                Ok(s) => s,
+                Err(e) => return events.session(session, SessionMsg::LogEnded { id, why: format!("{e:#}") }),
+            };
+            let mut stderr = Vec::new();
+            loop {
+                tokio::select! {
+                    ev = stream.events.recv() => match ev {
+                        Some(ssh::StreamEvent::Stdout(data)) => events.session(session, SessionMsg::LogData { id, data }),
+                        Some(ssh::StreamEvent::Stderr(e)) => stderr.extend_from_slice(&e),
+                        ev @ (Some(ssh::StreamEvent::Exited(_)) | None) => {
+                            let status = match ev { Some(ssh::StreamEvent::Exited(s)) => s, _ => None };
+                            let err = String::from_utf8_lossy(&stderr).trim().to_string();
+                            let why = match status {
+                                _ if !err.is_empty() => err,
+                                Some(s) => format!("Stopped (exit status {s})"),
+                                None => "Stopped".into(),
+                            };
+                            events.session(session, SessionMsg::LogEnded { id, why });
+                            break;
+                        }
+                    },
+                    // The pane was closed: dropping the stream stops tail.
+                    _ = &mut stopped => break,
+                }
+            }
+        });
+    }
+
+    pub fn close_log(&mut self, id: u64) {
+        self.logs.retain(|l| l.id != id);
+        if self.active == Some(Pane::Log(id)) {
+            self.active = self.terms.first().map(|t| Pane::Term(t.id));
+        }
+    }
+
     fn fs_op<F, Fut>(&self, shared: &Shared, done: String, f: F)
     where
         F: FnOnce(RemoteFs) -> Fut + Send + 'static,
@@ -1019,6 +1179,35 @@ impl Session {
                 })
             }
             A::History(path) => self.history = Some(path),
+            A::Chown { paths, owner, recursive, sudo } => match commands::chown(&paths, &owner, recursive) {
+                Ok(cmd) => self.run_op(cmd, "change the owner", format!("Owner set to {owner}"), sudo, shared),
+                Err(e) => self.notify(format!("{e:#}"), true),
+            },
+            A::Symlink { target, link } => match commands::symlink(&target, &link) {
+                Ok(cmd) => self.run_op(cmd, "create the link", format!("Created {link} → {target}"), false, shared),
+                Err(e) => self.notify(format!("{e:#}"), true),
+            },
+            A::Extract(path) => match commands::extract(&path) {
+                Ok((cmd, dest)) => self.run_op(cmd, "unpack", format!("Unpacked to {dest}"), false, shared),
+                Err(e) => self.notify(format!("{e:#}"), true),
+            },
+            A::Compress { names, out, kind } => match commands::create(&self.browser.path, &names, &out, kind) {
+                Ok(cmd) => self.run_op(cmd, "compress", format!("Created {out}"), false, shared),
+                Err(e) => self.notify(format!("{e:#}"), true),
+            },
+            A::Follow { path, sudo } => self.follow(path, sudo, shared),
+            A::OpenFind => self.find.show(&self.browser.path.clone()),
+            A::ToggleBookmark(dir) => {
+                let b = &mut self.profile.bookmarks;
+                if let Some(i) = b.iter().position(|x| *x == dir) {
+                    b.remove(i);
+                } else {
+                    b.push(dir);
+                    b.sort();
+                }
+                self.browser.bookmarks = b.clone();
+                self.bookmarks_changed = true;
+            }
             A::Download(paths) => {
                 // With the local pane open, download into its folder.
                 let dir = match &self.local {
@@ -1197,6 +1386,14 @@ impl Session {
                     self.editor_action(id, action, shared, settings);
                 }
             }
+            Some(Pane::Log(id)) => {
+                let Some(l) = self.logs.iter_mut().find(|l| l.id == id) else { return };
+                if let Some(LogAction::Restart) = l.ui(ui) {
+                    let (path, sudo) = (l.path.clone(), l.sudo);
+                    self.close_log(id);
+                    self.follow(path, sudo, shared);
+                }
+            }
             None => {
                 ui.centered_and_justified(|ui| ui.label("Open a terminal or double-click a file to edit it."));
             }
@@ -1206,6 +1403,20 @@ impl Session {
             self.restore_backup(path, backup, shared);
         }
         self.overwrite_ui(ui.ctx(), shared);
+        match self.find.ui(ui.ctx(), self.id) {
+            Some(FindAction::Search { dir, name, contains, depth, sudo }) => {
+                match commands::find(&dir, &name, &contains, depth, crate::find_ui::LIMIT) {
+                    Ok(cmd) => self.run_find(cmd, sudo, shared),
+                    Err(e) => self.find.done(Err(format!("{e:#}"))),
+                }
+            }
+            Some(FindAction::Reveal(p)) => {
+                self.browser.reveal = Some(p.clone());
+                self.navigate(sftp::parent(&p), shared);
+            }
+            Some(FindAction::Open(p)) => self.open_file(p, false, shared),
+            None => {}
+        }
     }
 
     fn overwrite_ui(&mut self, ctx: &egui::Context, shared: &Shared) {

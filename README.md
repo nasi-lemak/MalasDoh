@@ -64,7 +64,15 @@ remote-editing loop, where they are weakest:
 - **File browser**: navigate, filter, hidden files, upload (button or drag and
   drop from the desktop) and download (files or whole folders, with progress and
   cancel), new file/folder, rename, delete, chmod, copy path, "cd here in
-  terminal". Nothing is overwritten without asking first.
+  terminal". Nothing is overwritten without asking first. Sort by name, size
+  or date; bookmark folders per connection; change owner (`chown`, with sudo)
+  and create symlinks; pack a selection into `.tar.gz`/`.tar.xz`/`.zip` and
+  unpack archives into a new folder (never over existing files).
+- **Find files**: by name pattern and/or text inside, from any folder, as
+  root if needed; click a result to show it, double-click to edit.
+- **Follow a log** (`tail -F`, also as root): new lines stream in, with a
+  filter, pause, errors and warnings coloured, and it keeps going across log
+  rotation. Closing the tab stops `tail` on the server.
 - **Two panes**: "Local files" puts this computer's folders next to the
   server's, WinSCP style; drag either way, or use the Upload button.
 - **Copy between servers**: send files or folders from one connected server to

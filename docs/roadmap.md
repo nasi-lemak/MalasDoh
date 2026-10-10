@@ -22,6 +22,7 @@
 - Compare files across servers, with local files and with backups
 - Change journal of every save, with patches, check results and rollbacks
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line
+- Browser: sort, bookmarks, chown, symlinks, archives, find files, follow logs
 - SSH key generation and install (ssh-copy-id); import from PuTTY and WinSCP
 - Reopen last session; startup command per connection; browser follows the
   terminal's folder

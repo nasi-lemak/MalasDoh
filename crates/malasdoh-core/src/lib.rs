@@ -2,6 +2,7 @@
 //! remote editing. Nothing in here knows about the GUI; the app drives it through
 //! async calls and answers its questions (host keys, passwords) via [`Prompter`].
 
+pub mod commands;
 pub mod diff;
 pub mod edit;
 pub mod forward;

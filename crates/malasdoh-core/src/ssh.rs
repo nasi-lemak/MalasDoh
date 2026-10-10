@@ -684,7 +684,57 @@ impl ExecOutput {
     }
 }
 
+/// Output of a command that keeps running (`tail -F`), as it arrives.
+#[derive(Debug)]
+pub enum StreamEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    /// The command ended (exit status, if the server sent one).
+    Exited(Option<u32>),
+}
+
+/// A running command. Dropping it closes the channel, which ends the command.
+pub struct ExecStream {
+    pub events: mpsc::UnboundedReceiver<StreamEvent>,
+    _stop: tokio::sync::oneshot::Sender<()>,
+}
+
 impl Connection {
+    /// Start a command and stream its output. `stdin` is sent first (a sudo
+    /// password, say); input is then left open, so a program that reads
+    /// stdin waits instead of seeing end-of-file.
+    pub async fn exec_stream(&self, command: &str, stdin: Option<Vec<u8>>) -> Result<ExecStream> {
+        let mut ch = self.handle.channel_open_session().await?;
+        ch.exec(true, command).await?;
+        if let Some(input) = stdin {
+            ch.data(&input[..]).await?;
+        }
+        let (tx, events) = mpsc::unbounded_channel();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = ch.wait() => match msg {
+                        Some(ChannelMsg::Data { data }) => { let _ = tx.send(StreamEvent::Stdout(data.to_vec())); }
+                        Some(ChannelMsg::ExtendedData { data, ext: 1 }) => { let _ = tx.send(StreamEvent::Stderr(data.to_vec())); }
+                        Some(ChannelMsg::ExitStatus { exit_status }) => { let _ = tx.send(StreamEvent::Exited(Some(exit_status))); }
+                        Some(ChannelMsg::Close) | None => { let _ = tx.send(StreamEvent::Exited(None)); break; }
+                        _ => {}
+                    },
+                    // The stream was dropped: stop the command.
+                    // The stream was dropped: stop the command. Closing alone
+                    // can leave `tail` waiting until its next write.
+                    _ = &mut stopped => {
+                        let _ = ch.signal(russh::Sig::TERM).await;
+                        let _ = ch.close().await;
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(ExecStream { events, _stop: stop })
+    }
+
     pub(crate) fn handle(&self) -> &Handle<Client> {
         &self.handle
     }

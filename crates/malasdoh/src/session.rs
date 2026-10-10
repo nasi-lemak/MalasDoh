@@ -371,7 +371,12 @@ impl Session {
             }
             SessionMsg::ShellOutput { term, data } => {
                 if let Some(t) = self.terms.iter_mut().find(|t| t.id == term) {
-                    t.term.feed(&data);
+                    let reply = t.term.feed(&data);
+                    if !reply.is_empty()
+                        && let Some(tx) = &t.tx
+                    {
+                        let _ = tx.send(ShellCmd::Input(reply));
+                    }
                 }
             }
             SessionMsg::ShellExited { term, status } => {
@@ -909,6 +914,21 @@ impl Session {
                 let Some(t) = self.terms.iter_mut().find(|t| t.id == id) else { return };
                 t.term.set_font_size(settings.terminal_font_size);
                 let out = t.term.ui(ui);
+                if out.start_log {
+                    let host = edit::host_backup_dir(
+                        &shared.paths.data_dir.join("logs"),
+                        &self.profile.host,
+                        self.profile.port,
+                    );
+                    let stamp = time::OffsetDateTime::now_utc()
+                        .format(&time::macros::format_description!("[year][month][day]-[hour][minute][second]Z"))
+                        .unwrap_or_default();
+                    let path = host.join(format!("{stamp}-terminal{id}.log"));
+                    match t.term.start_log(path.clone()) {
+                        Ok(()) => self.toast = Some((format!("Logging to {}", path.display()), false, Instant::now())),
+                        Err(e) => self.toast = Some((format!("Could not start the log: {e}"), true, Instant::now())),
+                    }
+                }
                 if let Some(tx) = &t.tx {
                     if let Some((c, r)) = out.resize {
                         let _ = tx.send(ShellCmd::Resize(c, r));

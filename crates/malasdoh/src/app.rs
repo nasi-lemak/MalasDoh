@@ -166,6 +166,11 @@ impl App {
             ProfileStore::default()
         });
         let snippets_path = paths.config_dir.join("snippets.toml");
+        // Copies made for external editors are kept a week, then tidied away.
+        let cache = paths.edit_cache_dir();
+        rt.spawn_blocking(move || {
+            malasdoh_core::paths::remove_older_than(&cache, std::time::Duration::from_secs(7 * 86400))
+        });
         let shared = Shared {
             rt: rt.handle().clone(),
             events,

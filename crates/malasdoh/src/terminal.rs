@@ -12,6 +12,18 @@ const SCROLLBACK: usize = 10_000;
 pub struct TerminalOutput {
     pub send: Vec<u8>,
     pub resize: Option<(u16, u16)>,
+    /// The user clicked "Log to file" (the session picks the path).
+    pub start_log: bool,
+}
+
+/// Search through the scrollback. Lines are numbered from the oldest kept.
+#[derive(Default)]
+struct Search {
+    query: String,
+    /// (line, column, length in columns)
+    matches: Vec<(usize, usize, usize)>,
+    current: usize,
+    searched: String,
 }
 
 pub struct Terminal {
@@ -22,6 +34,9 @@ pub struct Terminal {
     /// Wheel movement not yet turned into whole lines.
     scroll_accum: f32,
     pub exited: Option<String>,
+    search: Option<Search>,
+    log: Option<(std::path::PathBuf, std::io::BufWriter<std::fs::File>)>,
+    strip: AnsiStrip,
 }
 
 impl Terminal {
@@ -32,15 +47,133 @@ impl Terminal {
             selection: None,
             scroll_accum: 0.0,
             exited: None,
+            search: None,
+            log: None,
+            strip: AnsiStrip::default(),
         }
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) {
-        // New output snaps the view back to the bottom, like most terminals.
-        if self.parser.screen().scrollback() > 0 {
+    /// Process output from the server. Returns bytes to send back: answers to
+    /// cursor-position, status and device-attribute queries, which vt100 does
+    /// not answer itself and some programs wait for.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        // New output snaps the view back to the bottom, like most terminals,
+        // unless the user is reading search results.
+        if self.parser.screen().scrollback() > 0 && self.search.is_none() {
             self.parser.screen_mut().set_scrollback(0);
         }
-        self.parser.process(bytes);
+        if let Some((_, w)) = &mut self.log {
+            use std::io::Write;
+            let text = self.strip.strip(bytes);
+            if w.write_all(&text).and_then(|_| w.flush()).is_err() {
+                self.log = None;
+            }
+        }
+        let mut reply = Vec::new();
+        let mut rest = bytes;
+        // Process up to each query, so the cursor position is the one at the
+        // time the program asked.
+        while let Some((i, len, q)) = find_query(rest) {
+            self.parser.process(&rest[..i + len]);
+            match q {
+                Query::CursorPosition => {
+                    let (r, c) = self.parser.screen().cursor_position();
+                    reply.extend_from_slice(format!("\x1b[{};{}R", r + 1, c + 1).as_bytes());
+                }
+                Query::Status => reply.extend_from_slice(b"\x1b[0n"),
+                Query::DeviceAttributes => reply.extend_from_slice(b"\x1b[?1;2c"),
+            }
+            rest = &rest[i + len..];
+        }
+        self.parser.process(rest);
+        reply
+    }
+
+    pub fn start_log(&mut self, path: std::path::PathBuf) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            malasdoh_core::paths::create_private_dir(dir)?;
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let f = opts.open(&path)?;
+        self.log = Some((path, std::io::BufWriter::new(f)));
+        Ok(())
+    }
+
+    pub fn log_path(&self) -> Option<&std::path::Path> {
+        self.log.as_ref().map(|(p, _)| p.as_path())
+    }
+
+    /// All lines: scrollback (oldest first) then the screen. Also returns how
+    /// many of them are scrollback.
+    fn all_lines(&mut self) -> (Vec<String>, usize) {
+        let keep = self.parser.screen().scrollback();
+        let screen = self.parser.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let total_sb = screen.scrollback();
+        let (rows, cols) = screen.size();
+        let rows = rows as usize;
+        let mut lines = vec![String::new(); total_sb + rows];
+        let mut off = total_sb;
+        loop {
+            screen.set_scrollback(off);
+            for (r, text) in screen.rows(0, cols).enumerate() {
+                lines[total_sb - off + r] = text;
+            }
+            if off == 0 {
+                break;
+            }
+            off = off.saturating_sub(rows);
+        }
+        screen.set_scrollback(keep);
+        (lines, total_sb)
+    }
+
+    fn run_search(&mut self) {
+        let Some(q) = self.search.as_ref().map(|s| s.query.to_lowercase()) else { return };
+        let mut matches = Vec::new();
+        if !q.is_empty() {
+            let (lines, _) = self.all_lines();
+            for (i, l) in lines.iter().enumerate() {
+                let lower = l.to_lowercase();
+                for (byte, _) in lower.match_indices(&q) {
+                    let col = lower[..byte].chars().count();
+                    matches.push((i, col, q.chars().count()));
+                }
+            }
+        }
+        let s = self.search.as_mut().unwrap();
+        s.searched = s.query.clone();
+        s.current = matches.len().saturating_sub(1);
+        s.matches = matches;
+        self.reveal_current();
+    }
+
+    /// Scroll so the current match is on screen.
+    fn reveal_current(&mut self) {
+        let Some(&(line, _, _)) = self.search.as_ref().and_then(|s| s.matches.get(s.current)) else { return };
+        let screen = self.parser.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let total_sb = screen.scrollback();
+        let rows = screen.size().0 as usize;
+        // Visible row r shows line total_sb - off + r; put the match mid-screen.
+        let off = (total_sb + rows / 2).saturating_sub(line).min(total_sb);
+        screen.set_scrollback(off);
+    }
+
+    /// Absolute line number of the top visible row.
+    fn top_line(&mut self) -> usize {
+        let screen = self.parser.screen_mut();
+        let off = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let total_sb = screen.scrollback();
+        screen.set_scrollback(off);
+        total_sb - off
     }
 
     pub fn set_font_size(&mut self, size: f32) {
@@ -63,8 +196,77 @@ impl Terminal {
         start != end && (row, col) >= start && (row, col) <= end
     }
 
+    fn toolbar_ui(&mut self, ui: &mut egui::Ui, out: &mut TerminalOutput) {
+        let open_search = ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F));
+        if open_search && self.search.is_none() {
+            self.search = Some(Search::default());
+        }
+        ui.horizontal(|ui| {
+            if let Some(s) = &mut self.search {
+                ui.label("Find:");
+                let r =
+                    ui.add(egui::TextEdit::singleline(&mut s.query).desired_width(220.0).hint_text("in scrollback"));
+                if open_search {
+                    r.request_focus();
+                }
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                let (n, cur) = (s.matches.len(), s.current);
+                let stale = s.query != s.searched;
+                if !stale {
+                    ui.label(if n == 0 { "no matches".to_string() } else { format!("{} of {n}", cur + 1) });
+                }
+                let prev = ui.small_button("⬆").on_hover_text("Previous (older)").clicked();
+                let next = ui.small_button("⬇").on_hover_text("Next (newer)").clicked();
+                let close = ui.small_button("✖").clicked() || ui.input(|i| i.key_pressed(Key::Escape) && r.has_focus());
+                if close {
+                    self.search = None;
+                    self.parser.screen_mut().set_scrollback(0);
+                } else if enter && stale {
+                    self.run_search();
+                    r.request_focus();
+                } else if (prev || enter) && n > 0 {
+                    s.current = (cur + n - 1) % n;
+                    self.reveal_current();
+                    if enter {
+                        r.request_focus();
+                    }
+                } else if next && n > 0 {
+                    s.current = (cur + 1) % n;
+                    self.reveal_current();
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match self.log_path() {
+                    Some(p) => {
+                        let p = p.display().to_string();
+                        if ui.small_button("Stop logging").on_hover_text(&p).clicked() {
+                            self.log = None;
+                        }
+                        ui.label(egui::RichText::new("• logging").color(Color32::from_rgb(0xd0, 0x50, 0x50)))
+                            .on_hover_text(p);
+                    }
+                    None => {
+                        if ui
+                            .small_button("Log to file")
+                            .on_hover_text("Save this terminal's output (as plain text) from now on")
+                            .clicked()
+                        {
+                            out.start_log = true;
+                        }
+                    }
+                }
+                if self.search.is_none()
+                    && ui.small_button("🔍 Find").on_hover_text("Search the scrollback (Ctrl+Shift+F)").clicked()
+                {
+                    self.search = Some(Search::default());
+                }
+            });
+        });
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui) -> TerminalOutput {
         let mut out = TerminalOutput::default();
+        self.toolbar_ui(ui, &mut out);
         let font = FontId::monospace(self.font_size);
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let avail = ui.available_size();
@@ -143,7 +345,8 @@ impl Terminal {
             self.handle_input(ui, &mut out);
         }
 
-        self.paint(ui, rect, &font, cell_w, cell_h, focused);
+        let top = self.top_line();
+        self.paint(ui, rect, &font, cell_w, cell_h, focused, top);
         if self.parser.screen().scrollback() > 0 {
             let label = format!("⬆ {} lines", self.parser.screen().scrollback());
             ui.painter().text(
@@ -214,7 +417,12 @@ impl Terminal {
         }
     }
 
-    fn paint(&self, ui: &egui::Ui, rect: Rect, font: &FontId, cell_w: f32, cell_h: f32, focused: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn paint(&self, ui: &egui::Ui, rect: Rect, font: &FontId, cell_w: f32, cell_h: f32, focused: bool, top: usize) {
+        let hits: Vec<(usize, usize, usize, bool)> = match &self.search {
+            Some(s) => s.matches.iter().enumerate().map(|(i, &(l, c, n))| (l, c, n, i == s.current)).collect(),
+            None => Vec::new(),
+        };
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, BG);
         let screen = self.parser.screen();
@@ -238,6 +446,14 @@ impl Terminal {
                 }
                 if self.in_selection(row, col) {
                     bg = SELECTION;
+                }
+                let line = top + row as usize;
+                if let Some(&(.., current)) =
+                    hits.iter().find(|&&(l, c, n, _)| l == line && (col as usize) >= c && (col as usize) < c + n)
+                {
+                    bg =
+                        if current { Color32::from_rgb(0xe0, 0x9a, 0x30) } else { Color32::from_rgb(0x6a, 0x55, 0x20) };
+                    fg = Color32::BLACK;
                 }
                 let text = if cell.has_contents() { cell.contents() } else { " " };
                 let format = TextFormat {
@@ -310,6 +526,84 @@ fn color(c: vt100::Color, default: Color32, bold: bool) -> Color32 {
             Color32::from_rgb(v, v, v)
         }
         vt100::Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Query {
+    CursorPosition,
+    Status,
+    DeviceAttributes,
+}
+
+/// The first terminal query in `b`: (offset, length, kind).
+fn find_query(b: &[u8]) -> Option<(usize, usize, Query)> {
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == 0x1b && b[i + 1] == b'[' {
+            let rest = &b[i + 2..];
+            if rest.starts_with(b"6n") {
+                return Some((i, 4, Query::CursorPosition));
+            }
+            if rest.starts_with(b"5n") {
+                return Some((i, 4, Query::Status));
+            }
+            if rest.starts_with(b"c") {
+                return Some((i, 3, Query::DeviceAttributes));
+            }
+            if rest.starts_with(b"0c") {
+                return Some((i, 4, Query::DeviceAttributes));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Turns terminal output into plain text for logs: drops escape sequences
+/// and carriage returns. Keeps state so a sequence split across reads is
+/// still removed.
+#[derive(Default)]
+struct AnsiStrip {
+    state: StripState,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum StripState {
+    #[default]
+    Text,
+    Esc,
+    Csi,
+    /// OSC/DCS string, until BEL or ESC \.
+    Str,
+    StrEsc,
+}
+
+impl AnsiStrip {
+    fn strip(&mut self, input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len());
+        for &c in input {
+            self.state = match (self.state, c) {
+                (StripState::Text, 0x1b) => StripState::Esc,
+                (StripState::Text, b'\r') => StripState::Text,
+                (StripState::Text, c) if c == b'\n' || c == b'\t' || c >= 0x20 || c >= 0x80 => {
+                    out.push(c);
+                    StripState::Text
+                }
+                (StripState::Text, _) => StripState::Text,
+                (StripState::Esc, b'[') => StripState::Csi,
+                (StripState::Esc, b']' | b'P' | b'_' | b'^') => StripState::Str,
+                (StripState::Esc, _) => StripState::Text,
+                (StripState::Csi, 0x40..=0x7e) => StripState::Text,
+                (StripState::Csi, _) => StripState::Csi,
+                (StripState::Str, 0x07) => StripState::Text,
+                (StripState::Str, 0x1b) => StripState::StrEsc,
+                (StripState::Str, _) => StripState::Str,
+                (StripState::StrEsc, b'\\') => StripState::Text,
+                (StripState::StrEsc, _) => StripState::Str,
+            };
+        }
+        out
     }
 }
 
@@ -428,6 +722,42 @@ mod tests {
         assert_eq!(color(vt100::Color::Idx(16), FG, false), Color32::from_rgb(0, 0, 0));
         assert_eq!(color(vt100::Color::Idx(231), FG, false), Color32::from_rgb(255, 255, 255));
         assert_eq!(color(vt100::Color::Rgb(1, 2, 3), FG, false), Color32::from_rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn answers_cursor_position_queries() {
+        let mut t = Terminal::new(14.0);
+        assert_eq!(t.feed(b"abc\x1b[6n"), b"\x1b[1;4R");
+        assert_eq!(t.feed(b"\r\nx\x1b[6ny\x1b[c"), b"\x1b[2;2R\x1b[?1;2c");
+        assert!(t.feed(b"plain").is_empty());
+    }
+
+    #[test]
+    fn strips_escapes_for_logs() {
+        let mut s = AnsiStrip::default();
+        assert_eq!(s.strip(b"\x1b[1;32mgreen\x1b[0m ok\r\n"), b"green ok\n");
+        assert_eq!(s.strip(b"\x1b]0;title\x07after"), b"after");
+        // A sequence split across two reads.
+        assert_eq!(s.strip(b"a\x1b[3"), b"a");
+        assert_eq!(s.strip(b"1mb"), b"b");
+    }
+
+    #[test]
+    fn search_finds_lines_in_scrollback() {
+        let mut t = Terminal::new(14.0);
+        for i in 0..100 {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        t.search = Some(Search { query: "line 7".into(), ..Default::default() });
+        t.run_search();
+        let s = t.search.as_ref().unwrap();
+        // "line 7" and "line 70".."line 79".
+        assert_eq!(s.matches.len(), 11);
+        assert_eq!(s.matches[0], (7, 0, 6));
+        // The newest match is selected and scrolled into view.
+        let line = s.matches[s.current].0;
+        let top = t.top_line();
+        assert!(line >= top && line < top + 24, "line {line} not in view from {top}");
     }
 
     #[test]

@@ -115,3 +115,25 @@ pub fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     }
     opts.open(path)?.write_all(contents)
 }
+
+/// Delete entries directly inside `dir` not modified for `age`. Used to clean
+/// up copies made for external editing. Errors are ignored: this is tidying.
+pub fn remove_older_than(dir: &Path, age: std::time::Duration) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for e in rd.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d > age);
+        if old {
+            let p = e.path();
+            let ok = if p.is_dir() { std::fs::remove_dir_all(&p).is_ok() } else { std::fs::remove_file(&p).is_ok() };
+            removed += ok as usize;
+        }
+    }
+    removed
+}

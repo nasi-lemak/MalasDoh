@@ -58,6 +58,8 @@ pub struct Editor {
     pub check_enabled: bool,
     pub lang: highlight::Lang,
     hl_cache: Option<(u64, egui::text::LayoutJob)>,
+    /// Lines changed since the file was opened or last saved, and for what.
+    marks: Option<(u64, Vec<diff::LineMark>)>,
     find: Find,
     /// The "go to line" box, when open, and whether it still needs focus.
     goto: Option<(String, bool)>,
@@ -92,6 +94,7 @@ impl Editor {
             draft_saved: None,
             lang: highlight::detect(&session.path, &session.base_text),
             hl_cache: None,
+            marks: None,
             check_enabled: check.is_some(),
             check,
             id,
@@ -284,11 +287,16 @@ impl Editor {
             let y = (line as f32 * row_h - ui.available_height() / 3.0).max(0.0);
             area = area.vertical_scroll_offset(y);
         }
+        let marks = self.line_marks();
         area.show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let lines = self.text.lines().count().max(1) + usize::from(self.text.ends_with('\n'));
                 let numbers: String = (1..=lines).map(|n| format!("{n:>4}\n")).collect();
+                let spacing = std::mem::replace(&mut ui.spacing_mut().item_spacing.x, 2.0);
+                let gutter = ui.allocate_exact_size(egui::vec2(4.0, lines as f32 * row_h), egui::Sense::hover());
                 ui.label(RichText::new(numbers).font(egui::FontId::monospace(font_size)).weak());
+                ui.spacing_mut().item_spacing.x = spacing;
+                gutter_ui(ui, gutter, &marks, row_h);
                 ui.add(
                     egui::TextEdit::multiline(&mut self.text)
                         .id(te_id)
@@ -307,6 +315,24 @@ impl Editor {
             action = Some(a);
         }
         action
+    }
+
+    /// The gutter marks for the current text, recomputed only when it changed.
+    fn line_marks(&mut self) -> Vec<diff::LineMark> {
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&self.text, &self.session.base_text).hash(&mut h);
+            h.finish()
+        };
+        match &self.marks {
+            Some((k, m)) if *k == key => m.clone(),
+            _ => {
+                let m = diff::line_marks(&self.session.base_text, &self.text);
+                self.marks = Some((key, m.clone()));
+                m
+            }
+        }
     }
 
     fn shortcuts(&mut self, ui: &mut egui::Ui) {
@@ -658,6 +684,67 @@ impl Editor {
         }
         action
     }
+}
+
+/// Coloured marks beside the line numbers: green for added lines, blue for
+/// changed ones, a red notch where lines were removed. Hovering one shows
+/// what was there before.
+fn gutter_ui(ui: &egui::Ui, (rect, resp): (egui::Rect, egui::Response), marks: &[diff::LineMark], row_h: f32) {
+    use diff::MarkKind;
+    let added = Color32::from_rgb(80, 180, 90);
+    let changed = Color32::from_rgb(70, 140, 230);
+    let deleted = Color32::from_rgb(220, 70, 70);
+    let painter = ui.painter_at(rect.expand2(egui::vec2(0.0, 4.0)));
+    let y = |line: usize| rect.top() + line as f32 * row_h;
+    for m in marks {
+        match m.kind {
+            MarkKind::Added | MarkKind::Changed => {
+                let r = egui::Rect::from_x_y_ranges(rect.x_range(), y(m.start)..=y(m.start + m.len));
+                painter.rect_filled(r, 1.0, if m.kind == MarkKind::Added { added } else { changed });
+            }
+            MarkKind::Deleted => {
+                let at = y(m.start);
+                let pts = vec![
+                    egui::pos2(rect.left(), at - 4.0),
+                    egui::pos2(rect.right() + 2.0, at),
+                    egui::pos2(rect.left(), at + 4.0),
+                ];
+                painter.add(egui::Shape::convex_polygon(pts, deleted, egui::Stroke::NONE));
+            }
+        }
+    }
+    let Some(pos) = resp.hover_pos() else { return };
+    let row = ((pos.y - rect.top()) / row_h).floor().max(0.0) as usize;
+    let near = (pos.y - rect.top()) / row_h;
+    let hit = marks.iter().find(|m| match m.kind {
+        MarkKind::Deleted => (near - m.start as f32).abs() < 0.5,
+        _ => row >= m.start && row < m.start + m.len,
+    });
+    let Some(m) = hit else { return };
+    let show = |s: &str| {
+        let lines: Vec<&str> = s.lines().collect();
+        if lines.iter().all(|l| l.trim().is_empty()) {
+            return format!("({} empty line{})", lines.len(), if lines.len() == 1 { "" } else { "s" });
+        }
+        let mut out = lines.iter().take(12).copied().collect::<Vec<_>>().join("\n");
+        if lines.len() > 12 {
+            out.push_str(&format!("\n… and {} more lines", lines.len() - 12));
+        }
+        out
+    };
+    resp.on_hover_ui_at_pointer(|ui| match m.kind {
+        MarkKind::Added => {
+            ui.label(format!("{} line(s) added since the file was opened or saved", m.len));
+        }
+        MarkKind::Changed => {
+            ui.label("Changed. It was:");
+            ui.label(RichText::new(show(&m.old)).monospace());
+        }
+        MarkKind::Deleted => {
+            ui.label("Removed here:");
+            ui.label(RichText::new(show(&m.old)).monospace());
+        }
+    });
 }
 
 pub fn diff_ui(ui: &mut egui::Ui, d: &Diff, id: egui::Id) {

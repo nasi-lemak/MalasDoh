@@ -21,7 +21,7 @@
   confirmation before anything is overwritten
 - Compare files across servers, with local files and with backups
 - Change journal of every save, with patches, check results and rollbacks
-- Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line
+- Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line, changed-lines gutter
 - Terminal: themes, font file, copy-on-select, right/middle-click paste,
   multi-line paste check, links, mouse reporting, split panes, typing into
   several servers, agent forwarding
@@ -45,7 +45,7 @@
 ## Next
 
 1. Code signing for the Windows and macOS builds (needs certificates).
-2. Editor: a gutter marking lines changed since opening.
+2. Run through docs/windows-testing.md on real Windows and fix what turns up.
 
 ## Known limitations
 

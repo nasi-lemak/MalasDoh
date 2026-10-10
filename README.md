@@ -127,7 +127,8 @@ remote-editing loop, where they are weakest:
   through plain shell commands instead, and everything above still works.
 - **Editor**: syntax highlighting for nginx/Apache/sshd-style configs,
   INI/systemd/TOML, YAML, JSON, shell, `.env`, XML and Dockerfiles; line
-  numbers, auto-indent, Tab/Shift+Tab on selections, find and replace (Ctrl+F,
+  numbers with a gutter marking lines added, changed or removed since the file
+  was opened (hover a mark to see what was there), auto-indent, Tab/Shift+Tab on selections, find and replace (Ctrl+F,
   Ctrl+H), go to line (Ctrl+G), Ctrl+S, and the save safety above. Or open the file in your
   own editor (VS Code, Notepad++, vim…): each save there is uploaded with the
   same checks.
@@ -173,6 +174,10 @@ Tagged releases (from `.github/workflows/release.yml`) publish:
 
 Builds are not code-signed yet: Windows SmartScreen and macOS Gatekeeper will
 ask before the first run (macOS: right-click → Open).
+
+If MalasDoh closes unexpectedly, `crash.log` in its data folder says why.
+[docs/windows-testing.md](docs/windows-testing.md) is a 15-minute checklist
+for trying a Windows build.
 
 ## Building
 

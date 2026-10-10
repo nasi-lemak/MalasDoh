@@ -157,6 +157,66 @@ pub fn merge3(base: &str, mine: &str, theirs: &str) -> Option<String> {
     Some(out)
 }
 
+/// How a stretch of lines differs from the original, for the editor's gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkKind {
+    Added,
+    Changed,
+    /// Lines were removed just before `start`.
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineMark {
+    pub kind: MarkKind,
+    /// First line (0-based) in the new text.
+    pub start: usize,
+    /// Lines covered in the new text (0 for a deletion).
+    pub len: usize,
+    /// What was there before (empty for an addition).
+    pub old: String,
+}
+
+/// Which lines of `new` differ from `old`. Gives up on an exact answer
+/// after a short time, so huge, very different files stay responsive.
+pub fn line_marks(old: &str, new: &str) -> Vec<LineMark> {
+    use similar::DiffOp;
+    let td = TextDiff::configure().timeout(std::time::Duration::from_millis(150)).diff_lines(old, new);
+    let old_lines = td.old_slices();
+    let old_text = |at: usize, len: usize| old_lines[at..at + len].concat();
+    let mut out: Vec<LineMark> = Vec::new();
+    for op in td.ops() {
+        match *op {
+            DiffOp::Equal { .. } => {}
+            DiffOp::Insert { new_index, new_len, .. } => {
+                // A deletion right before turns this into a change.
+                match out.last_mut() {
+                    Some(m) if m.kind == MarkKind::Deleted && m.start == new_index => {
+                        m.kind = MarkKind::Changed;
+                        m.len = new_len;
+                    }
+                    _ => {
+                        out.push(LineMark { kind: MarkKind::Added, start: new_index, len: new_len, old: String::new() })
+                    }
+                }
+            }
+            DiffOp::Delete { old_index, old_len, new_index } => out.push(LineMark {
+                kind: MarkKind::Deleted,
+                start: new_index,
+                len: 0,
+                old: old_text(old_index, old_len),
+            }),
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => out.push(LineMark {
+                kind: MarkKind::Changed,
+                start: new_index,
+                len: new_len,
+                old: old_text(old_index, old_len),
+            }),
+        }
+    }
+    out
+}
+
 /// A `diff -u` style patch, for copying into a ticket or change log.
 pub fn unified(old: &str, new: &str, path: &str) -> String {
     let p = path.trim_start_matches('/');
@@ -189,6 +249,18 @@ mod tests {
         assert_eq!(d.hunks.len(), 1);
         let removed = d.hunks[0].lines.iter().find(|l| l.kind == LineKind::Removed).unwrap();
         assert_eq!((removed.old_no, removed.text.as_str()), (Some(2), "b"));
+    }
+
+    #[test]
+    fn marks_added_changed_and_deleted_lines() {
+        let old = "a\nb\nc\nd\ne\n";
+        let new = "a\nB\nc\nnew\nd\n";
+        let m = line_marks(old, new);
+        let kinds: Vec<(MarkKind, usize, usize)> = m.iter().map(|m| (m.kind, m.start, m.len)).collect();
+        assert_eq!(kinds, vec![(MarkKind::Changed, 1, 1), (MarkKind::Added, 3, 1), (MarkKind::Deleted, 5, 0)]);
+        assert_eq!(m[0].old, "b\n");
+        assert_eq!(m[2].old, "e\n");
+        assert!(line_marks(old, old).is_empty());
     }
 
     #[test]

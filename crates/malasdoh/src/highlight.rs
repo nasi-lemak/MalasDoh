@@ -499,13 +499,20 @@ fn xml_line(line: &str, st: &mut LineState, out: &mut Vec<(Range<usize>, Tok)>) 
     }
 }
 
-/// A full-text layout job, with `find` matches highlighted on top.
-pub fn layout(text: &str, lang: Lang, find: &str, font: &egui::FontId, pal: &Palette) -> egui::text::LayoutJob {
+/// A full-text layout job. `matches` (byte ranges, sorted) are highlighted,
+/// `current` (an index into them) more strongly.
+pub fn layout(
+    text: &str,
+    lang: Lang,
+    matches: &[Range<usize>],
+    current: Option<usize>,
+    font: &egui::FontId,
+    pal: &Palette,
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
-    let hit_bg = Color32::from_rgb(0x8a, 0x6d, 0x1f);
-    let matches: Vec<Range<usize>> =
-        if find.is_empty() { Vec::new() } else { text.match_indices(find).map(|(i, m)| i..i + m.len()).collect() };
+    let hit_bg = Color32::from_rgb(0x6a, 0x55, 0x20);
+    let current_bg = Color32::from_rgb(0xc8, 0x86, 0x1e);
     let mut m = 0;
     let mut st = LineState::default();
     let mut offset = 0;
@@ -519,13 +526,13 @@ pub fn layout(text: &str, lang: Lang, find: &str, font: &egui::FontId, pal: &Pal
                     m += 1;
                 }
                 let (end, hit) = match matches.get(m) {
-                    Some(h) if h.start <= a => (h.end.min(b), true),
-                    Some(h) if h.start < b => (h.start, false),
-                    _ => (b, false),
+                    Some(h) if h.start <= a => (h.end.min(b), Some(m)),
+                    Some(h) if h.start < b => (h.start, None),
+                    _ => (b, None),
                 };
                 let mut f = fmt(pal.color(tok));
-                if hit {
-                    f.background = hit_bg;
+                if let Some(i) = hit {
+                    f.background = if Some(i) == current { current_bg } else { hit_bg };
                 }
                 if tok == Tok::Comment {
                     f.italics = true;
@@ -615,7 +622,8 @@ mod tests {
     fn layout_covers_all_text() {
         let pal = Palette::new(true, Color32::WHITE);
         let text = "server {\n  listen 80; # x\n}\n";
-        let job = layout(text, Lang::Directive, "listen", &egui::FontId::monospace(12.0), &pal);
+        let hits: Vec<_> = text.match_indices("listen").map(|(i, m)| i..i + m.len()).collect();
+        let job = layout(text, Lang::Directive, &hits, Some(0), &egui::FontId::monospace(12.0), &pal);
         assert_eq!(job.text, text);
         assert!(job.sections.iter().any(|s| s.format.background != Color32::TRANSPARENT));
     }

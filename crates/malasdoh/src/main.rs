@@ -14,6 +14,7 @@ mod settings;
 mod snippets;
 mod sync_ui;
 mod terminal;
+mod textops;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()

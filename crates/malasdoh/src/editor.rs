@@ -6,6 +6,7 @@ use malasdoh_core::edit::{Access, EditSession};
 use malasdoh_core::validate::{CheckWhen, ValidationRule};
 
 use crate::highlight;
+use crate::textops::{self, Indent, detect_indent};
 
 pub enum State {
     Ready,
@@ -55,12 +56,36 @@ pub struct Editor {
     pub check_enabled: bool,
     pub lang: highlight::Lang,
     hl_cache: Option<(u64, egui::text::LayoutJob)>,
-    find: String,
-    show_find: bool,
+    find: Find,
+    /// The "go to line" box, when open, and whether it still needs focus.
+    goto: Option<(String, bool)>,
+    pub indent: Indent,
+    /// Cursor/selection (char range) to put into the text box next frame.
+    pending_select: Option<std::ops::Range<usize>>,
+    scroll_to_line: Option<usize>,
+    focus_text: bool,
+    /// Input held back to the next frame so it is applied after an Enter/Tab
+    /// we handled ourselves, in the order it was typed.
+    deferred: Vec<egui::Event>,
+}
+
+#[derive(Default)]
+struct Find {
+    open: bool,
+    replace_open: bool,
+    query: String,
+    with: String,
+    case_sensitive: bool,
+    /// Byte ranges of matches, and what they were computed for.
+    matches: Vec<std::ops::Range<usize>>,
+    key: u64,
+    current: usize,
+    focus: bool,
 }
 
 impl Editor {
     pub fn new(id: u64, session: EditSession, access: Access, check: Option<ValidationRule>) -> Self {
+        let indent = detect_indent(&session.base_text);
         Self {
             lang: highlight::detect(&session.path, &session.base_text),
             hl_cache: None,
@@ -73,8 +98,13 @@ impl Editor {
             state: State::Ready,
             message: None,
             external: None,
-            find: String::new(),
-            show_find: false,
+            find: Find::default(),
+            goto: None,
+            indent,
+            pending_select: None,
+            scroll_to_line: None,
+            focus_text: false,
+            deferred: Vec::new(),
         }
     }
 
@@ -125,6 +155,15 @@ impl Editor {
                     }
                 },
             );
+            egui::ComboBox::from_id_salt(("indent", self.id)).selected_text(self.indent.label()).width(80.0).show_ui(
+                ui,
+                |ui| {
+                    for i in [Indent::Spaces(2), Indent::Spaces(4), Indent::Spaces(8), Indent::Tab] {
+                        ui.selectable_value(&mut self.indent, i, i.label());
+                    }
+                },
+            );
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let busy = matches!(self.state, State::Busy(_));
                 if ui.add_enabled(!busy, egui::Button::new("💾 Save")).on_hover_text("Ctrl+S").clicked() {
@@ -137,8 +176,9 @@ impl Editor {
                 {
                     action = Some(EditorAction::Reload);
                 }
-                if ui.button("🔍").on_hover_text("Find (Ctrl+F)").clicked() {
-                    self.show_find = !self.show_find;
+                if ui.button("🔍").on_hover_text("Find (Ctrl+F), replace (Ctrl+H), go to line (Ctrl+G)").clicked() {
+                    self.find.open = !self.find.open;
+                    self.find.focus = self.find.open;
                 }
                 if let Some(rule) = &self.check {
                     let when = match rule.when {
@@ -170,40 +210,56 @@ impl Editor {
         {
             action = self.request_save(review);
         }
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            self.show_find = true;
-        }
+        self.shortcuts(ui);
+        self.update_matches();
+        self.find_ui(ui);
 
-        if self.show_find {
-            ui.horizontal(|ui| {
-                ui.label("Find:");
-                ui.text_edit_singleline(&mut self.find);
-                let n = if self.find.is_empty() { 0 } else { self.text.matches(&self.find).count() };
-                ui.label(format!("{n} match{}", if n == 1 { "" } else { "es" }));
-                if ui.small_button("✖").clicked() {
-                    self.show_find = false;
-                }
+        if let Some((l, c)) = self.cursor_pos(ui.ctx()) {
+            ui.label(RichText::new(format!("Ln {l}, Col {c} · {} lines", self.text.lines().count())).weak().small());
+        }
+        ui.separator();
+        let te_id = egui::Id::new(("editor-text", self.id));
+        let editing = ui.memory(|m| m.has_focus(te_id));
+        if editing {
+            self.edit_keys(ui, te_id);
+        } else if !self.deferred.is_empty() {
+            let mut held = std::mem::take(&mut self.deferred);
+            ui.input_mut(|i| {
+                held.append(&mut i.events);
+                i.events = held;
             });
         }
+        if let Some(sel) = self.pending_select.take() {
+            let mut st = egui::text_edit::TextEditState::load(ui.ctx(), te_id).unwrap_or_default();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(sel.start),
+                egui::text::CCursor::new(sel.end),
+            )));
+            st.store(ui.ctx(), te_id);
+        }
+        if std::mem::take(&mut self.focus_text) {
+            ui.memory_mut(|m| m.request_focus(te_id));
+        }
 
-        ui.separator();
-        let find = if self.show_find { self.find.clone() } else { String::new() };
         let font = egui::FontId::monospace(font_size);
+        let row_h = ui.ctx().fonts_mut(|f| f.row_height(&font));
         let lang = self.lang;
+        let (matches, current) =
+            if self.find.open { (self.find.matches.clone(), Some(self.find.current)) } else { (Vec::new(), None) };
         let mut cache = std::mem::take(&mut self.hl_cache);
         let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             // Re-tokenize only when something that affects colours changed.
             let key = {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                (buf.as_str(), &find, lang as u8, font.size.to_bits(), ui.visuals().dark_mode).hash(&mut h);
+                (buf.as_str(), &matches, current, lang as u8, font.size.to_bits(), ui.visuals().dark_mode).hash(&mut h);
                 h.finish()
             };
             let job = match &cache {
                 Some((k, job)) if *k == key => job.clone(),
                 _ => {
                     let pal = highlight::Palette::new(ui.visuals().dark_mode, ui.visuals().text_color());
-                    let job = highlight::layout(buf.as_str(), lang, &find, &font, &pal);
+                    let job = highlight::layout(buf.as_str(), lang, &matches, current, &font, &pal);
                     cache = Some((key, job.clone()));
                     job
                 }
@@ -212,13 +268,20 @@ impl Editor {
             job.wrap.max_width = wrap_width;
             ui.ctx().fonts_mut(|f| f.layout_job(job))
         };
-        egui::ScrollArea::both().auto_shrink([false, false]).id_salt(("editor", self.id)).show(ui, |ui| {
+        let mut area = egui::ScrollArea::both().auto_shrink([false, false]).id_salt(("editor", self.id));
+        if let Some(line) = self.scroll_to_line.take() {
+            // Put the line about a third of the way down the view.
+            let y = (line as f32 * row_h - ui.available_height() / 3.0).max(0.0);
+            area = area.vertical_scroll_offset(y);
+        }
+        area.show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let lines = self.text.lines().count().max(1) + usize::from(self.text.ends_with('\n'));
                 let numbers: String = (1..=lines).map(|n| format!("{n:>4}\n")).collect();
                 ui.label(RichText::new(numbers).font(egui::FontId::monospace(font_size)).weak());
                 ui.add(
                     egui::TextEdit::multiline(&mut self.text)
+                        .id(te_id)
                         .code_editor()
                         .lock_focus(true)
                         .desired_width(f32::INFINITY)
@@ -234,6 +297,223 @@ impl Editor {
             action = Some(a);
         }
         action
+    }
+
+    fn shortcuts(&mut self, ui: &mut egui::Ui) {
+        use egui::{Key, Modifiers};
+        let (f, h, g, f3, sf3) = ui.input_mut(|i| {
+            (
+                i.consume_key(Modifiers::COMMAND, Key::F),
+                i.consume_key(Modifiers::COMMAND, Key::H),
+                i.consume_key(Modifiers::COMMAND, Key::G),
+                i.consume_key(Modifiers::NONE, Key::F3),
+                i.consume_key(Modifiers::SHIFT, Key::F3),
+            )
+        });
+        if f || h {
+            self.find.open = true;
+            self.find.replace_open |= h;
+            self.find.focus = true;
+        }
+        if g {
+            self.goto = Some((String::new(), true));
+        }
+        if f3 {
+            self.step_match(1);
+        }
+        if sf3 {
+            self.step_match(-1);
+        }
+    }
+
+    fn update_matches(&mut self) {
+        if !self.find.open {
+            return;
+        }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (&self.text, &self.find.query, self.find.case_sensitive).hash(&mut h);
+            h.finish()
+        };
+        if key != self.find.key {
+            self.find.key = key;
+            self.find.matches = textops::find_all(&self.text, &self.find.query, self.find.case_sensitive);
+            self.find.current = self.find.current.min(self.find.matches.len().saturating_sub(1));
+        }
+    }
+
+    /// Move to the next (+1) or previous (-1) match, selecting and revealing it.
+    fn step_match(&mut self, dir: isize) {
+        self.find.open = true;
+        self.update_matches();
+        let n = self.find.matches.len();
+        if n == 0 {
+            return;
+        }
+        self.find.current = ((self.find.current as isize + dir).rem_euclid(n as isize)) as usize;
+        self.reveal_match();
+    }
+
+    fn reveal_match(&mut self) {
+        let Some(r) = self.find.matches.get(self.find.current).cloned() else { return };
+        let (a, b) = (textops::byte_to_char(&self.text, r.start), textops::byte_to_char(&self.text, r.end));
+        self.pending_select = Some(a..b);
+        self.scroll_to_line = Some(textops::line_of(&self.text, r.start));
+    }
+
+    fn find_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some((line, focus)) = &mut self.goto {
+            let mut close = false;
+            let mut go = None;
+            ui.horizontal(|ui| {
+                ui.label("Go to line:");
+                let r = ui.add(egui::TextEdit::singleline(line).desired_width(80.0));
+                if std::mem::take(focus) {
+                    r.request_focus();
+                }
+                // Consume the Enter, or the editor (focused next) would get it too.
+                if (r.lost_focus() || r.has_focus())
+                    && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+                {
+                    go = line.trim().parse::<usize>().ok().filter(|n| *n > 0);
+                    close = true;
+                }
+                if ui.small_button("✖").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                }
+            });
+            if let Some(n) = go {
+                let c = textops::line_start(&self.text, n);
+                self.pending_select = Some(c..c);
+                self.scroll_to_line = Some(n - 1);
+                self.focus_text = true;
+            }
+            if close {
+                self.goto = None;
+            }
+        }
+        if !self.find.open {
+            return;
+        }
+        let n = self.find.matches.len();
+        let mut step = 0;
+        let mut replace_one = false;
+        let mut replace_all = false;
+        ui.horizontal(|ui| {
+            let arrow = if self.find.replace_open { "⏷" } else { "⏵" };
+            if ui.small_button(arrow).on_hover_text("Replace (Ctrl+H)").clicked() {
+                self.find.replace_open = !self.find.replace_open;
+            }
+            ui.label("Find:");
+            let r = ui.add(egui::TextEdit::singleline(&mut self.find.query).desired_width(220.0));
+            if std::mem::take(&mut self.find.focus) {
+                r.request_focus();
+            }
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                step = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
+                r.request_focus();
+            }
+            ui.toggle_value(&mut self.find.case_sensitive, "Aa").on_hover_text("Match case");
+            if self.find.query.is_empty() {
+                ui.label(RichText::new("").weak());
+            } else if n == 0 {
+                ui.colored_label(ui.visuals().warn_fg_color, "no matches");
+            } else {
+                ui.label(format!("{} of {n}", self.find.current + 1));
+            }
+            if ui.small_button("⬆").on_hover_text("Previous (Shift+F3)").clicked() {
+                step = -1;
+            }
+            if ui.small_button("⬇").on_hover_text("Next (F3, Enter)").clicked() {
+                step = 1;
+            }
+            if ui.small_button("✖").clicked() || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+                self.find.open = false;
+            }
+        });
+        if self.find.replace_open {
+            ui.horizontal(|ui| {
+                ui.add_space(24.0);
+                ui.label("Replace:");
+                ui.add(egui::TextEdit::singleline(&mut self.find.with).desired_width(220.0));
+                replace_one = ui.add_enabled(n > 0, egui::Button::new("Replace")).clicked();
+                replace_all = ui.add_enabled(n > 0, egui::Button::new(format!("Replace all ({n})"))).clicked();
+            });
+        }
+        if replace_one && let Some(r) = self.find.matches.get(self.find.current).cloned() {
+            self.text.replace_range(r, &self.find.with);
+            self.update_matches();
+            if !self.find.matches.is_empty() {
+                // The next match now sits at the same index.
+                self.find.current %= self.find.matches.len();
+                self.reveal_match();
+            }
+        }
+        if replace_all {
+            let count =
+                textops::replace_all(&mut self.text, &self.find.query, &self.find.with, self.find.case_sensitive);
+            self.message =
+                Some((format!("Replaced {count} occurrence(s). Review shows them all before saving."), false));
+            self.update_matches();
+        }
+        if step != 0 {
+            self.step_match(step);
+        }
+    }
+
+    /// Enter keeps indentation; Tab and Shift+Tab indent with the file's own
+    /// style instead of inserting a literal tab.
+    ///
+    /// The text box applies keys in order, but we must apply Enter/Tab
+    /// ourselves, at the cursor as it is after every key typed before it. So
+    /// each frame handles at most one of them, first, and events after the
+    /// next one wait for the following frame.
+    fn edit_keys(&mut self, ui: &mut egui::Ui, te_id: egui::Id) {
+        use egui::{Event, Key};
+        let special = |e: &Event| {
+            matches!(e, Event::Key { key: Key::Enter | Key::Tab, pressed: true, modifiers, .. }
+                if !modifiers.ctrl && !modifiers.alt && !modifiers.command && (!modifiers.shift || matches!(e, Event::Key { key: Key::Tab, .. })))
+        };
+        let mut handle = None;
+        ui.input_mut(|i| {
+            let mut events = std::mem::take(&mut self.deferred);
+            events.append(&mut i.events);
+            if events.first().is_some_and(special) {
+                handle = Some(events.remove(0));
+            }
+            if let Some(k) = events.iter().position(special) {
+                self.deferred = events.split_off(k);
+            }
+            i.events = events;
+        });
+        if !self.deferred.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        let Some(Event::Key { key, modifiers, .. }) = handle else { return };
+        let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), te_id).and_then(|s| s.cursor.char_range())
+        else {
+            return;
+        };
+        let r = range.as_sorted_char_range();
+        let sel = r.start.0..r.end.0;
+        let new_sel = if key == Key::Enter {
+            let c = textops::newline_with_indent(&mut self.text, sel, self.indent);
+            c..c
+        } else {
+            textops::indent(&mut self.text, sel, self.indent, modifiers.shift)
+        };
+        self.pending_select = Some(new_sel);
+    }
+
+    /// "Ln 12, Col 5" for the status line.
+    fn cursor_pos(&self, ctx: &egui::Context) -> Option<(usize, usize)> {
+        let te_id = egui::Id::new(("editor-text", self.id));
+        let c = egui::text_edit::TextEditState::load(ctx, te_id)?.cursor.char_range()?.primary.index.0;
+        let b = textops::char_to_byte(&self.text, c);
+        let line = textops::line_of(&self.text, b);
+        let line_start = self.text[..b].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        Some((line + 1, self.text[line_start..b].chars().count() + 1))
     }
 
     fn modal_ui(&mut self, ctx: &egui::Context) -> Option<EditorAction> {

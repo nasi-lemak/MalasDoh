@@ -22,6 +22,9 @@
 - Compare files across servers, with local files and with backups
 - Change journal of every save, with patches, check results and rollbacks
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line
+- Terminal: themes, font file, copy-on-select, right/middle-click paste,
+  multi-line paste check, links, mouse reporting, split panes, typing into
+  several servers, agent forwarding
 - Browser: sort, bookmarks, chown, symlinks, archives, find files, follow logs
 - SSH key generation and install (ssh-copy-id); import from PuTTY and WinSCP
 - Reopen last session; startup command per connection; browser follows the
@@ -35,11 +38,9 @@
 ## Next
 
 1. Code signing for the Windows and macOS builds (needs certificates).
-2. Split panes: two terminals, or a terminal and an editor, side by side.
-3. Editor: a gutter marking lines changed since opening.
-4. Optional SFTP "edit as root" through `sudo sftp-server` where allowed,
+2. Editor: a gutter marking lines changed since opening.
+3. Optional SFTP "edit as root" through `sudo sftp-server` where allowed,
    which is faster than the current sudo + cat path for large trees.
-5. Mouse reporting in the terminal (for htop/mc mouse use).
 
 ## Known limitations
 

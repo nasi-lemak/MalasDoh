@@ -60,7 +60,17 @@ remote-editing loop, where they are weakest:
   htop, less), scrollback, selection and copy, bracketed paste, several
   terminals per connection. Ctrl+C copies when text is selected and interrupts
   otherwise. Search the scrollback (Ctrl+Shift+F), and log a terminal to a
-  plain-text file.
+  plain-text file. Colour themes (Tomorrow Night, Solarized dark and light,
+  Dracula, Gruvbox, Light) and your own monospace font file. Right click
+  copies a selection or pastes, middle click pastes, copy-on-select if you
+  like; pasting several lines into a shell asks first. Ctrl+click opens
+  links. Programs that use the mouse (htop, mc, vim) get it; Shift+drag still
+  selects.
+- **Split**: two panes side by side, any mix of terminals, files and logs.
+- **Type into several terminals** (Tools): what you type goes to the servers
+  you tick, under a red bar so it is never on by accident.
+- **Agent forwarding** per connection (`ssh -A`), off by default, never to
+  jump hosts; agent requests from servers without it are refused.
 - **File browser**: navigate, filter, hidden files, upload (button or drag and
   drop from the desktop) and download (files or whole folders, with progress and
   cancel), new file/folder, rename, delete, chmod, copy path, "cd here in

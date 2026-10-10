@@ -228,6 +228,11 @@ pub struct Session {
     pub find: FindWindow,
     /// The bookmarks changed; the app saves them to the connection.
     pub bookmarks_changed: bool,
+    /// The pane shown beside the active one.
+    pub split: Option<Pane>,
+    /// What was typed into terminals this frame (terminal id, bytes), for
+    /// sending to other servers too.
+    pub typed: Vec<(u64, Vec<u8>)>,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -275,6 +280,8 @@ impl Session {
             logs: Vec::new(),
             find: FindWindow::default(),
             bookmarks_changed: false,
+            split: None,
+            typed: Vec::new(),
         }
     }
 
@@ -421,6 +428,18 @@ impl Session {
                 .collect(),
             terminals: self.terms.len().max(1),
             local_dir: self.local.as_ref().map(|l| l.path.clone()),
+        }
+    }
+
+    /// Typing from another server's terminal ("type into several"): goes to
+    /// this session's current terminal, without switching panes.
+    pub fn echo_input(&self, bytes: &[u8]) {
+        let target = match self.active {
+            Some(Pane::Term(id)) => Some(id),
+            _ => self.terms.iter().find(|t| t.is_live()).map(|t| t.id),
+        };
+        if let Some(tx) = self.terms.iter().find(|t| Some(t.id) == target).and_then(|t| t.tx.as_ref()) {
+            let _ = tx.send(ShellCmd::Input(bytes.to_vec()));
         }
     }
 
@@ -1350,12 +1369,90 @@ impl Session {
     }
 
     /// Draw the active pane (terminal or editor).
+    /// Every pane, with a short label, in tab order.
+    pub fn panes(&self) -> Vec<(Pane, String)> {
+        let mut v: Vec<(Pane, String)> =
+            self.terms.iter().enumerate().map(|(n, t)| (Pane::Term(t.id), format!("Terminal {}", n + 1))).collect();
+        v.extend(self.logs.iter().map(|l| (Pane::Log(l.id), l.title())));
+        v.extend(self.editors.iter().map(|e| (Pane::Editor(e.id), e.title())));
+        v
+    }
+
+    /// Show a second pane beside the active one, or stop. With only one pane,
+    /// a new terminal is opened for the other side.
+    pub fn toggle_split(&mut self, shared: &Shared, settings: &Settings) {
+        if self.split.take().is_some() {
+            return;
+        }
+        let active = self.active;
+        let other = self.panes().into_iter().map(|(p, _)| p).find(|p| Some(*p) != active);
+        match other {
+            Some(p) => self.split = Some(p),
+            None if self.state == ConnState::Connected => {
+                self.open_terminal(shared, settings);
+                self.split = self.active;
+                self.active = active;
+            }
+            None => {}
+        }
+    }
+
     pub fn pane_ui(&mut self, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
-        match self.active {
+        let panes = self.panes();
+        // A split side that closed, or became the active pane, goes away.
+        if self.split.is_some_and(|s| Some(s) == self.active || !panes.iter().any(|(p, _)| *p == s)) {
+            self.split = None;
+        }
+        match (self.active, self.split) {
+            (Some(left), Some(right)) => {
+                ui.columns(2, |cols| {
+                    // A header on both sides, so the two panes line up.
+                    let name = panes.iter().find(|(p, _)| *p == left).map(|(_, n)| n.clone()).unwrap_or_default();
+                    cols[0].horizontal(|ui| {
+                        ui.add_enabled(false, egui::Button::new(name));
+                    });
+                    self.render_pane(Some(left), &mut cols[0], shared, settings);
+                    let mut pick = None;
+                    let mut close = false;
+                    cols[1].horizontal(|ui| {
+                        let name = panes.iter().find(|(p, _)| *p == right).map(|(_, n)| n.clone()).unwrap_or_default();
+                        egui::ComboBox::from_id_salt(("split-pick", self.id)).selected_text(name).show_ui(ui, |ui| {
+                            for (p, n) in panes.iter().filter(|(p, _)| *p != left) {
+                                if ui.selectable_label(*p == right, n).clicked() {
+                                    pick = Some(*p);
+                                }
+                            }
+                        });
+                        if ui.small_button("✖").on_hover_text("Back to one pane").clicked() {
+                            close = true;
+                        }
+                    });
+                    if let Some(p) = pick {
+                        self.split = Some(p);
+                    }
+                    if close {
+                        self.split = None;
+                    } else {
+                        self.render_pane(Some(right), &mut cols[1], shared, settings);
+                    }
+                });
+            }
+            (active, _) => self.render_pane(active, ui, shared, settings),
+        }
+        self.dialogs_ui(ui, shared);
+    }
+
+    fn render_pane(&mut self, pane: Option<Pane>, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
+        match pane {
             Some(Pane::Term(id)) => {
                 let Some(t) = self.terms.iter_mut().find(|t| t.id == id) else { return };
                 t.term.set_font_size(settings.terminal_font_size);
-                let out = t.term.ui(ui);
+                let opts = crate::terminal::TermOptions {
+                    theme: crate::themes::theme(&settings.terminal_theme),
+                    copy_on_select: settings.copy_on_select,
+                    confirm_paste: settings.confirm_paste,
+                };
+                let out = t.term.ui(ui, &opts);
                 if out.start_log {
                     let host = edit::host_backup_dir(
                         &shared.paths.data_dir.join("logs"),
@@ -1376,6 +1473,8 @@ impl Session {
                         let _ = tx.send(ShellCmd::Resize(c, r));
                     }
                     if !out.send.is_empty() {
+                        // Kept for "type into several terminals".
+                        self.typed.push((id, out.send.clone()));
                         let _ = tx.send(ShellCmd::Input(out.send));
                     }
                 }
@@ -1398,6 +1497,9 @@ impl Session {
                 ui.centered_and_justified(|ui| ui.label("Open a terminal or double-click a file to edit it."));
             }
         }
+    }
+
+    fn dialogs_ui(&mut self, ui: &mut egui::Ui, shared: &Shared) {
         self.sync.ui(ui.ctx(), self.fs.as_ref(), shared, self.id);
         if let Some((path, backup)) = self.backups_ui(ui.ctx()) {
             self.restore_backup(path, backup, shared);

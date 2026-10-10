@@ -52,6 +52,8 @@ pub struct App {
     journal: Journal,
     journal_win: JournalWindow,
     keys_win: KeysWindow,
+    /// "Type into several terminals": the sessions that get what is typed.
+    broadcast: Option<Vec<SessionId>>,
     /// What was open when MalasDoh last closed, until it is reopened.
     last: LastSession,
     /// The last state written to disk, so it is only written when it changes.
@@ -190,7 +192,8 @@ impl App {
         let (events, rx) = Events::new(cc.egui_ctx.clone());
         let settings = Settings::load(&paths.settings_file());
         cc.egui_ctx.set_visuals(if settings.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
-        let mut toast = None;
+        let font_error = apply_fonts(&cc.egui_ctx, &settings.mono_font_file).err();
+        let mut toast = font_error.map(|e| (format!("Could not use the terminal font: {e}"), true, Instant::now()));
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_else(|e| {
             toast = Some((format!("Could not read saved connections: {e:#}"), true, Instant::now()));
             ProfileStore::default()
@@ -238,6 +241,7 @@ impl App {
             journal: Journal::new(paths_journal),
             journal_win: JournalWindow::default(),
             keys_win: KeysWindow::default(),
+            broadcast: None,
             last: LastSession::default(),
             last_written: String::new(),
             last_persist: Instant::now(),
@@ -484,6 +488,15 @@ impl App {
                     ui.close();
                 }
                 if ui
+                    .button("Type into several terminals…")
+                    .on_hover_text("What you type in one terminal also goes to the other servers you pick")
+                    .clicked()
+                {
+                    self.broadcast =
+                        Some(self.sessions.iter().filter(|s| s.state == ConnState::Connected).map(|s| s.id).collect());
+                    ui.close();
+                }
+                if ui
                     .button("SSH keys…")
                     .on_hover_text("Make a key, and put it on a server (like ssh-copy-id)")
                     .clicked()
@@ -711,10 +724,11 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             let mut close_term = None;
             let mut close_editor = None;
+            let mut activate = None;
             for (n, t) in s.terms.iter().enumerate() {
                 let label = format!("⌨ Terminal {}", n + 1);
                 if ui.selectable_label(s.active == Some(Pane::Term(t.id)), label).clicked() {
-                    s.active = Some(Pane::Term(t.id));
+                    activate = Some(Pane::Term(t.id));
                 }
                 if s.active == Some(Pane::Term(t.id)) && ui.small_button("✖").clicked() {
                     close_term = Some(t.id);
@@ -723,7 +737,7 @@ impl App {
             let mut close_log = None;
             for l in &s.logs {
                 if ui.selectable_label(s.active == Some(Pane::Log(l.id)), l.title()).on_hover_text(&l.path).clicked() {
-                    s.active = Some(Pane::Log(l.id));
+                    activate = Some(Pane::Log(l.id));
                 }
                 if s.active == Some(Pane::Log(l.id)) && ui.small_button("✖").on_hover_text("Stop following").clicked()
                 {
@@ -739,11 +753,25 @@ impl App {
                     .on_hover_text(&e.session.path)
                     .clicked()
                 {
-                    s.active = Some(Pane::Editor(e.id));
+                    activate = Some(Pane::Editor(e.id));
                 }
                 if s.active == Some(Pane::Editor(e.id)) && ui.small_button("✖").clicked() {
                     close_editor = Some(e.id);
                 }
+            }
+            // Clicking the pane shown on the split side swaps the two.
+            if let Some(p) = activate {
+                if s.split == Some(p) {
+                    s.split = s.active;
+                }
+                s.active = Some(p);
+            }
+            if ui
+                .selectable_label(s.split.is_some(), "Split")
+                .on_hover_text("Two panes side by side: terminals, files or logs")
+                .clicked()
+            {
+                s.toggle_split(&shared, &settings);
             }
             if ui
                 .selectable_label(s.local.is_some(), "🖥 Local files")
@@ -1199,6 +1227,12 @@ impl App {
                 ui.label("Backups");
                 ui.checkbox(&mut p.remote_backup, "Also keep a .bak copy next to edited files on the server");
                 ui.end_row();
+                ui.label("Agent");
+                ui.checkbox(&mut p.forward_agent, "Forward my SSH agent (ssh -A)").on_hover_text(
+                    "Lets programs on this server use your keys, e.g. git pull. Only for servers you trust: \
+                     while you are connected, anyone with root there can use your keys too.",
+                );
+                ui.end_row();
                 ui.label("Notes");
                 ui.add(egui::TextEdit::multiline(&mut p.notes).desired_rows(2));
                 ui.end_row();
@@ -1447,6 +1481,48 @@ impl App {
                         ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
                         ui.checkbox(&mut s.reopen_on_start, "Reopen last session's connections and files on start");
                         ui.checkbox(&mut s.dark_mode, "Dark mode");
+                        ui.separator();
+                        ui.label(RichText::new("Terminal").strong());
+                        ui.horizontal(|ui| {
+                            ui.label("Colours");
+                            egui::ComboBox::from_id_salt("term-theme").selected_text(&s.terminal_theme).show_ui(
+                                ui,
+                                |ui| {
+                                    for t in crate::themes::THEMES {
+                                        ui.selectable_value(&mut s.terminal_theme, t.name.to_string(), t.name);
+                                    }
+                                },
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Font file");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut s.mono_font_file)
+                                    .hint_text("built-in (Hack)")
+                                    .desired_width(260.0),
+                            )
+                            .on_hover_text("A monospace .ttf or .otf, used by terminals and the editor");
+                            if ui.button("Browse…").clicked()
+                                && let Some(f) =
+                                    rfd::FileDialog::new().add_filter("Fonts", &["ttf", "otf", "ttc"]).pick_file()
+                            {
+                                s.mono_font_file = f.display().to_string();
+                            }
+                            if !s.mono_font_file.is_empty() && ui.small_button("Reset").clicked() {
+                                s.mono_font_file.clear();
+                            }
+                        });
+                        ui.checkbox(&mut s.copy_on_select, "Copy text as soon as it is selected");
+                        ui.checkbox(&mut s.confirm_paste, "Ask before pasting several lines into a shell");
+                        ui.label(
+                            RichText::new(
+                                "Right click copies the selection or pastes; middle click pastes; Ctrl+click opens a \
+                                 link; Shift+drag selects in programs that use the mouse.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                        ui.separator();
                         ui.label("External editor command ({file} = path; empty = system default):");
                         ui.add(egui::TextEdit::singleline(&mut s.external_editor).hint_text("code --wait {file}"));
                         ui.separator();
@@ -1466,6 +1542,11 @@ impl App {
         self.show_settings = open;
         if self.settings != before {
             ctx.set_visuals(if self.settings.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
+            if self.settings.mono_font_file != before.mono_font_file
+                && let Err(e) = apply_fonts(ctx, &self.settings.mono_font_file)
+            {
+                self.notify(format!("Could not use that font: {e}"), true);
+            }
             if let Err(e) = self.settings.save(&self.shared.paths.settings_file()) {
                 self.notify(format!("Could not save settings: {e:#}"), true);
             }
@@ -1496,6 +1577,73 @@ impl ProfileForm {
     }
 }
 
+impl App {
+    fn broadcast_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(set) = &mut self.broadcast else { return };
+        let mut stop = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("⌨ Typing goes to:").strong().color(egui::Color32::WHITE));
+            for s in self.sessions.iter().filter(|s| s.state == ConnState::Connected) {
+                let mut on = set.contains(&s.id);
+                let name = egui::RichText::new(s.profile.display_name()).color(egui::Color32::WHITE);
+                if ui.checkbox(&mut on, name).changed() {
+                    if on {
+                        set.push(s.id);
+                    } else {
+                        set.retain(|x| *x != s.id);
+                    }
+                }
+            }
+            if ui.button("Stop").clicked() {
+                stop = true;
+            }
+        });
+        if stop {
+            self.broadcast = None;
+        }
+    }
+
+    /// Send what was typed in a chosen session's terminal to the current
+    /// terminal of every other chosen session.
+    fn send_broadcast(&mut self) {
+        let typed: Vec<(SessionId, Vec<u8>)> = self
+            .sessions
+            .iter_mut()
+            .flat_map(|s| {
+                let id = s.id;
+                std::mem::take(&mut s.typed).into_iter().map(move |(_, b)| (id, b))
+            })
+            .collect();
+        let Some(set) = &self.broadcast else { return };
+        for (from, bytes) in typed {
+            if !set.contains(&from) {
+                continue;
+            }
+            for s in self.sessions.iter().filter(|s| s.id != from && set.contains(&s.id)) {
+                s.echo_input(&bytes);
+            }
+        }
+    }
+}
+
+/// Use `file` as the monospace font (terminal, editor), or the built-in one.
+fn apply_fonts(ctx: &egui::Context, file: &str) -> Result<(), String> {
+    let mut fonts = egui::FontDefinitions::default();
+    if !file.trim().is_empty() {
+        let path = malasdoh_core::paths::expand_tilde(file.trim());
+        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // egui would only fail later, on first use; check it parses now.
+        if bytes.len() < 12 || !matches!(&bytes[..4], [0, 1, 0, 0] | b"OTTO" | b"true" | b"ttcf") {
+            return Err(format!("{} is not a TrueType or OpenType font", path.display()));
+        }
+        fonts.font_data.insert("user-mono".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        // First choice; the built-in fonts stay as fallbacks for missing glyphs.
+        fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "user-mono".into());
+    }
+    ctx.set_fonts(fonts);
+    Ok(())
+}
+
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_session();
@@ -1517,10 +1665,16 @@ impl eframe::App for App {
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
+        if self.broadcast.is_some() {
+            egui::Panel::top("broadcast")
+                .frame(egui::Frame::side_top_panel(ui.style()).fill(egui::Color32::from_rgb(0x6e, 0x1f, 0x1f)))
+                .show(ui, |ui| self.broadcast_ui(ui));
+        }
         if self.show_sidebar {
             egui::Panel::left("connections").resizable(true).default_size(230.0).show(ui, |ui| self.sidebar_ui(ui));
         }
         egui::CentralPanel::default().show(ui, |ui| self.session_ui(ui));
+        self.send_broadcast();
 
         self.form_ui(&ctx);
         self.confirm_ui(&ctx);

@@ -971,3 +971,75 @@ async fn file_commands_links_owner_archives_find_and_follow() {
     };
     assert!(gone.await, "tail was stopped on the server");
 }
+
+/// Run `script` in an interactive shell and return what it printed.
+async fn shell_output(conn: &ssh::Connection, script: &str) -> String {
+    let mut shell = conn.open_shell(200, 24, Arc::new(|| {})).await.unwrap();
+    shell.send(format!("{script}; exit\n").as_bytes()).await.unwrap();
+    let mut seen = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(ev) = shell.events.recv().await {
+            match ev {
+                ShellEvent::Output(b) => seen.extend(b),
+                ShellEvent::Exited(_) => break,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    String::from_utf8_lossy(&seen).into_owned()
+}
+
+#[tokio::test]
+async fn agent_forwarding_only_when_asked() {
+    let Some(env) = Env::new() else { return };
+    if Command::new("ssh-agent").arg("-h").output().is_err() {
+        eprintln!("ssh-agent not installed; skipping");
+        return;
+    }
+    // A private agent holding a fresh key, on a socket of our own. The guard
+    // stops it even if an assertion fails.
+    struct Agent(std::process::Child);
+    impl Drop for Agent {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("agent.sock");
+    let _agent = Agent(
+        Command::new("ssh-agent")
+            .arg("-D")
+            .arg("-a")
+            .arg(&sock)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    for _ in 0..50 {
+        if sock.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let key = dir.path().join("id_agent");
+    let line = malasdoh_core::keys::generate(&key, "agent-test", "").unwrap();
+    let added = Command::new("ssh-add").arg(&key).env("SSH_AUTH_SOCK", &sock).stdin(Stdio::null()).output().unwrap();
+    assert!(added.status.success(), "{}", String::from_utf8_lossy(&added.stderr));
+    let fp = line.split_whitespace().nth(1).unwrap().to_string();
+
+    let mut ctx = env.ctx(TestPrompter::accepting());
+    ctx.agent_socket = Some(sock.clone());
+    let on = Profile { forward_agent: true, ..env.profile() };
+    let conn = ssh::connect(vec![on], &ctx).await.unwrap();
+    let out = shell_output(&conn, "ssh-add -L").await;
+    assert!(out.contains(&fp), "the forwarded agent lists the key: {out}");
+
+    let off = env.profile();
+    let conn = ssh::connect(vec![off], &ctx).await.unwrap();
+    let out = shell_output(&conn, "echo agent=[$SSH_AUTH_SOCK]").await;
+    assert!(out.contains("agent=[]"), "no agent unless asked: {out}");
+}

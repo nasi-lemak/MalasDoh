@@ -86,6 +86,10 @@ pub struct Profile {
     /// Works with bash and zsh (a prompt hook is set up quietly), and with any
     /// shell that reports its folder itself (OSC 7).
     pub follow_terminal: bool,
+    /// Let programs on the server use your local SSH agent (`ssh -A`), e.g.
+    /// to `git pull` with your key. Only for servers you trust: while you are
+    /// connected, their administrators can use your keys too.
+    pub forward_agent: bool,
     /// Saved folders in the file browser.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bookmarks: Vec<String>,
@@ -111,6 +115,7 @@ impl Default for Profile {
             startup_command: String::new(),
             follow_terminal: false,
             bookmarks: Vec::new(),
+            forward_agent: false,
             forwards: Vec::new(),
         }
     }

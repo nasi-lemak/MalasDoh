@@ -80,6 +80,8 @@ pub struct ConnectContext<P> {
     /// Private keys tried by [`AuthMethod::Auto`]. Defaults to the usual
     /// `~/.ssh/id_*` files.
     pub default_keys: Vec<PathBuf>,
+    /// The agent socket to forward instead of `SSH_AUTH_SOCK` (Unix; tests).
+    pub agent_socket: Option<PathBuf>,
 }
 
 impl<P> ConnectContext<P> {
@@ -87,7 +89,7 @@ impl<P> ConnectContext<P> {
         let default_keys = user_ssh_dir()
             .map(|d| ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|n| d.join(n)).collect())
             .unwrap_or_default();
-        Self { known_hosts, secrets, prompter, default_keys }
+        Self { known_hosts, secrets, prompter, default_keys, agent_socket: None }
     }
 }
 
@@ -139,10 +141,39 @@ pub struct Client {
     confirm: ConfirmHostKey,
     verdict: Arc<Mutex<Option<Verdict>>>,
     remote_forwards: RemoteForwards,
+    /// Agent forwarding is on for this hop (the target only, when asked).
+    /// Otherwise the server's agent channels are refused.
+    forward_agent: Option<Option<PathBuf>>,
 }
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some(socket) = self.forward_agent.clone() else {
+            reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
+            return Ok(());
+        };
+        match local_agent(socket.as_deref()).await {
+            Ok(mut agent) => {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut ch = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut agent, &mut ch).await;
+                });
+            }
+            Err(e) => {
+                tracing::warn!("agent forwarding: {e:#}");
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+            }
+        }
+        Ok(())
+    }
 
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
@@ -286,6 +317,8 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
             confirm: confirm.clone(),
             verdict: verdict.clone(),
             remote_forwards: remote_forwards.clone(),
+            // Never for jump hosts: only the server you are working on.
+            forward_agent: (hops.len() + 1 == chain.len() && target.forward_agent).then(|| ctx.agent_socket.clone()),
         };
         let config = config_for(
             &ctx.known_hosts.known_algorithms(&hop.host, hop.port),
@@ -423,6 +456,32 @@ where
 
     let methods = st.remaining.map(|m| m.iter().map(<&str>::from).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     Err(AuthError { user, host: p.host.clone(), methods }.into())
+}
+
+/// A raw connection to the local agent, for forwarding.
+async fn local_agent(
+    socket: Option<&std::path::Path>,
+) -> Result<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin>> {
+    #[cfg(unix)]
+    {
+        let path = match socket {
+            Some(p) => p.to_path_buf(),
+            None => PathBuf::from(std::env::var_os("SSH_AUTH_SOCK").context("no SSH agent (SSH_AUTH_SOCK)")?),
+        };
+        Ok(Box::new(
+            tokio::net::UnixStream::connect(&path)
+                .await
+                .with_context(|| format!("connecting to {}", path.display()))?,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let _ = socket;
+        if let Ok(a) = AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+            return Ok(a.into_inner());
+        }
+        Ok(AgentClient::connect_pageant().await.context("no SSH agent or Pageant running")?.into_inner())
+    }
 }
 
 async fn try_agent<H>(h: &mut Handle<H>, user: &str, st: &mut AuthState) -> Result<bool>
@@ -754,6 +813,10 @@ impl Connection {
 
     pub async fn open_shell(&self, cols: u32, rows: u32, notify: Notify) -> Result<Shell> {
         let ch = self.handle.channel_open_session().await?;
+        if self.profile.forward_agent {
+            // A refusal (AllowAgentForwarding no) is not worth failing over.
+            let _ = ch.agent_forward(false).await;
+        }
         ch.request_pty(true, "xterm-256color", cols, rows, 0, 0, &[]).await?;
         ch.request_shell(true).await?;
         let (mut read, writer) = ch.split();

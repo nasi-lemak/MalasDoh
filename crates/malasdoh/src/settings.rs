@@ -19,6 +19,15 @@ pub struct Settings {
     pub dark_mode: bool,
     /// Ask before deleting remote files.
     pub confirm_delete: bool,
+    /// Terminal colours, by name (see `themes.rs`).
+    pub terminal_theme: String,
+    /// A TTF/OTF file used for the terminal and editor. Empty: the built-in
+    /// monospace font.
+    pub mono_font_file: String,
+    /// Copy text to the clipboard as soon as it is selected in a terminal.
+    pub copy_on_select: bool,
+    /// Ask before pasting several lines into a shell.
+    pub confirm_paste: bool,
     /// Reconnect to what was open last time when MalasDoh starts. Off: the
     /// start screen offers it instead.
     pub reopen_on_start: bool,
@@ -36,6 +45,10 @@ impl Default for Settings {
             dark_mode: true,
             confirm_delete: true,
             reopen_on_start: false,
+            terminal_theme: crate::themes::THEMES[0].name.to_string(),
+            mono_font_file: String::new(),
+            copy_on_select: false,
+            confirm_paste: true,
             validation_rules: builtin_rules(),
         }
     }

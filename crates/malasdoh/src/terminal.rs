@@ -7,6 +7,16 @@ use egui::{Color32, Event, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, Ve
 
 const SCROLLBACK: usize = 10_000;
 
+use crate::themes::{MouseButton, MouseKind, Theme, encode_mouse, url_at};
+
+/// How the terminal behaves; from the settings, passed each frame.
+pub struct TermOptions {
+    pub theme: &'static Theme,
+    pub copy_on_select: bool,
+    /// Ask before pasting several lines into a shell, where each would run.
+    pub confirm_paste: bool,
+}
+
 /// What the widget wants the session to do after a frame.
 #[derive(Default)]
 pub struct TerminalOutput {
@@ -42,6 +52,11 @@ pub struct Terminal {
     pub cwd: Option<String>,
     /// How many reports there have been; the first is where the shell started.
     pub cwd_reports: u64,
+    theme: &'static Theme,
+    /// Pasted text with several lines, waiting for "really paste?".
+    pending_paste: Option<String>,
+    /// The button held down while the program receives the mouse.
+    mouse_down: Option<(MouseButton, (u16, u16))>,
 }
 
 impl Terminal {
@@ -58,6 +73,9 @@ impl Terminal {
             osc7: Osc7::default(),
             cwd: None,
             cwd_reports: 0,
+            theme: &crate::themes::THEMES[0],
+            pending_paste: None,
+            mouse_down: None,
         }
     }
 
@@ -277,8 +295,9 @@ impl Terminal {
         });
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> TerminalOutput {
+    pub fn ui(&mut self, ui: &mut egui::Ui, opts: &TermOptions) -> TerminalOutput {
         let mut out = TerminalOutput::default();
+        self.theme = opts.theme;
         self.toolbar_ui(ui, &mut out);
         let font = FontId::monospace(self.font_size);
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -292,7 +311,7 @@ impl Terminal {
 
         let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
         let id = response.id;
-        if response.clicked() || response.drag_started() {
+        if response.clicked() || response.drag_started() || response.secondary_clicked() || response.middle_clicked() {
             response.request_focus();
         }
         let focused = response.has_focus();
@@ -311,29 +330,77 @@ impl Terminal {
             let row = ((p.y - rect.top()) / cell_h).floor().clamp(0.0, (rows - 1) as f32) as u16;
             (row, col)
         };
-        if response.drag_started()
-            && let Some(p) = response.interact_pointer_pos()
+        // Programs like htop, mc and vim can ask for the mouse; Shift keeps it
+        // for selecting text, as in xterm.
+        let (mode, encoding) = {
+            let s = self.parser.screen();
+            (s.mouse_protocol_mode(), s.mouse_protocol_encoding())
+        };
+        let mods = ui.input(|i| i.modifiers);
+        let reporting = mode != vt100::MouseProtocolMode::None && !mods.shift;
+        let sgr = encoding == vt100::MouseProtocolEncoding::Sgr;
+
+        // Ctrl+click opens a link.
+        let mut link = None;
+        if mods.command
+            && let Some(p) = response.hover_pos()
         {
-            let c = to_cell(p);
-            self.selection = Some((c, c));
+            let (row, col) = to_cell(p);
+            let line = self.parser.screen().rows(0, cols).nth(row as usize).unwrap_or_default();
+            if let Some((a, b, url)) = url_at(&line, col as usize) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                link = Some((row, a, b, url));
+            }
         }
-        if response.dragged()
-            && let (Some(p), Some((anchor, _))) = (response.interact_pointer_pos(), self.selection)
+        let mut handled_click = false;
+        if let Some((_, _, _, url)) = &link
+            && response.clicked()
         {
-            self.selection = Some((anchor, to_cell(p)));
-        }
-        if response.clicked() {
-            self.selection = None;
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+            handled_click = true;
         }
 
-        // Right click copies the selection.
-        if response.secondary_clicked()
-            && let Some(t) = self.selected_text()
-        {
-            ui.ctx().copy_text(t);
+        if reporting && focused {
+            self.report_mouse(ui, rect, &to_cell, mode, sgr, &mut out);
+        } else if !handled_click {
+            // From where the button went down, not where the drag was noticed.
+            if response.drag_started()
+                && let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos())
+            {
+                let c = to_cell(p);
+                self.selection = Some((c, c));
+            }
+            if response.dragged()
+                && let (Some(p), Some((anchor, _))) = (response.interact_pointer_pos(), self.selection)
+            {
+                self.selection = Some((anchor, to_cell(p)));
+            }
+            if response.drag_stopped()
+                && opts.copy_on_select
+                && let Some(t) = self.selected_text()
+            {
+                ui.ctx().copy_text(t);
+            }
+            if response.clicked() {
+                self.selection = None;
+            }
+            // Right click copies a selection, or pastes when there is none
+            // (PuTTY style); middle click pastes.
+            if response.secondary_clicked() {
+                match self.selected_text() {
+                    Some(t) => {
+                        ui.ctx().copy_text(t);
+                        self.selection = None;
+                    }
+                    None => ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+                }
+            }
+            if response.middle_clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
         }
 
-        if response.hovered() {
+        if response.hovered() && !reporting {
             self.scroll_accum += ui.input(|i| i.smooth_scroll_delta.y);
             let lines = (self.scroll_accum / cell_h).trunc() as i64;
             if lines != 0 {
@@ -352,14 +419,36 @@ impl Terminal {
             }
         }
 
+        if response.hovered() && reporting {
+            // One wheel report per line scrolled, like a real mouse wheel.
+            self.scroll_accum += ui.input(|i| i.smooth_scroll_delta.y);
+            let lines = (self.scroll_accum / cell_h).trunc() as i64;
+            if lines != 0
+                && let Some(p) = response.hover_pos()
+            {
+                self.scroll_accum -= lines as f32 * cell_h;
+                let (r, c) = to_cell(p);
+                let b = if lines > 0 { MouseButton::WheelUp } else { MouseButton::WheelDown };
+                for _ in 0..lines.unsigned_abs().min(5) {
+                    out.send.extend(encode_mouse(b, MouseKind::Press, r, c, sgr, false, mods.ctrl));
+                }
+            }
+        }
+
         // Keys typed into a dialog or menu must not also reach the shell.
         let blocked = ui.ctx().memory(|m| m.top_modal_layer().is_some()) || ui.ctx().any_popup_open();
         if focused && !blocked {
-            self.handle_input(ui, &mut out);
+            self.handle_input(ui, opts.confirm_paste, &mut out);
         }
+        self.paste_confirm_ui(ui.ctx(), id, &mut out);
 
         let top = self.top_line();
         self.paint(ui, rect, &font, cell_w, cell_h, focused, top);
+        if let Some((row, a, b, _)) = link {
+            let y = rect.top() + (row as f32 + 1.0) * cell_h - 1.0;
+            let x = |c: usize| rect.left() + c as f32 * cell_w;
+            ui.painter().hline(x(a)..=x(b), y, Stroke::new(1.0, self.theme.fg));
+        }
         if self.parser.screen().scrollback() > 0 {
             let label = format!("⬆ {} lines", self.parser.screen().scrollback());
             ui.painter().text(
@@ -382,7 +471,83 @@ impl Terminal {
         out
     }
 
-    fn handle_input(&mut self, ui: &egui::Ui, out: &mut TerminalOutput) {
+    /// Send mouse presses, releases, drags to the program (wheel is handled
+    /// by the caller).
+    fn report_mouse(
+        &mut self,
+        ui: &egui::Ui,
+        rect: Rect,
+        to_cell: &dyn Fn(Pos2) -> (u16, u16),
+        mode: vt100::MouseProtocolMode,
+        sgr: bool,
+        out: &mut TerminalOutput,
+    ) {
+        use vt100::MouseProtocolMode as M;
+        let events = ui.input(|i| i.events.clone());
+        for ev in events {
+            match ev {
+                Event::PointerButton { pos, button, pressed, modifiers } if rect.contains(pos) || !pressed => {
+                    let b = match button {
+                        egui::PointerButton::Primary => MouseButton::Left,
+                        egui::PointerButton::Middle => MouseButton::Middle,
+                        egui::PointerButton::Secondary => MouseButton::Right,
+                        _ => continue,
+                    };
+                    let (r, c) = to_cell(pos);
+                    if pressed {
+                        self.mouse_down = Some((b, (r, c)));
+                        out.send.extend(encode_mouse(b, MouseKind::Press, r, c, sgr, false, modifiers.ctrl));
+                    } else if self.mouse_down.take().is_some() && mode != M::Press {
+                        out.send.extend(encode_mouse(b, MouseKind::Release, r, c, sgr, false, modifiers.ctrl));
+                    }
+                }
+                Event::PointerMoved(pos) if matches!(mode, M::ButtonMotion | M::AnyMotion) => {
+                    if let Some((b, last)) = self.mouse_down {
+                        let cell = to_cell(pos);
+                        if cell != last {
+                            self.mouse_down = Some((b, cell));
+                            out.send.extend(encode_mouse(b, MouseKind::Drag, cell.0, cell.1, sgr, false, false));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn paste_confirm_ui(&mut self, ctx: &egui::Context, id: egui::Id, out: &mut TerminalOutput) {
+        let Some(text) = &self.pending_paste else { return };
+        let lines: Vec<&str> = text.lines().collect();
+        let mut result = None;
+        egui::Modal::new(id.with("paste")).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.heading(format!("Paste {} lines?", lines.len()));
+            ui.label("In a shell each line runs as a command as soon as it arrives.");
+            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                for l in lines.iter().take(200) {
+                    ui.monospace(*l);
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Paste").clicked() {
+                    result = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    result = Some(false);
+                }
+            });
+        });
+        match result {
+            Some(true) => {
+                let t = self.pending_paste.take().unwrap_or_default();
+                out.send.extend_from_slice(t.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
+            }
+            Some(false) => self.pending_paste = None,
+            None => {}
+        }
+    }
+
+    fn handle_input(&mut self, ui: &egui::Ui, confirm_paste: bool, out: &mut TerminalOutput) {
         let events = ui.input(|i| i.events.clone());
         let screen = self.parser.screen();
         let app_cursor = screen.application_cursor();
@@ -390,6 +555,12 @@ impl Terminal {
         for ev in events {
             match ev {
                 Event::Text(t) => out.send.extend_from_slice(t.as_bytes()),
+                // Several lines into a plain shell: ask first. Programs that
+                // asked for bracketed paste (editors, modern shells) get it
+                // as text and do not run it.
+                Event::Paste(t) if confirm_paste && !bracketed && t.trim_end().contains('\n') => {
+                    self.pending_paste = Some(t);
+                }
                 Event::Paste(t) => {
                     if bracketed {
                         out.send.extend_from_slice(b"\x1b[200~");
@@ -437,7 +608,8 @@ impl Terminal {
             None => Vec::new(),
         };
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, BG);
+        let th = self.theme;
+        painter.rect_filled(rect, 0.0, th.bg);
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
         for row in 0..rows {
@@ -450,7 +622,8 @@ impl Terminal {
                     col += 1;
                     continue;
                 }
-                let (mut fg, mut bg) = (color(cell.fgcolor(), FG, cell.bold()), color(cell.bgcolor(), BG, false));
+                let (mut fg, mut bg) =
+                    (color(cell.fgcolor(), th, th.fg, cell.bold()), color(cell.bgcolor(), th, th.bg, false));
                 if cell.inverse() {
                     std::mem::swap(&mut fg, &mut bg);
                 }
@@ -458,7 +631,7 @@ impl Terminal {
                     fg = fg.gamma_multiply(0.6);
                 }
                 if self.in_selection(row, col) {
-                    bg = SELECTION;
+                    bg = th.selection;
                 }
                 let line = top + row as usize;
                 if let Some(&(.., current)) =
@@ -472,7 +645,7 @@ impl Terminal {
                 let format = TextFormat {
                     font_id: font.clone(),
                     color: fg,
-                    background: if bg == BG { Color32::TRANSPARENT } else { bg },
+                    background: if bg == th.bg { Color32::TRANSPARENT } else { bg },
                     italics: cell.italic(),
                     underline: if cell.underline() { Stroke::new(1.0, fg) } else { Stroke::NONE },
                     ..Default::default()
@@ -481,7 +654,7 @@ impl Terminal {
                 col += if cell.is_wide() { 2 } else { 1 };
             }
             let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
-            painter.galley(Pos2::new(rect.left(), y), galley, FG);
+            painter.galley(Pos2::new(rect.left(), y), galley, th.fg);
         }
         if !screen.hide_cursor() && screen.scrollback() == 0 {
             let (r, c) = screen.cursor_position();
@@ -490,45 +663,20 @@ impl Terminal {
                 Vec2::new(cell_w, cell_h),
             );
             if focused {
-                painter.rect_filled(cursor, 0.0, CURSOR.gamma_multiply(0.7));
+                painter.rect_filled(cursor, 0.0, th.cursor.gamma_multiply(0.7));
             } else {
-                painter.rect_stroke(cursor, 0.0, Stroke::new(1.0, CURSOR), egui::StrokeKind::Inside);
+                painter.rect_stroke(cursor, 0.0, Stroke::new(1.0, th.cursor), egui::StrokeKind::Inside);
             }
         }
     }
 }
 
-const BG: Color32 = Color32::from_rgb(0x1d, 0x1f, 0x21);
-const FG: Color32 = Color32::from_rgb(0xd0, 0xd0, 0xd0);
-const CURSOR: Color32 = Color32::from_rgb(0xf0, 0xc6, 0x74);
-const SELECTION: Color32 = Color32::from_rgb(0x37, 0x4b, 0x6e);
-
-/// xterm's 16 colours, a little softened.
-const ANSI: [Color32; 16] = [
-    Color32::from_rgb(0x1d, 0x1f, 0x21),
-    Color32::from_rgb(0xcc, 0x66, 0x66),
-    Color32::from_rgb(0xb5, 0xbd, 0x68),
-    Color32::from_rgb(0xf0, 0xc6, 0x74),
-    Color32::from_rgb(0x81, 0xa2, 0xbe),
-    Color32::from_rgb(0xb2, 0x94, 0xbb),
-    Color32::from_rgb(0x8a, 0xbe, 0xb7),
-    Color32::from_rgb(0xc5, 0xc8, 0xc6),
-    Color32::from_rgb(0x66, 0x66, 0x66),
-    Color32::from_rgb(0xd5, 0x4e, 0x53),
-    Color32::from_rgb(0xb9, 0xca, 0x4a),
-    Color32::from_rgb(0xe7, 0xc5, 0x47),
-    Color32::from_rgb(0x7a, 0xa6, 0xda),
-    Color32::from_rgb(0xc3, 0x97, 0xd8),
-    Color32::from_rgb(0x70, 0xc0, 0xb1),
-    Color32::from_rgb(0xea, 0xea, 0xea),
-];
-
-fn color(c: vt100::Color, default: Color32, bold: bool) -> Color32 {
+fn color(c: vt100::Color, theme: &Theme, default: Color32, bold: bool) -> Color32 {
     match c {
         vt100::Color::Default => default,
         // Bold brightens the first 8 colours, as xterm does.
-        vt100::Color::Idx(i) if i < 8 && bold => ANSI[i as usize + 8],
-        vt100::Color::Idx(i) if i < 16 => ANSI[i as usize],
+        vt100::Color::Idx(i) if i < 8 && bold => theme.ansi[i as usize + 8],
+        vt100::Color::Idx(i) if i < 16 => theme.ansi[i as usize],
         vt100::Color::Idx(i) if i < 232 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -832,11 +980,12 @@ mod tests {
 
     #[test]
     fn colours() {
-        assert_eq!(color(vt100::Color::Idx(1), FG, false), ANSI[1]);
-        assert_eq!(color(vt100::Color::Idx(1), FG, true), ANSI[9]);
-        assert_eq!(color(vt100::Color::Idx(16), FG, false), Color32::from_rgb(0, 0, 0));
-        assert_eq!(color(vt100::Color::Idx(231), FG, false), Color32::from_rgb(255, 255, 255));
-        assert_eq!(color(vt100::Color::Rgb(1, 2, 3), FG, false), Color32::from_rgb(1, 2, 3));
+        let t = &crate::themes::THEMES[0];
+        assert_eq!(color(vt100::Color::Idx(1), t, t.fg, false), t.ansi[1]);
+        assert_eq!(color(vt100::Color::Idx(1), t, t.fg, true), t.ansi[9]);
+        assert_eq!(color(vt100::Color::Idx(16), t, t.fg, false), Color32::from_rgb(0, 0, 0));
+        assert_eq!(color(vt100::Color::Idx(231), t, t.fg, false), Color32::from_rgb(255, 255, 255));
+        assert_eq!(color(vt100::Color::Rgb(1, 2, 3), t, t.fg, false), Color32::from_rgb(1, 2, 3));
     }
 
     #[test]

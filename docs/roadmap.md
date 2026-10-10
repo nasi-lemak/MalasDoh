@@ -29,7 +29,7 @@
 2. Split panes: two terminals, or a terminal and an editor, side by side.
 3. Editor: go to line, replace, and a minimap of changes since opening.
 4. Optional SFTP "edit as root" through `sudo sftp-server` where allowed,
-   which is faster than the sudo cat/tee path for large trees.
+   which is faster than the current sudo + cat path for large trees.
 5. Mouse reporting in the terminal (for htop/mc mouse use).
 6. Import sessions from PuTTY (Windows registry) and WinSCP (`WinSCP.ini`).
 

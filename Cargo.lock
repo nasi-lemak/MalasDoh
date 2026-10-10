@@ -2485,6 +2485,7 @@ dependencies = [
  "malasdoh-core",
  "rfd",
  "serde",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

@@ -137,7 +137,9 @@ impl Terminal {
             }
         }
 
-        if focused {
+        // Keys typed into a dialog or menu must not also reach the shell.
+        let blocked = ui.ctx().memory(|m| m.top_modal_layer().is_some()) || ui.ctx().any_popup_open();
+        if focused && !blocked {
             self.handle_input(ui, &mut out);
         }
 

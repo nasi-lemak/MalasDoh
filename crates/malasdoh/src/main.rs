@@ -8,8 +8,10 @@ mod browser;
 mod editor;
 mod forwards;
 mod highlight;
+mod multirun;
 mod session;
 mod settings;
+mod snippets;
 mod sync_ui;
 mod terminal;
 

@@ -11,6 +11,10 @@ use tokio::sync::oneshot;
 
 pub type SessionId = u64;
 
+/// Events for the "Run on many hosts" window, which is not a session tab.
+/// Session ids start at 1.
+pub const MULTI_RUN: SessionId = 0;
+
 pub enum Question {
     HostKey(HostKeyPrompt, oneshot::Sender<bool>),
     Secret(SecretPrompt, oneshot::Sender<Option<SecretAnswer>>),
@@ -32,6 +36,7 @@ pub enum EventKind {
     Status(String),
     Question(Question),
     Session(crate::session::SessionMsg),
+    Multi(crate::multirun::MultiMsg),
 }
 
 #[derive(Clone)]

@@ -12,9 +12,11 @@ use malasdoh_core::ssh::{SecretAnswer, SecretPrompt};
 use malasdoh_core::validate::{CheckWhen, ValidationRule, builtin_rules};
 use malasdoh_core::{AppPaths, ssh_config};
 
-use crate::bridge::{AppEvent, EventKind, Events, Question, SessionId};
+use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId};
+use crate::multirun::MultiRun;
 use crate::session::{ConnState, Pane, Session, Shared};
 use crate::settings::Settings;
+use crate::snippets::{self, Snippet, SnippetStore, Use};
 
 pub struct App {
     shared: Shared,
@@ -34,6 +36,18 @@ pub struct App {
     toast: Option<(String, bool, Instant)>,
     close_warned: Option<Instant>,
     settings_tab: SettingsTab,
+    snippets: SnippetStore,
+    show_snippets: bool,
+    pending_snippet: Option<PendingSnippet>,
+    multi: MultiRun,
+}
+
+/// A snippet waiting for its `{{placeholders}}` to be filled in.
+struct PendingSnippet {
+    session: Option<SessionId>,
+    snippet: Snippet,
+    values: Vec<(String, String)>,
+    how: Use,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,6 +165,7 @@ impl App {
             toast = Some((format!("Could not read saved connections: {e:#}"), true, Instant::now()));
             ProfileStore::default()
         });
+        let snippets_path = paths.config_dir.join("snippets.toml");
         let shared = Shared {
             rt: rt.handle().clone(),
             events,
@@ -176,6 +191,10 @@ impl App {
             toast,
             close_warned: None,
             settings_tab: SettingsTab::General,
+            snippets: SnippetStore::load(&snippets_path),
+            show_snippets: false,
+            pending_snippet: None,
+            multi: MultiRun::default(),
         }
     }
 
@@ -204,6 +223,14 @@ impl App {
 
     fn drain_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
+            if ev.session == MULTI_RUN {
+                match ev.kind {
+                    EventKind::Question(q) => self.multi.questions.push_back(q),
+                    EventKind::Multi(m) => self.multi.handle(m),
+                    _ => {}
+                }
+                continue;
+            }
             let Some(s) = self.sessions.iter_mut().find(|s| s.id == ev.session) else { continue };
             match ev.kind {
                 EventKind::Status(msg) => {
@@ -213,6 +240,7 @@ impl App {
                 }
                 EventKind::Question(q) => s.questions.push_back(q),
                 EventKind::Session(msg) => s.handle(msg, &self.shared, &self.settings),
+                EventKind::Multi(_) => {}
             }
         }
     }
@@ -273,6 +301,16 @@ impl App {
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            ui.menu_button("Tools", |ui| {
+                if ui.button("Run on many hosts…").clicked() {
+                    self.multi.open = true;
+                    ui.close();
+                }
+                if ui.button("Snippets…").clicked() {
+                    self.show_snippets = true;
+                    ui.close();
                 }
             });
             ui.separator();
@@ -476,6 +514,7 @@ impl App {
             }
         });
 
+        let mut chosen_snippet = None;
         // Pane tabs: terminals, then open files.
         ui.horizontal_wrapped(|ui| {
             let mut close_term = None;
@@ -508,6 +547,12 @@ impl App {
             if ui.selectable_label(s.forwards.open, fw).on_hover_text("Port forwarding (-L, -R, SOCKS)").clicked() {
                 s.forwards.open = !s.forwards.open;
             }
+            ui.menu_button("☰ Snippets", |ui| {
+                let can_type = s.terms.iter().any(|t| t.is_live());
+                if let Some((sn, how)) = snippets::menu(ui, &self.snippets, can_type) {
+                    chosen_snippet = Some((sn, how));
+                }
+            });
             if let Some(id) = close_term {
                 s.close_terminal(id);
             }
@@ -526,9 +571,13 @@ impl App {
         ui.separator();
         s.pane_ui(ui, &shared, &settings);
         let save_forwards = s.forwards_ui(ui.ctx(), &shared).map(|specs| (s.profile.id, specs));
+        let (sid, pid) = (s.id, s.profile.id);
 
         if let Some((msg, err, _)) = s.toast.take() {
             self.toast = Some((msg, err, Instant::now()));
+        }
+        if let Some((snippet, how)) = chosen_snippet {
+            self.use_snippet(Some(sid), Some(pid), snippet, how, Vec::new());
         }
         if let Some((id, specs)) = save_forwards
             && let Some(mut p) = self.profiles.get(id).cloned()
@@ -538,6 +587,87 @@ impl App {
                 self.save_profiles();
                 self.notify("Saved port forwards to the connection.", false);
             }
+        }
+    }
+
+    /// Use a snippet, asking for its placeholders first if it has any.
+    fn use_snippet(
+        &mut self,
+        session: Option<SessionId>,
+        profile: Option<ProfileId>,
+        snippet: Snippet,
+        how: Use,
+        values: Vec<(String, String)>,
+    ) {
+        let names = snippets::placeholders(&snippet.command);
+        let filled: std::collections::HashMap<String, String> = values.iter().cloned().collect();
+        if names.iter().any(|n| !filled.contains_key(n)) {
+            let values = names.into_iter().map(|n| (n, String::new())).collect();
+            self.pending_snippet = Some(PendingSnippet { session, snippet, values, how });
+            return;
+        }
+        let command = snippets::fill(&snippet.command, &filled);
+        match how {
+            Use::Multi => self.multi.show_with(command, profile),
+            Use::Insert | Use::Run => {
+                if let Some(s) = session.and_then(|id| self.sessions.iter_mut().find(|s| s.id == id)) {
+                    let mut bytes = command.into_bytes();
+                    if how == Use::Run {
+                        bytes.push(b'\r');
+                    }
+                    s.send_to_terminal(bytes);
+                }
+            }
+        }
+    }
+
+    fn snippet_windows_ui(&mut self, ctx: &egui::Context) {
+        if self.show_snippets {
+            let mut open = true;
+            let mut changed = false;
+            egui::Window::new("Snippets").open(&mut open).default_width(760.0).show(ctx, |ui| {
+                changed = snippets::manager_ui(ui, &mut self.snippets);
+            });
+            self.show_snippets = open;
+            if changed && let Err(e) = self.snippets.save(&self.shared.paths.config_dir.join("snippets.toml")) {
+                self.notify(format!("Could not save snippets: {e:#}"), true);
+            }
+        }
+        let mut result = None;
+        if let Some(p) = &mut self.pending_snippet {
+            egui::Modal::new("snippet-values".into()).show(ctx, |ui| {
+                ui.heading(&p.snippet.name);
+                ui.monospace(&p.snippet.command);
+                egui::Grid::new("snippet-values-grid").num_columns(2).show(ui, |ui| {
+                    for (i, (name, value)) in p.values.iter_mut().enumerate() {
+                        ui.label(name.as_str());
+                        let r = ui.text_edit_singleline(value);
+                        if i == 0 && !r.has_focus() && value.is_empty() {
+                            r.request_focus();
+                        }
+                        ui.end_row();
+                    }
+                });
+                let filled: std::collections::HashMap<String, String> = p.values.iter().cloned().collect();
+                ui.label(RichText::new(snippets::fill(&p.snippet.command, &filled)).monospace().weak());
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        result = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        result = Some(false);
+                    }
+                });
+            });
+        }
+        match result {
+            Some(true) => {
+                let p = self.pending_snippet.take().unwrap();
+                let profile = p.session.and_then(|id| self.sessions.iter().find(|s| s.id == id)).map(|s| s.profile.id);
+                self.use_snippet(p.session, profile, p.snippet, p.how, p.values);
+            }
+            Some(false) => self.pending_snippet = None,
+            None => {}
         }
     }
 
@@ -570,9 +700,19 @@ impl App {
             v.sort_by_key(|&i| Some(self.sessions[i].id) != self.active);
             v
         };
-        let Some(idx) = order.into_iter().find(|&i| !self.sessions[i].questions.is_empty()) else { return };
-        let session_name = self.sessions[idx].profile.display_name();
-        let q = self.sessions[idx].questions.front().unwrap();
+        // A session's questions first, then those from "Run on many hosts".
+        let target = order.into_iter().find(|&i| !self.sessions[i].questions.is_empty());
+        if target.is_none() && self.multi.questions.is_empty() {
+            return;
+        }
+        let session_name = match target {
+            Some(i) => self.sessions[i].profile.display_name(),
+            None => "Run on many hosts".to_string(),
+        };
+        let q = match target {
+            Some(i) => self.sessions[i].questions.front().unwrap(),
+            None => self.multi.questions.front().unwrap(),
+        };
         let mut done: Option<bool> = None;
         let a = &mut self.answer;
         egui::Modal::new("question".into()).show(ctx, |ui| {
@@ -672,7 +812,10 @@ impl App {
             }
         });
         let Some(ok) = done else { return };
-        let q = self.sessions[idx].questions.pop_front().unwrap();
+        let q = match target {
+            Some(i) => self.sessions[i].questions.pop_front().unwrap(),
+            None => self.multi.questions.pop_front().unwrap(),
+        };
         let a = std::mem::take(&mut self.answer);
         match q {
             Question::HostKey(_, tx) => {
@@ -1014,6 +1157,8 @@ impl eframe::App for App {
         self.form_ui(&ctx);
         self.confirm_ui(&ctx);
         self.settings_ui(&ctx);
+        self.snippet_windows_ui(&ctx);
+        self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);
         self.question_ui(&ctx);
 
         // Keep polling while something is in flight.

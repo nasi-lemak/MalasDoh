@@ -131,6 +131,13 @@ pub struct TermPane {
     tx: Option<mpsc::UnboundedSender<ShellCmd>>,
 }
 
+impl TermPane {
+    /// Connected to a running shell.
+    pub fn is_live(&self) -> bool {
+        self.tx.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Term(u64),
@@ -318,7 +325,7 @@ impl Session {
         });
     }
 
-    fn send_to_terminal(&mut self, bytes: Vec<u8>) {
+    pub fn send_to_terminal(&mut self, bytes: Vec<u8>) {
         let target = match self.active {
             Some(Pane::Term(id)) => Some(id),
             _ => self.terms.first().map(|t| t.id),

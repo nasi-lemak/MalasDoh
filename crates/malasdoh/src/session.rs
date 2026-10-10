@@ -239,7 +239,7 @@ impl Session {
                 Ok(conn) => {
                     let conn = Arc::new(conn);
                     let fs = async {
-                        let fs = conn.open_sftp().await?;
+                        let fs = conn.open_fs().await?;
                         // After a reconnect, stay where the user was.
                         let dir = if !current_dir.is_empty() {
                             current_dir
@@ -351,6 +351,9 @@ impl Session {
                 self.state = ConnState::Connected;
                 match fs {
                     Ok((fs, dir)) => {
+                        self.browser.note = fs
+                            .is_shell()
+                            .then(|| "No SFTP on this server: files go through shell commands.".to_string());
                         self.fs = Some(fs);
                         self.navigate(dir, shared);
                     }

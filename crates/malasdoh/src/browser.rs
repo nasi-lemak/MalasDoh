@@ -56,6 +56,8 @@ pub struct Browser {
     pub entries: Vec<RemoteEntry>,
     pub loading: bool,
     pub error: Option<String>,
+    /// Shown under the toolbar, e.g. that files go through shell commands.
+    pub note: Option<String>,
     selected: Vec<String>,
     filter: String,
     show_hidden: bool,
@@ -140,6 +142,9 @@ impl Browser {
                 }
             });
         });
+        if let Some(n) = &self.note {
+            ui.label(RichText::new(n).weak().small());
+        }
         if let Some(e) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }

@@ -730,10 +730,45 @@ impl Connection {
     }
 
     pub async fn open_sftp(&self) -> Result<crate::sftp::RemoteFs> {
-        let ch = self.handle.channel_open_session().await?;
+        let mut ch = self.handle.channel_open_session().await?;
         ch.request_subsystem(true, "sftp").await?;
+        // Wait for the server's answer, so a server without SFTP is detected
+        // at once instead of after the SFTP handshake times out.
+        let answer = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match ch.wait().await {
+                    Some(ChannelMsg::Success) => return Ok(()),
+                    Some(ChannelMsg::Failure) => bail!("the server has no SFTP subsystem"),
+                    Some(ChannelMsg::Close) | None => bail!("the server closed the SFTP channel"),
+                    Some(_) => {}
+                }
+            }
+        })
+        .await;
+        match answer {
+            Ok(r) => r?,
+            Err(_) => bail!("the server did not answer the SFTP request"),
+        }
         let session = russh_sftp::client::SftpSession::new(ch.into_stream()).await.context("starting SFTP")?;
         Ok(crate::sftp::RemoteFs::new(session))
+    }
+
+    /// File access: SFTP when the server offers it, otherwise shell commands
+    /// (servers without an SFTP subsystem). Fails only if neither works.
+    pub async fn open_fs(self: &Arc<Self>) -> Result<crate::sftp::RemoteFs> {
+        match self.open_sftp().await {
+            Ok(fs) => Ok(fs),
+            Err(sftp_err) => {
+                let probe = self.exec("sh -c 'echo malasdoh-shell-ok'", None).await;
+                match probe {
+                    Ok(out) if out.stdout.starts_with(b"malasdoh-shell-ok") => {
+                        tracing::info!("no SFTP ({sftp_err:#}); using shell commands for files");
+                        Ok(crate::sftp::RemoteFs::shell(self.clone()))
+                    }
+                    _ => Err(sftp_err.context("SFTP is not available and neither is a POSIX shell")),
+                }
+            }
+        }
     }
 
     /// Run a command without a PTY and collect its output.

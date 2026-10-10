@@ -10,6 +10,7 @@ pub mod paths;
 pub mod profile;
 pub mod secrets;
 pub mod sftp;
+pub mod shellfs;
 pub mod ssh;
 pub mod ssh_config;
 pub mod sync;

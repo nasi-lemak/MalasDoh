@@ -1,5 +1,6 @@
-//! Remote file operations over SFTP: browsing, transfers and the primitives the
-//! editor builds on.
+//! Remote file operations: browsing, transfers and the primitives the editor
+//! builds on. Over SFTP normally, or through shell commands on servers that
+//! have no SFTP subsystem (see [`crate::shellfs`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +12,8 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::Metadata;
 use russh_sftp::protocol::{FileAttributes, OpenFlags};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::shellfs::{ShellFs, WriteMode};
 
 const CHUNK: usize = 256 * 1024;
 
@@ -71,7 +74,13 @@ impl Progress {
 
 #[derive(Clone)]
 pub struct RemoteFs {
-    s: Arc<SftpSession>,
+    b: Backend,
+}
+
+#[derive(Clone)]
+enum Backend {
+    Sftp(Arc<SftpSession>),
+    Shell(Arc<ShellFs>),
 }
 
 /// Join remote (always `/`-separated) paths.
@@ -128,11 +137,23 @@ fn kind_of(m: &Metadata) -> EntryKind {
 
 impl RemoteFs {
     pub fn new(session: SftpSession) -> Self {
-        Self { s: Arc::new(session) }
+        Self { b: Backend::Sftp(Arc::new(session)) }
+    }
+
+    pub(crate) fn shell(conn: Arc<crate::ssh::Connection>) -> Self {
+        Self { b: Backend::Shell(Arc::new(ShellFs::new(conn))) }
+    }
+
+    /// True when working through shell commands because SFTP is unavailable.
+    pub fn is_shell(&self) -> bool {
+        matches!(self.b, Backend::Shell(_))
     }
 
     pub async fn canonicalize(&self, path: &str) -> Result<String> {
-        self.s.canonicalize(path).await.with_context(|| format!("resolving {path}"))
+        match &self.b {
+            Backend::Sftp(s) => s.canonicalize(path).await.with_context(|| format!("resolving {path}")),
+            Backend::Shell(sh) => sh.canonicalize(path).await,
+        }
     }
 
     pub async fn home(&self) -> Result<String> {
@@ -140,16 +161,40 @@ impl RemoteFs {
     }
 
     pub async fn stat(&self, path: &str) -> Result<Metadata> {
-        self.s.metadata(path).await.with_context(|| format!("stat {path}"))
+        match &self.b {
+            Backend::Sftp(s) => s.metadata(path).await.with_context(|| format!("stat {path}")),
+            Backend::Shell(sh) => sh.stat(path, true).await,
+        }
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Metadata> {
+        match &self.b {
+            Backend::Sftp(s) => s.symlink_metadata(path).await.with_context(|| format!("stat {path}")),
+            Backend::Shell(sh) => sh.stat(path, false).await,
+        }
     }
 
     pub async fn exists(&self, path: &str) -> Result<bool> {
-        Ok(self.s.try_exists(path).await?)
+        match &self.b {
+            Backend::Sftp(s) => Ok(s.try_exists(path).await?),
+            Backend::Shell(sh) => sh.exists(path).await,
+        }
     }
 
     /// Directory listing, directories first, then by name.
     pub async fn list(&self, dir: &str) -> Result<Vec<RemoteEntry>> {
-        let rd = self.s.read_dir(dir).await.with_context(|| format!("listing {dir}"))?;
+        let mut out = match &self.b {
+            Backend::Sftp(s) => Self::list_sftp(s, dir).await?,
+            Backend::Shell(sh) => sh.list(dir).await?,
+        };
+        out.sort_by(|a, b| {
+            b.is_dir_like().cmp(&a.is_dir_like()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok(out)
+    }
+
+    async fn list_sftp(s: &SftpSession, dir: &str) -> Result<Vec<RemoteEntry>> {
+        let rd = s.read_dir(dir).await.with_context(|| format!("listing {dir}"))?;
         let mut out = Vec::new();
         for e in rd {
             let name = e.file_name();
@@ -161,7 +206,7 @@ impl RemoteFs {
             let mut kind = kind_of(&m);
             if let EntryKind::Symlink { .. } = kind {
                 // Follow it once so links to directories can be opened.
-                let to_dir = self.s.metadata(path.clone()).await.map(|t| t.is_dir()).unwrap_or(false);
+                let to_dir = s.metadata(path.clone()).await.map(|t| t.is_dir()).unwrap_or(false);
                 kind = EntryKind::Symlink { to_dir };
             }
             out.push(RemoteEntry {
@@ -175,9 +220,6 @@ impl RemoteFs {
                 gid: m.gid,
             });
         }
-        out.sort_by(|a, b| {
-            b.is_dir_like().cmp(&a.is_dir_like()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        });
         Ok(out)
     }
 
@@ -192,9 +234,16 @@ impl RemoteFs {
         {
             bail!("{path} is {} — larger than the {} limit for this operation", human_size(size), human_size(max));
         }
-        let mut f = self.s.open(path).await.with_context(|| format!("opening {path}"))?;
         let mut buf = Vec::with_capacity(meta.size.unwrap_or(0) as usize);
-        f.read_to_end(&mut buf).await.with_context(|| format!("reading {path}"))?;
+        match &self.b {
+            Backend::Sftp(s) => {
+                let mut f = s.open(path).await.with_context(|| format!("opening {path}"))?;
+                f.read_to_end(&mut buf).await.with_context(|| format!("reading {path}"))?;
+            }
+            Backend::Shell(sh) => {
+                sh.read_to(path, &mut buf, None, max).await?;
+            }
+        }
         if buf.len() as u64 > max {
             bail!("{path} grew past the size limit while being read");
         }
@@ -204,8 +253,11 @@ impl RemoteFs {
     /// Overwrite an existing file's contents without replacing the file, so its
     /// owner, group, permissions, hard links and ACLs stay as they are.
     pub async fn overwrite(&self, path: &str, data: &[u8]) -> Result<()> {
-        let mut f = self
-            .s
+        let s = match &self.b {
+            Backend::Sftp(s) => s,
+            Backend::Shell(sh) => return sh.write_from(path, &mut &data[..], WriteMode::Overwrite, None).await,
+        };
+        let mut f = s
             .open_with_flags(path, OpenFlags::WRITE | OpenFlags::TRUNCATE)
             .await
             .with_context(|| format!("opening {path} for writing"))?;
@@ -218,10 +270,13 @@ impl RemoteFs {
 
     /// Create a new file; fails if it exists. `mode` sets its permissions.
     pub async fn create_new(&self, path: &str, data: &[u8], mode: Option<u32>) -> Result<()> {
+        let s = match &self.b {
+            Backend::Sftp(s) => s,
+            Backend::Shell(sh) => return sh.write_from(path, &mut &data[..], WriteMode::CreateNew(mode), None).await,
+        };
         let mut attrs = FileAttributes::empty();
         attrs.permissions = mode;
-        let mut f = self
-            .s
+        let mut f = s
             .open_with_flags_and_attributes(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE, attrs)
             .await
             .with_context(|| format!("creating {path}"))?;
@@ -232,11 +287,17 @@ impl RemoteFs {
     }
 
     pub async fn mkdir(&self, path: &str) -> Result<()> {
-        self.s.create_dir(path).await.with_context(|| format!("creating directory {path}"))
+        match &self.b {
+            Backend::Sftp(s) => s.create_dir(path).await.with_context(|| format!("creating directory {path}")),
+            Backend::Shell(sh) => sh.mkdir(path).await,
+        }
     }
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        self.s.rename(from, to).await.with_context(|| format!("renaming {from} to {to}"))
+        match &self.b {
+            Backend::Sftp(s) => s.rename(from, to).await.with_context(|| format!("renaming {from} to {to}")),
+            Backend::Shell(sh) => sh.rename(from, to).await,
+        }
     }
 
     /// Set a file's modification (and access) time, in seconds since the epoch.
@@ -244,26 +305,40 @@ impl RemoteFs {
         let mut attrs = FileAttributes::empty();
         attrs.mtime = Some(mtime);
         attrs.atime = Some(mtime);
-        self.s.set_metadata(path, attrs).await.with_context(|| format!("setting the time of {path}"))
+        match &self.b {
+            Backend::Sftp(s) => {
+                s.set_metadata(path, attrs).await.with_context(|| format!("setting the time of {path}"))
+            }
+            Backend::Shell(sh) => sh.set_mtime(path, mtime).await,
+        }
     }
 
     pub async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
         let mut attrs = FileAttributes::empty();
         attrs.permissions = Some(mode & 0o7777);
-        self.s.set_metadata(path, attrs).await.with_context(|| format!("changing permissions of {path}"))
+        match &self.b {
+            Backend::Sftp(s) => {
+                s.set_metadata(path, attrs).await.with_context(|| format!("changing permissions of {path}"))
+            }
+            Backend::Shell(sh) => sh.chmod(path, mode).await,
+        }
     }
 
     /// Delete a file, symlink, or directory tree. Symlinks are removed, never
     /// followed.
     pub async fn remove(&self, path: &str) -> Result<()> {
-        let m = self.s.symlink_metadata(path).await.with_context(|| format!("stat {path}"))?;
+        let s = match &self.b {
+            Backend::Sftp(s) => s,
+            Backend::Shell(sh) => return sh.remove(path).await,
+        };
+        let m = self.lstat(path).await?;
         if m.is_dir() {
             for e in self.list(path).await? {
                 Box::pin(self.remove(&e.path)).await?;
             }
-            self.s.remove_dir(path).await.with_context(|| format!("removing directory {path}"))?;
+            s.remove_dir(path).await.with_context(|| format!("removing directory {path}"))?;
         } else {
-            self.s.remove_file(path).await.with_context(|| format!("removing {path}"))?;
+            s.remove_file(path).await.with_context(|| format!("removing {path}"))?;
         }
         Ok(())
     }
@@ -311,11 +386,18 @@ impl RemoteFs {
             return Ok(());
         }
         progress.set_current(remote);
-        let mut src = self.s.open(remote).await.with_context(|| format!("opening {remote}"))?;
         let part = dest.with_file_name(format!("{}.part", dest.file_name().unwrap_or_default().to_string_lossy()));
         let mut out = tokio::fs::File::create(&part).await.with_context(|| format!("creating {}", part.display()))?;
         let mut buf = vec![0u8; CHUNK];
         let result: Result<()> = async {
+            let s = match &self.b {
+                Backend::Sftp(s) => s,
+                Backend::Shell(sh) => {
+                    sh.read_to(remote, &mut out, Some(progress), u64::MAX).await?;
+                    return Ok(());
+                }
+            };
+            let mut src = s.open(remote).await.with_context(|| format!("opening {remote}"))?;
             loop {
                 progress.check_cancel()?;
                 let n = src.read(&mut buf).await?;
@@ -368,14 +450,23 @@ impl RemoteFs {
             return Ok(());
         }
         progress.set_current(dest);
+        let s = match &self.b {
+            Backend::Sftp(s) => s,
+            Backend::Shell(sh) => {
+                let mut src =
+                    tokio::fs::File::open(local).await.with_context(|| format!("opening {}", local.display()))?;
+                sh.write_from(dest, &mut src, WriteMode::Upload(local_mode(&meta)), Some(progress)).await?;
+                progress.done_files.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            }
+        };
         let exists = self.exists(dest).await?;
         let mut f = if exists {
-            self.s.open_with_flags(dest, OpenFlags::WRITE | OpenFlags::TRUNCATE).await
+            s.open_with_flags(dest, OpenFlags::WRITE | OpenFlags::TRUNCATE).await
         } else {
             let mut attrs = FileAttributes::empty();
             attrs.permissions = local_mode(&meta);
-            self.s
-                .open_with_flags_and_attributes(dest, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE, attrs)
+            s.open_with_flags_and_attributes(dest, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE, attrs)
                 .await
         }
         .with_context(|| format!("opening {dest} for writing"))?;

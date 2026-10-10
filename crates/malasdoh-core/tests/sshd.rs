@@ -75,6 +75,8 @@ fn start_sshd_with(setup: impl FnOnce(&Path) -> String) -> Option<Sshd> {
     keygen(&d.join("client"), PASSPHRASE);
     std::fs::copy(d.join("client.pub"), d.join("authorized_keys")).unwrap();
     let extra = setup(d);
+    // "#nosftp" in the extra config: run without an SFTP subsystem.
+    let subsystem = if extra.contains("#nosftp") { String::new() } else { format!("Subsystem sftp {}", sftp_server()) };
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     std::fs::write(
         d.join("sshd_config"),
@@ -82,8 +84,7 @@ fn start_sshd_with(setup: impl FnOnce(&Path) -> String) -> Option<Sshd> {
             "{extra}\nPort {port}\nListenAddress 127.0.0.1\nHostKey {d}/host_ed25519\nPidFile {d}/sshd.pid\n\
              AuthorizedKeysFile {d}/authorized_keys\nStrictModes no\nUsePAM no\nPasswordAuthentication no\n\
              KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin yes\nAllowTcpForwarding yes\n\
-             Subsystem sftp {}\nLogLevel ERROR\n",
-            sftp_server(),
+             {subsystem}\nLogLevel ERROR\n",
             d = d.display()
         ),
     )
@@ -639,6 +640,80 @@ async fn user_certificate_logs_in_without_authorized_keys() {
     let env = Env::with(sshd).unwrap();
     let conn = env.connect().await;
     assert_eq!(conn.exec("echo cert-ok", None).await.unwrap().stdout, b"cert-ok\n");
+}
+
+#[tokio::test]
+async fn without_sftp_files_work_through_the_shell() {
+    use malasdoh_core::sync::{self, SyncOptions};
+    let Some(sshd) = start_sshd_with(|_| "#nosftp".into()) else { return };
+    let env = Env::with(sshd).unwrap();
+    let conn = env.connect().await;
+    assert!(conn.open_sftp().await.is_err(), "the server really has no SFTP");
+    let fs = conn.open_fs().await.unwrap();
+    assert!(fs.is_shell());
+    let work = env.scratch();
+
+    // Awkward names survive the listing.
+    for name in ["plain.txt", "with space", "it's", "new\nline", ".hidden", "-dash"] {
+        std::fs::write(format!("{work}/{name}"), name).unwrap();
+    }
+    std::fs::create_dir(format!("{work}/sub")).unwrap();
+    std::os::unix::fs::symlink(format!("{work}/sub"), format!("{work}/link-to-sub")).unwrap();
+    let listed = fs.list(&work).await.unwrap();
+    let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+    for name in ["plain.txt", "with space", "it's", "new\nline", ".hidden", "-dash", "sub", "link-to-sub"] {
+        assert!(names.contains(&name), "{name:?} missing from {names:?}");
+    }
+    assert_eq!(listed.iter().find(|e| e.name == "sub").unwrap().kind, EntryKind::Dir);
+    assert_eq!(listed.iter().find(|e| e.name == "link-to-sub").unwrap().kind, EntryKind::Symlink { to_dir: true });
+    assert_eq!(listed.iter().find(|e| e.name == "it's").unwrap().size, 4);
+
+    assert_eq!(fs.canonicalize(&format!("{work}/sub/../plain.txt")).await.unwrap(), format!("{work}/plain.txt"));
+    assert_eq!(fs.read(&format!("{work}/it's"), 1024).await.unwrap(), b"it's");
+
+    // Binary-safe round trip, create-only, rename refusing to clobber, chmod, times.
+    let blob: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
+    fs.create_new(&format!("{work}/blob"), &blob, Some(0o600)).await.unwrap();
+    assert_eq!(std::fs::read(format!("{work}/blob")).unwrap(), blob);
+    assert_eq!(mode_of(&format!("{work}/blob")), 0o600);
+    assert!(fs.create_new(&format!("{work}/blob"), b"x", None).await.is_err(), "create_new must not overwrite");
+    assert!(fs.rename(&format!("{work}/plain.txt"), &format!("{work}/blob")).await.is_err());
+    fs.chmod(&format!("{work}/blob"), 0o640).await.unwrap();
+    assert_eq!(mode_of(&format!("{work}/blob")), 0o640);
+    fs.set_mtime(&format!("{work}/blob"), 1_600_000_000).await.unwrap();
+    assert_eq!(fs.stat(&format!("{work}/blob")).await.unwrap().mtime, Some(1_600_000_000));
+
+    // The safe editor works the same way.
+    let io = RemoteIo { fs: fs.clone(), conn: conn.clone(), access: Access::Sftp };
+    let path = format!("{work}/app.conf");
+    std::fs::write(&path, "a=1\r\n").unwrap();
+    set_mode(&path, 0o640);
+    let mut s = io.open(&path).await.unwrap();
+    io.save(&mut s, "a=2\n", &SaveOptions::default()).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"a=2\r\n");
+    assert_eq!(mode_of(&path), 0o640, "rewritten in place");
+    std::fs::write(&path, "changed\r\n").unwrap();
+    assert!(matches!(
+        io.save(&mut s, "a=3\n", &SaveOptions::default()).await.unwrap_err().downcast_ref::<SaveError>(),
+        Some(SaveError::Conflict { .. })
+    ));
+
+    // Transfers and sync.
+    let local = tempfile::tempdir().unwrap();
+    let tree = local.path().join("site");
+    std::fs::create_dir_all(tree.join("css")).unwrap();
+    std::fs::write(tree.join("css/a.css"), "x{}").unwrap();
+    let remote_site = fs.upload(&tree, &work, &Progress::default()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(format!("{remote_site}/css/a.css")).unwrap(), "x{}");
+    let plan = sync::plan(&fs, &tree, &remote_site, &SyncOptions::default()).await.unwrap();
+    assert!(plan.items.is_empty(), "{:?}", plan.items);
+    let back = tempfile::tempdir().unwrap();
+    let got = fs.download(&remote_site, back.path(), &Progress::default()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(got.join("css/a.css")).unwrap(), "x{}");
+
+    fs.remove(&remote_site).await.unwrap();
+    assert!(!fs.exists(&remote_site).await.unwrap());
+    assert!(fs.remove("/").await.is_err());
 }
 
 fn rule(check: &str, when: CheckWhen, reload: &str) -> ValidationRule {

@@ -15,6 +15,8 @@ pub enum SecretKey {
     Password(ProfileId),
     /// Keyed by the key file path, since one key is often shared by many hosts.
     Passphrase(String),
+    /// The proxy password for a connection.
+    ProxyPassword(ProfileId),
 }
 
 impl SecretKey {
@@ -22,6 +24,7 @@ impl SecretKey {
         match self {
             SecretKey::Password(id) => format!("password:{id}"),
             SecretKey::Passphrase(path) => format!("passphrase:{path}"),
+            SecretKey::ProxyPassword(id) => format!("proxy-password:{id}"),
         }
     }
 }

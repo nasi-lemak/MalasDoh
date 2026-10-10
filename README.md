@@ -33,6 +33,15 @@ remote-editing loop, where they are weakest:
 - **Connections**: saved profiles with groups and search; jump hosts
   (ProxyJump) with chains; import from `~/.ssh/config`; duplicate; copy as an
   `ssh` command.
+- **Proxies**: reach the first server through SOCKS5, an HTTP proxy
+  (`CONNECT`), or any command (`ProxyCommand`, e.g. `nc -X connect -x
+  proxy:3128 %h %p`, imported from `~/.ssh/config`). Proxy passwords are
+  asked for and kept only in the OS keychain.
+- **Keepalive** per connection (default every 30 s), so idle sessions survive
+  NAT and firewalls and a dead link is noticed.
+- **Export / import** your connections, snippets and accepted host keys as
+  one file encrypted with a passphrase (PBKDF2-SHA256 + ChaCha20-Poly1305),
+  to back up or move to another computer. Importing only adds what is new.
 - **Port forwarding**: local (`-L`), remote (`-R`) and SOCKS5 (`-D`), saved per
   connection or added for one session, started with the connection if you
   like, and restarted after a reconnect, with live connection and byte counts.

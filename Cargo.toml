@@ -12,7 +12,7 @@ repository = "https://github.com/nasi-lemak/MalasDoh"
 malasdoh-core = { path = "crates/malasdoh-core" }
 anyhow = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net", "process"] }
 russh = { version = "0.64", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp = "3"
 serde = { version = "1", features = ["derive"] }

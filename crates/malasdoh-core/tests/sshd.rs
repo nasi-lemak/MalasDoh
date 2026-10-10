@@ -130,6 +130,7 @@ impl Prompter for TestPrompter {
         self.asked.lock().unwrap().push(match p {
             SecretPrompt::Password { .. } => "password".into(),
             SecretPrompt::Passphrase { retry, .. } => format!("passphrase retry={retry}"),
+            SecretPrompt::ProxyPassword { .. } => "proxy".into(),
         });
         self.passphrase.clone().map(|secret| SecretAnswer { secret, remember: self.remember })
     }
@@ -1042,4 +1043,73 @@ async fn agent_forwarding_only_when_asked() {
     let conn = ssh::connect(vec![off], &ctx).await.unwrap();
     let out = shell_output(&conn, "echo agent=[$SSH_AUTH_SOCK]").await;
     assert!(out.contains("agent=[]"), "no agent unless asked: {out}");
+}
+
+/// A minimal HTTP CONNECT proxy for the test; counts the tunnels it made.
+async fn http_proxy() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = count.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let c = c.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if s.read(&mut b).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push(b[0]);
+                }
+                let line = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+                let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let Ok(mut up) = tokio::net::TcpStream::connect(&target).await else {
+                    let _ = s.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                    return;
+                };
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await;
+                let _ = tokio::io::copy_bidirectional(&mut s, &mut up).await;
+            });
+        }
+    });
+    (port, count)
+}
+
+#[tokio::test]
+async fn connects_through_socks_http_and_command_proxies() {
+    use malasdoh_core::forward::{ForwardKind, ForwardSpec};
+    use malasdoh_core::proxy::Proxy;
+    let Some(env) = Env::new() else { return };
+    let ctx = env.ctx(TestPrompter::accepting());
+    let check = async |p: Profile| {
+        let conn = ssh::connect(vec![p], &ctx).await.expect("connect through the proxy");
+        assert_eq!(conn.exec("echo via-proxy", None).await.unwrap().stdout, b"via-proxy\n");
+    };
+
+    // SOCKS5: our own dynamic forward on another connection is the proxy.
+    let first = env.connect().await;
+    let d = first.start_forward(&ForwardSpec { kind: ForwardKind::Dynamic, ..Default::default() }).await.unwrap();
+    let socks = Proxy::Socks5 { host: "127.0.0.1".into(), port: d.port, user: String::new() };
+    check(Profile { proxy: socks, host: "localhost".into(), ..env.profile() }).await;
+
+    // HTTP CONNECT.
+    let (port, tunnels) = http_proxy().await;
+    let http = Proxy::Http { host: "127.0.0.1".into(), port, user: String::new() };
+    check(Profile { proxy: http, ..env.profile() }).await;
+    assert_eq!(tunnels.load(std::sync::atomic::Ordering::SeqCst), 1, "the connection went through the proxy");
+
+    // ProxyCommand, OpenSSH style.
+    if Command::new("nc").arg("-h").output().is_ok() {
+        let cmd = Proxy::Command { command: "nc %h %p".into() };
+        check(Profile { proxy: cmd, ..env.profile() }).await;
+    }
+
+    // A proxy that is not there fails clearly.
+    let dead = Proxy::Http { host: "127.0.0.1".into(), port: 1, user: String::new() };
+    let err = ssh::connect(vec![Profile { proxy: dead, ..env.profile() }], &ctx).await.err().expect("fails");
+    assert!(format!("{err:#}").contains("HTTP proxy"), "{err:#}");
 }

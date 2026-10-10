@@ -5,6 +5,7 @@
 pub mod commands;
 pub mod diff;
 pub mod edit;
+pub mod export;
 pub mod forward;
 pub mod import;
 pub mod journal;
@@ -12,6 +13,7 @@ pub mod keys;
 pub mod known_hosts;
 pub mod paths;
 pub mod profile;
+pub mod proxy;
 pub mod secrets;
 pub mod sftp;
 pub mod shellfs;

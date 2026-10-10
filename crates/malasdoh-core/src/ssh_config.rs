@@ -107,6 +107,12 @@ pub fn import(text: &str, default_user: &str) -> Vec<Profile> {
         if let Some(key) = opts.get("identityfile") {
             p.auth = AuthMethod::Key { path: key.clone() };
         }
+        if let Some(cmd) = opts.get("proxycommand").filter(|c| !c.eq_ignore_ascii_case("none")) {
+            p.proxy = crate::proxy::Proxy::Command { command: cmd.clone() };
+        }
+        if let Some(fa) = opts.get("forwardagent") {
+            p.forward_agent = fa.eq_ignore_ascii_case("yes");
+        }
         if let Some(j) = opts.get("proxyjump").filter(|j| !j.eq_ignore_ascii_case("none")) {
             jumps.push((p.id, j.clone()));
         }

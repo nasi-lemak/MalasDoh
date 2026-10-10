@@ -2507,6 +2507,7 @@ dependencies = [
  "hmac 0.12.1",
  "keyring",
  "rand 0.10.3",
+ "ring",
  "russh",
  "russh-sftp",
  "serde",

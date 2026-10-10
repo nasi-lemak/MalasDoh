@@ -26,6 +26,8 @@
   multi-line paste check, links, mouse reporting, split panes, typing into
   several servers, agent forwarding
 - Browser: sort, bookmarks, chown, symlinks, archives, find files, follow logs
+- Connections: SOCKS5 / HTTP / ProxyCommand proxies, keepalive setting,
+  encrypted export and import
 - SSH key generation and install (ssh-copy-id); import from PuTTY and WinSCP
 - Reopen last session; startup command per connection; browser follows the
   terminal's folder

@@ -90,6 +90,12 @@ pub struct Profile {
     /// to `git pull` with your key. Only for servers you trust: while you are
     /// connected, their administrators can use your keys too.
     pub forward_agent: bool,
+    /// How to reach this server when it is the first hop.
+    #[serde(skip_serializing_if = "crate::proxy::Proxy::is_none")]
+    pub proxy: crate::proxy::Proxy,
+    /// Seconds between keepalive messages (0: none). They keep idle
+    /// connections open through NAT and firewalls, and notice a dead link.
+    pub keepalive_secs: u32,
     /// Saved folders in the file browser.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bookmarks: Vec<String>,
@@ -116,6 +122,8 @@ impl Default for Profile {
             follow_terminal: false,
             bookmarks: Vec::new(),
             forward_agent: false,
+            proxy: crate::proxy::Proxy::None,
+            keepalive_secs: 30,
             forwards: Vec::new(),
         }
     }
@@ -161,6 +169,17 @@ impl Profile {
         if self.jump == Some(self.id) {
             bail!("a connection cannot jump through itself");
         }
+        match &self.proxy {
+            crate::proxy::Proxy::Socks5 { host, port, .. } | crate::proxy::Proxy::Http { host, port, .. } => {
+                if host.trim().is_empty() || *port == 0 {
+                    bail!("the proxy needs a host and port");
+                }
+            }
+            crate::proxy::Proxy::Command { command } if command.trim().is_empty() => {
+                bail!("the proxy command is empty")
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
@@ -204,6 +223,39 @@ impl ProfileStore {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Add the connections from `incoming` that are not here yet (same id, or
+    /// same user, host and port, counts as here). Jump hosts that matched an
+    /// existing connection point at it; any that would not form a valid chain
+    /// are left out. Returns how many were added.
+    pub fn merge(&mut self, incoming: ProfileStore) -> usize {
+        let same = |a: &Profile, b: &Profile| a.host == b.host && a.port == b.port && a.user == b.user;
+        let mut remap = std::collections::HashMap::new();
+        let mut new = Vec::new();
+        for p in incoming.profiles {
+            match self.profiles.iter().find(|e| e.id == p.id || same(e, &p)) {
+                Some(existing) => {
+                    remap.insert(p.id, existing.id);
+                }
+                None => new.push(p),
+            }
+        }
+        let ids: Vec<ProfileId> = new.iter().map(|p| p.id).collect();
+        for mut p in new {
+            p.jump = p.jump.map(|j| remap.get(&j).copied().unwrap_or(j));
+            self.profiles.push(p);
+        }
+        let mut added = 0;
+        for id in ids {
+            let ok = self.get(id).is_some_and(|p| p.validate().is_ok()) && self.chain(id).is_ok();
+            if ok {
+                added += 1;
+            } else {
+                self.profiles.retain(|x| x.id != id);
+            }
+        }
+        added
     }
 
     /// Remove a profile. Profiles that jumped through it fall back to connecting
@@ -313,5 +365,23 @@ mod tests {
         let mut p = profile("x");
         p.auth = AuthMethod::Key { path: " ".into() };
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn merge_adds_only_new_and_keeps_jumps_working() {
+        let mut here = ProfileStore::default();
+        let bastion = profile("bastion");
+        here.upsert(bastion.clone()).unwrap();
+
+        // The other computer has the same bastion under another id, a web
+        // server behind it, and a duplicate of nothing.
+        let other_bastion = Profile { id: ProfileId::new(), ..bastion.clone() };
+        let web = Profile { jump: Some(other_bastion.id), ..profile("web") };
+        let broken = Profile { jump: Some(ProfileId::new()), ..profile("orphan") };
+        let incoming = ProfileStore { profiles: vec![other_bastion, web.clone(), broken] };
+        assert_eq!(here.merge(incoming.clone()), 1);
+        assert_eq!(here.get(web.id).unwrap().jump, Some(bastion.id), "points at the bastion here");
+        assert_eq!(here.profiles.len(), 2);
+        assert_eq!(here.merge(incoming), 0, "importing twice adds nothing");
     }
 }

@@ -44,6 +44,7 @@ pub struct HostKeyPrompt {
 pub enum SecretPrompt {
     Password { user: String, host: String, retry: bool },
     Passphrase { key_path: String, retry: bool },
+    ProxyPassword { user: String, proxy: String, retry: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +261,7 @@ fn same_family(a: &Algorithm, b: &Algorithm) -> bool {
     }
 }
 
-fn config_for(known: &[Algorithm], want_certificates: bool) -> Arc<client::Config> {
+fn config_for(known: &[Algorithm], want_certificates: bool, keepalive_secs: u32) -> Arc<client::Config> {
     // Offer key types we already trust for this host first, as OpenSSH does,
     // so a server with several host keys presents the one we can verify.
     let mut keys: Vec<Algorithm> = Preferred::DEFAULT.key.to_vec();
@@ -273,7 +274,7 @@ fn config_for(known: &[Algorithm], want_certificates: bool) -> Arc<client::Confi
             key: Cow::Owned(keys),
             ..Preferred::DEFAULT
         },
-        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_interval: (keepalive_secs > 0).then(|| Duration::from_secs(keepalive_secs as u64)),
         keepalive_max: 3,
         nodelay: true,
         ..Default::default()
@@ -323,8 +324,14 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
         let config = config_for(
             &ctx.known_hosts.known_algorithms(&hop.host, hop.port),
             !ctx.known_hosts.trusted_cas(&hop.host, hop.port).is_empty(),
+            hop.keepalive_secs,
         );
         let result = match hops.last() {
+            None if !hop.proxy.is_none() => {
+                ctx.prompter.status(&format!("Connecting to {} through {}…", hop.destination(), hop.proxy.label()));
+                let stream = through_proxy(hop, ctx).await?;
+                client::connect_stream(config, stream, handler).await
+            }
             None => {
                 let tcp = tokio::time::timeout(
                     CONNECT_TIMEOUT,
@@ -359,6 +366,49 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
     }
     let handle = hops.pop().expect("chain is not empty");
     Ok(Connection { handle, hops, profile: target, remote_forwards })
+}
+
+/// Reach the first hop through its proxy, asking for (and remembering, if
+/// told) the proxy password.
+async fn through_proxy<P: Prompter>(hop: &Profile, ctx: &ConnectContext<P>) -> Result<Box<dyn crate::proxy::Stream>> {
+    let Some(user) = hop.proxy.auth_user() else {
+        return crate::proxy::connect(&hop.proxy, &hop.host, hop.port, &hop.user, None).await;
+    };
+    let key = SecretKey::ProxyPassword(hop.id);
+    let mut stored = secret_get(&ctx.secrets, key.clone()).await;
+    for attempt in 0..PASSWORD_ATTEMPTS {
+        let from_store = stored.is_some();
+        let (password, remember) = match stored.take() {
+            Some(s) => (s, false),
+            None => {
+                let a = ctx
+                    .prompter
+                    .ask_secret(SecretPrompt::ProxyPassword {
+                        user: user.to_string(),
+                        proxy: hop.proxy.label(),
+                        retry: attempt > 0,
+                    })
+                    .await
+                    .ok_or(Cancelled)?;
+                (a.secret, a.remember)
+            }
+        };
+        match crate::proxy::connect(&hop.proxy, &hop.host, hop.port, &hop.user, Some(&password)).await {
+            Ok(s) => {
+                if remember {
+                    secret_set(&ctx.secrets, key, password).await;
+                }
+                return Ok(s);
+            }
+            Err(e) if e.downcast_ref::<crate::proxy::ProxyAuthFailed>().is_some() => {
+                if from_store {
+                    secret_delete(&ctx.secrets, key.clone()).await;
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(crate::proxy::ProxyAuthFailed.into())
 }
 
 async fn secret_get(store: &Arc<dyn SecretStore>, key: SecretKey) -> Option<String> {
@@ -929,9 +979,10 @@ mod tests {
 
     #[test]
     fn known_key_types_go_first() {
-        let cfg = config_for(&[Algorithm::Rsa { hash: None }], false);
+        let cfg = config_for(&[Algorithm::Rsa { hash: None }], false, 30);
         assert!(matches!(cfg.preferred.key[0], Algorithm::Rsa { .. }));
-        let cfg = config_for(&[], true);
+        let cfg = config_for(&[], true, 0);
+        assert!(cfg.keepalive_interval.is_none());
         assert!(!cfg.preferred.host_key_certificates.is_empty());
         assert_eq!(cfg.preferred.key[0], Algorithm::Ed25519);
     }

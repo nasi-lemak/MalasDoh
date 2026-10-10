@@ -1,6 +1,8 @@
 //! The main window: connection list, session tabs, and the dialogs that answer
 //! a connection's questions.
 
+mod backup;
+
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -52,6 +54,8 @@ pub struct App {
     journal: Journal,
     journal_win: JournalWindow,
     keys_win: KeysWindow,
+    export_dlg: Option<backup::ExportDialog>,
+    import_dlg: Option<backup::ImportDialog>,
     /// "Type into several terminals": the sessions that get what is typed.
     broadcast: Option<Vec<SessionId>>,
     /// What was open when MalasDoh last closed, until it is reopened.
@@ -242,6 +246,8 @@ impl App {
             journal_win: JournalWindow::default(),
             keys_win: KeysWindow::default(),
             broadcast: None,
+            export_dlg: None,
+            import_dlg: None,
             last: LastSession::default(),
             last_written: String::new(),
             last_persist: Instant::now(),
@@ -462,6 +468,15 @@ impl App {
                             .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()));
                         self.add_imported(found, "WinSCP.ini");
                     }
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Export connections…").on_hover_text("To one passphrase-encrypted file").clicked() {
+                    self.start_export();
+                    ui.close();
+                }
+                if ui.button("Import connections…").on_hover_text("From a MalasDoh export").clicked() {
+                    self.start_import();
                     ui.close();
                 }
                 ui.separator();
@@ -1030,6 +1045,7 @@ impl App {
                     let (title, detail, retry) = match p {
                         SecretPrompt::Password { user, host, retry } => ("Password", format!("Password for {user}@{host}"), *retry),
                         SecretPrompt::Passphrase { key_path, retry } => ("Key passphrase", format!("Passphrase for {key_path}"), *retry),
+                        SecretPrompt::ProxyPassword { user, proxy, retry } => ("Proxy password", format!("Password for {user} at the {proxy}"), *retry),
                     };
                     ui.heading(title);
                     if retry {
@@ -1226,6 +1242,15 @@ impl App {
                 ui.end_row();
                 ui.label("Backups");
                 ui.checkbox(&mut p.remote_backup, "Also keep a .bak copy next to edited files on the server");
+                ui.end_row();
+                ui.label("Proxy");
+                proxy_editor(ui, &mut p.proxy);
+                ui.end_row();
+                ui.label("Keepalive");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut p.keepalive_secs).range(0..=3600).suffix(" s"));
+                    ui.label(RichText::new("0 = off. Keeps idle sessions open through firewalls.").weak());
+                });
                 ui.end_row();
                 ui.label("Agent");
                 ui.checkbox(&mut p.forward_agent, "Forward my SSH agent (ssh -A)").on_hover_text(
@@ -1626,6 +1651,52 @@ impl App {
     }
 }
 
+/// Direct, SOCKS5, HTTP CONNECT, or a command (OpenSSH's ProxyCommand).
+fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
+    use malasdoh_core::proxy::Proxy;
+    ui.vertical(|ui| {
+        let kind = match proxy {
+            Proxy::None => "Direct",
+            Proxy::Socks5 { .. } => "SOCKS5",
+            Proxy::Http { .. } => "HTTP CONNECT",
+            Proxy::Command { .. } => "Command",
+        };
+        egui::ComboBox::from_id_salt("proxy-kind").selected_text(kind).show_ui(ui, |ui| {
+            if ui.selectable_label(kind == "Direct", "Direct").clicked() {
+                *proxy = Proxy::None;
+            }
+            if ui.selectable_label(kind == "SOCKS5", "SOCKS5").clicked() && kind != "SOCKS5" {
+                *proxy = Proxy::Socks5 { host: String::new(), port: 1080, user: String::new() };
+            }
+            if ui.selectable_label(kind == "HTTP CONNECT", "HTTP CONNECT").clicked() && kind != "HTTP CONNECT" {
+                *proxy = Proxy::Http { host: String::new(), port: 3128, user: String::new() };
+            }
+            if ui.selectable_label(kind == "Command", "Command (ProxyCommand)").clicked() && kind != "Command" {
+                *proxy = Proxy::Command { command: "nc -X connect -x proxy:3128 %h %p".into() };
+            }
+        });
+        match proxy {
+            Proxy::None => {}
+            Proxy::Socks5 { host, port, user } | Proxy::Http { host, port, user } => {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(host).hint_text("proxy host").desired_width(160.0));
+                    ui.add(egui::DragValue::new(port).range(1..=65535));
+                    ui.add(egui::TextEdit::singleline(user).hint_text("user (optional)").desired_width(110.0))
+                        .on_hover_text("The password is asked for when connecting, and kept in the OS keychain if you tick remember");
+                });
+            }
+            Proxy::Command { command } => {
+                ui.add(egui::TextEdit::singleline(command).desired_width(320.0)).on_hover_text(
+                    "Run on this computer; its input and output carry the SSH connection. %h, %p, %r: host, port, user",
+                );
+            }
+        }
+        if !proxy.is_none() {
+            ui.label(RichText::new("Used when this is the first hop (a jump host's own proxy is used otherwise).").weak().small());
+        }
+    });
+}
+
 /// Use `file` as the monospace font (terminal, editor), or the built-in one.
 fn apply_fonts(ctx: &egui::Context, file: &str) -> Result<(), String> {
     let mut fonts = egui::FontDefinitions::default();
@@ -1679,6 +1750,7 @@ impl eframe::App for App {
         self.form_ui(&ctx);
         self.confirm_ui(&ctx);
         self.cross_copy_ui(&ctx);
+        self.backup_ui(&ctx);
         self.settings_ui(&ctx);
         self.snippet_windows_ui(&ctx);
         self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);

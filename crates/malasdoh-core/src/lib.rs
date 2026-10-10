@@ -12,6 +12,7 @@ pub mod import;
 pub mod journal;
 pub mod keys;
 pub mod known_hosts;
+pub mod patch;
 pub mod paths;
 pub mod profile;
 pub mod proxy;

@@ -92,6 +92,13 @@ remote-editing loop, where they are weakest:
   `/etc/ssl/private` or `/root` can be listed, transferred and edited. A red
   badge shows it is on; files opened then are edited as root, with checks
   run as root too.
+- **Apply a patch** (`+ New → Apply a patch…`): paste or open a `diff -u` /
+  `git diff`, choose the folder it is relative to (and `-p`-style strip), and
+  Check: every file is read and every change must match exactly (it may have
+  moved, but no fuzz). You see each file's diff; nothing is written unless all
+  match, and then each file is saved like an edit (conflict check, backup,
+  config check, journal), stopping at the first that fails. New files are
+  created; deleting files is left to you. Applying twice does nothing.
 - **Find files**: by name pattern and/or text inside, from any folder, as
   root if needed; click a result to show it, double-click to edit.
 - **Follow a log** (`tail -F`, also as root): new lines stream in, with a

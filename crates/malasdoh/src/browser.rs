@@ -66,6 +66,7 @@ pub enum Action {
     ToggleBookmark(String),
     /// Browse as root (SFTP through sudo), or back to your own user.
     ToggleRoot,
+    OpenPatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -241,6 +242,13 @@ impl Browser {
                     ui.separator();
                     if ui.button("Compare / sync with a local folder…").clicked() {
                         actions.push(Action::OpenSync);
+                    }
+                    if ui
+                        .button("Apply a patch…")
+                        .on_hover_text("diff -u or git diff, checked before anything is written")
+                        .clicked()
+                    {
+                        actions.push(Action::OpenPatch);
                     }
                 });
                 if !self.selected.is_empty() && ui.button("⬇").on_hover_text("Download selected").clicked() {

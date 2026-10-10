@@ -15,6 +15,7 @@ mod keys_ui;
 mod local;
 mod logview;
 mod multirun;
+mod patch_ui;
 mod restore;
 mod session;
 mod settings;

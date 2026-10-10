@@ -1141,3 +1141,21 @@ async fn sftp_through_sudo_reaches_root_only_files() {
     let uid = std::fs::metadata(format!("{secret}/new")).map(|m| std::os::unix::fs::MetadataExt::uid(&m)).unwrap();
     assert_eq!(uid, 0);
 }
+
+#[tokio::test]
+async fn create_new_through_sudo_never_replaces() {
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    if !conn.exec("sudo -n true", None).await.map(|o| o.success()).unwrap_or(false) {
+        eprintln!("passwordless sudo not available; skipping");
+        return;
+    }
+    let fs = conn.open_sftp().await.unwrap();
+    let io = RemoteIo { fs, conn: conn.clone(), access: Access::Sudo { password: None } };
+    let path = format!("{}/motd", env.scratch());
+    io.create_new(&path, b"Managed by ops\n", 0o644).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"Managed by ops\n");
+    assert_eq!(mode_of(&path), 0o644);
+    assert!(io.create_new(&path, b"other\n", 0o644).await.is_err(), "an existing file is not replaced");
+    assert_eq!(std::fs::read(&path).unwrap(), b"Managed by ops\n");
+}

@@ -116,6 +116,54 @@ impl Entry {
     }
 }
 
+/// The journal entry for a save attempt, filled in from how it went;
+/// `None` when nothing reached the server (a conflict, a check that refused
+/// it before writing, a connection error). `base` names the connection and
+/// file; `after` is the session's text after the attempt (after a rollback
+/// that is what is back on the server) and `text` what was being saved.
+pub fn entry_for(
+    base: Entry,
+    saved: &anyhow::Result<crate::edit::SaveReport>,
+    after: &str,
+    text: &str,
+) -> Option<Entry> {
+    use crate::edit::SaveError;
+    use crate::validate::CheckOutcome;
+    let e = match saved {
+        Ok(report) => Entry {
+            check: report.check.as_ref().map(|c| {
+                let how = match c.outcome {
+                    CheckOutcome::Passed { .. } => "passed",
+                    CheckOutcome::Unavailable { .. } => "not installed",
+                };
+                format!("{}: {how}", c.rule)
+            }),
+            local_backup: report.local_backup.clone(),
+            remote_backup: report.remote_backup.clone(),
+            ..base
+        }
+        .with_change(&report.previous, text),
+        Err(e) => match e.downcast_ref::<SaveError>() {
+            Some(SaveError::ValidationFailed { rule, rolled_back: true, .. }) => {
+                Entry { outcome: Outcome::RolledBack, check: Some(format!("{rule}: failed")), ..base }
+                    .with_change(after, text)
+            }
+            Some(SaveError::RollbackFailed { rule, backup, .. }) => Entry {
+                outcome: Outcome::RollbackFailed,
+                check: Some(format!("{rule}: failed")),
+                local_backup: backup.clone(),
+                ..base
+            }
+            .with_change(after, text),
+            Some(SaveError::VerifyFailed { backup }) => {
+                Entry { outcome: Outcome::VerifyFailed, local_backup: backup.clone(), ..base }.with_change(after, text)
+            }
+            _ => return None,
+        },
+    };
+    Some(Entry { time: now(), ..e })
+}
+
 pub fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }

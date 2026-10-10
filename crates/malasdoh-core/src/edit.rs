@@ -209,6 +209,30 @@ impl RemoteIo {
         }
     }
 
+    /// Create a file that must not exist yet, as this access's user.
+    pub async fn create_new(&self, path: &str, data: &[u8], mode: u32) -> Result<()> {
+        match &self.access {
+            Access::Sftp => self.fs.create_new(path, data, Some(mode)).await,
+            Access::Sudo { password } => {
+                let tmp = self.private_temp_path().await?;
+                self.fs.create_new(&tmp, data, Some(0o600)).await?;
+                // noclobber: the redirect fails if the file appeared meanwhile.
+                let cmd = format!(
+                    "sudo -S -p '' -- sh -c 'set -C; cat -- \"$1\" > \"$2\" && chmod {mode:o} \"$2\"' sh {} {}",
+                    shell_quote(&tmp),
+                    shell_quote(path)
+                );
+                let result = self.sudo(&cmd, password.as_deref()).await;
+                let _ = self.fs.remove(&tmp).await;
+                let out = result?;
+                if !out.success() {
+                    return Err(sudo_error(&out).into());
+                }
+                Ok(())
+            }
+        }
+    }
+
     async fn private_temp_path(&self) -> Result<String> {
         let home = self.fs.home().await?;
         Ok(join(&home, &format!(".malasdoh-upload-{}", uuid::Uuid::new_v4().simple())))

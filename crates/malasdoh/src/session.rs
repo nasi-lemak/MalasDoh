@@ -58,6 +58,8 @@ const FOLLOW_HOOK: &str = concat!(
 
 pub enum SessionMsg {
     RootFs(Result<RemoteFs, String>),
+    PatchChecked(Result<Vec<crate::patch_ui::FileCheck>, String>),
+    PatchApplied(Vec<(String, Result<String, String>)>),
     LogData {
         id: u64,
         data: Vec<u8>,
@@ -152,6 +154,12 @@ pub enum AfterSudo {
     Find(String),
     Restore(Box<Draft>),
     RootBrowse,
+    PatchCheck {
+        text: String,
+        base: String,
+        strip: usize,
+    },
+    PatchApply,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -242,6 +250,7 @@ pub struct Session {
     pub found_drafts: Vec<Draft>,
     /// Your own file access, kept while browsing as root.
     fs_user: Option<RemoteFs>,
+    pub patch: crate::patch_ui::PatchWindow,
 }
 
 /// A transfer whose destination already has some of the same names.
@@ -293,6 +302,7 @@ impl Session {
             typed: Vec::new(),
             found_drafts: Vec::new(),
             fs_user: None,
+            patch: Default::default(),
         }
     }
 
@@ -482,6 +492,17 @@ impl Session {
                 }
             }
             SessionMsg::FindDone { result } => self.find.done(result),
+            SessionMsg::PatchChecked(result) => {
+                self.patch.busy = false;
+                self.patch.checked = Some(result);
+            }
+            SessionMsg::PatchApplied(results) => {
+                self.patch.busy = false;
+                let n = results.iter().filter(|(_, r)| r.is_ok()).count();
+                self.notify(format!("Patch applied to {n} of {} file(s)", results.len()), n < results.len());
+                self.patch.applied = results;
+                self.refresh(shared);
+            }
             SessionMsg::RootFs(result) => {
                 self.browser.root_pending = false;
                 match result {
@@ -736,6 +757,10 @@ impl Session {
                         AfterSudo::Find(cmd) => self.run_find(cmd, true, shared),
                         AfterSudo::Restore(d) => self.restore_draft(*d, shared, settings),
                         AfterSudo::RootBrowse => self.toggle_root(shared),
+                        AfterSudo::PatchCheck { text, base, strip } => {
+                            self.patch_check(text, base, strip, true, shared)
+                        }
+                        AfterSudo::PatchApply => self.patch_apply(shared, settings),
                         AfterSudo::Save(id) => {
                             let access = self.sudo.clone().unwrap();
                             if let Some(ed) = self.editors.iter_mut().find(|e| e.id == id) {
@@ -754,6 +779,9 @@ impl Session {
                     } else {
                         if matches!(then, AfterSudo::RootBrowse) {
                             self.browser.root_pending = false;
+                        }
+                        if matches!(then, AfterSudo::PatchCheck { .. } | AfterSudo::PatchApply) {
+                            self.patch.busy = false;
                         }
                         if matches!(then, AfterSudo::Find(_)) {
                             self.find.done(Err(format!("sudo: {e}")));
@@ -968,6 +996,27 @@ impl Session {
         });
     }
 
+    /// A journal entry naming this connection and `path`, to be filled in.
+    fn journal_entry(profile: &Profile, path: &str, sudo: bool) -> journal::Entry {
+        journal::Entry {
+            time: 0,
+            connection: profile.display_name(),
+            user: profile.user.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+            path: path.to_string(),
+            outcome: journal::Outcome::Saved,
+            sudo,
+            added: 0,
+            removed: 0,
+            check: None,
+            local_backup: None,
+            remote_backup: None,
+            patch: String::new(),
+            truncated: false,
+        }
+    }
+
     fn save_editor(&mut self, editor: u64, force: bool, check: bool, shared: &Shared, _settings: &Settings) {
         let backup_root = edit::host_backup_dir(&shared.paths.backups_dir(), &self.profile.host, self.profile.port);
         let remote_backup = self.profile.remote_backup;
@@ -987,82 +1036,18 @@ impl Session {
         let opts = SaveOptions { local_backup_dir: Some(backup_root), remote_backup, force, validation };
         let (events, id) = (shared.events.clone(), self.id);
         let journal = Journal::new(shared.paths.journal_file());
-        let entry = journal::Entry {
-            time: 0,
-            connection: self.profile.display_name(),
-            user: self.profile.user.clone(),
-            host: self.profile.host.clone(),
-            port: self.profile.port,
-            path: session.path.clone(),
-            outcome: journal::Outcome::Saved,
-            sudo: ed.access.is_sudo(),
-            added: 0,
-            removed: 0,
-            check: None,
-            local_backup: None,
-            remote_backup: None,
-            patch: String::new(),
-            truncated: false,
-        };
+        let entry = Self::journal_entry(&self.profile, &session.path, ed.access.is_sudo());
         shared.rt.spawn(async move {
             let saved = io.save(&mut session, &text, &opts).await;
             // Record what happened to the server's file, then report.
-            let record = match &saved {
-                Ok(report) => Some(
-                    journal::Entry {
-                        check: report.check.as_ref().map(|c| {
-                            let how = match c.outcome {
-                                CheckOutcome::Passed { .. } => "passed",
-                                CheckOutcome::Unavailable { .. } => "not installed",
-                            };
-                            format!("{}: {how}", c.rule)
-                        }),
-                        local_backup: report.local_backup.clone(),
-                        remote_backup: report.remote_backup.clone(),
-                        ..entry
-                    }
-                    .with_change(&report.previous, &text),
-                ),
-                // After a rollback the session is based on what is back on
-                // the server.
-                Err(e) => match e.downcast_ref::<SaveError>() {
-                    Some(SaveError::ValidationFailed { rule, rolled_back: true, .. }) => Some(
-                        journal::Entry {
-                            outcome: journal::Outcome::RolledBack,
-                            check: Some(format!("{rule}: failed")),
-                            ..entry
-                        }
-                        .with_change(&session.base_text, &text),
-                    ),
-                    Some(SaveError::RollbackFailed { rule, backup, .. }) => Some(
-                        journal::Entry {
-                            outcome: journal::Outcome::RollbackFailed,
-                            check: Some(format!("{rule}: failed")),
-                            local_backup: backup.clone(),
-                            ..entry
-                        }
-                        .with_change(&session.base_text, &text),
-                    ),
-                    Some(SaveError::VerifyFailed { backup }) => Some(
-                        journal::Entry {
-                            outcome: journal::Outcome::VerifyFailed,
-                            local_backup: backup.clone(),
-                            ..entry
-                        }
-                        .with_change(&session.base_text, &text),
-                    ),
-                    _ => None,
-                },
-            };
-            if let Some(mut r) = record {
-                r.time = journal::now();
-                if let Err(e) = journal.append(&r) {
-                    tracing::warn!("could not write the change journal: {e:#}");
-                    let msg = format!(
-                        "The change journal could not be written ({e:#}); the save itself is reported in the editor."
-                    );
-                    events.session(id, SessionMsg::OpDone { result: Err(msg) });
-                }
+            if let Some(r) = journal::entry_for(entry, &saved, &session.base_text, &text)
+                && let Err(e) = journal.append(&r)
+            {
+                tracing::warn!("could not write the change journal: {e:#}");
+                let msg = format!(
+                    "The change journal could not be written ({e:#}); the save itself is reported in the editor."
+                );
+                events.session(id, SessionMsg::OpDone { result: Err(msg) });
             }
             let result = match saved {
                 Ok(report) => Ok((session, report)),
@@ -1265,6 +1250,10 @@ impl Session {
             A::Follow { path, sudo } => self.follow(path, sudo, shared),
             A::OpenFind => self.find.show(&self.browser.path.clone()),
             A::ToggleRoot => self.toggle_root(shared),
+            A::OpenPatch => {
+                let (dir, root) = (self.browser.path.clone(), self.browser.root);
+                self.patch.show(&dir, root);
+            }
             A::ToggleBookmark(dir) => {
                 let b = &mut self.profile.bookmarks;
                 if let Some(i) = b.iter().position(|x| *x == dir) {
@@ -1399,6 +1388,131 @@ impl Session {
                 self.save_editor(id, false, true, shared, settings);
             }
         }
+    }
+
+    /// Read every file the patch touches and try it in memory.
+    fn patch_check(&mut self, text: String, base: String, strip: usize, sudo: bool, shared: &Shared) {
+        use crate::patch_ui::{FileCheck, Status, remote_path};
+        use malasdoh_core::patch::{self, Applied};
+        let then = AfterSudo::PatchCheck { text: text.clone(), base: base.clone(), strip };
+        let Some(access) = self.access_for(sudo, then, shared) else { return };
+        let Some(io) = self.io(access) else {
+            self.patch.busy = false;
+            return self.notify("Not connected", true);
+        };
+        let (events, id) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let result = async {
+                let files = patch::parse(&text)?;
+                let mut out = Vec::new();
+                for fp in files {
+                    let remote = remote_path(&base, fp.path(), strip);
+                    let status = if fp.is_deletion() {
+                        Status::Skipped("deletes the file; not done here (delete it in the browser)".into())
+                    } else {
+                        match io.read_bytes(&remote).await {
+                            Err(e) => Status::Failed(format!("{e:#}")),
+                            Ok(None) if fp.is_new_file() => match patch::apply("", &fp) {
+                                Ok(Applied::Changed(t)) => Status::New { text: t },
+                                Ok(Applied::AlreadyApplied) => Status::Already,
+                                Err(e) => Status::Failed(e.to_string()),
+                            },
+                            Ok(None) => Status::Failed("does not exist".into()),
+                            // A new file that is already there with the same text: done.
+                            Ok(Some(have)) if fp.is_new_file() => match patch::apply("", &fp) {
+                                Ok(Applied::Changed(t)) if text::decode(&have).is_ok_and(|(h, _)| h == t) => {
+                                    Status::Already
+                                }
+                                _ => Status::Failed("should be new, but already exists".into()),
+                            },
+                            Ok(Some(_)) => match io.open(&remote).await {
+                                Err(e) => Status::Failed(format!("{e:#}")),
+                                Ok(session) => match patch::apply(&session.base_text, &fp) {
+                                    Ok(Applied::Changed(new_text)) => {
+                                        let (added, removed) = fp.counts();
+                                        Status::Ready { session: Box::new(session), new_text, added, removed }
+                                    }
+                                    Ok(Applied::AlreadyApplied) => Status::Already,
+                                    Err(e) => Status::Failed(e.to_string()),
+                                },
+                            },
+                        }
+                    };
+                    out.push(FileCheck { patch_path: fp.path().to_string(), remote, status });
+                }
+                anyhow::Ok(out)
+            }
+            .await
+            .map_err(|e| format!("{e:#}"));
+            events.session(id, SessionMsg::PatchChecked(result));
+        });
+    }
+
+    /// Save the checked files one by one, stopping at the first failure.
+    fn patch_apply(&mut self, shared: &Shared, settings: &Settings) {
+        use crate::patch_ui::Status;
+        let Some(Ok(files)) = &self.patch.checked else { return };
+        let sudo = self.patch.sudo;
+        let jobs: Vec<(String, Option<EditSession>, String)> = files
+            .iter()
+            .filter_map(|f| match &f.status {
+                Status::Ready { session, new_text, .. } => {
+                    Some((f.remote.clone(), Some((**session).clone()), new_text.clone()))
+                }
+                Status::New { text } => Some((f.remote.clone(), None, text.clone())),
+                _ => None,
+            })
+            .collect();
+        let Some(access) = self.access_for(sudo, AfterSudo::PatchApply, shared) else { return };
+        let Some(io) = self.io(access) else {
+            self.patch.busy = false;
+            return self.notify("Not connected", true);
+        };
+        let rules = settings.validation_rules.clone();
+        let backup_root = edit::host_backup_dir(&shared.paths.backups_dir(), &self.profile.host, self.profile.port);
+        let remote_backup = self.profile.remote_backup;
+        let journal = Journal::new(shared.paths.journal_file());
+        let entries: Vec<journal::Entry> =
+            jobs.iter().map(|(p, _, _)| Self::journal_entry(&self.profile, p, sudo)).collect();
+        let (events, id) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let mut results = Vec::new();
+            for ((path, session, text), entry) in jobs.into_iter().zip(entries) {
+                let outcome = match session {
+                    Some(mut session) => {
+                        let opts = SaveOptions {
+                            local_backup_dir: Some(backup_root.clone()),
+                            remote_backup,
+                            force: false,
+                            validation: find_rule(&rules, &path).cloned(),
+                        };
+                        let saved = io.save(&mut session, &text, &opts).await;
+                        if let Some(r) = journal::entry_for(entry, &saved, &session.base_text, &text) {
+                            let _ = journal.append(&r);
+                        }
+                        saved.map(|rep| match rep.check {
+                            Some(c) => format!("saved, {} check done", c.rule),
+                            None => "saved".to_string(),
+                        })
+                    }
+                    None => {
+                        let bytes = text.as_bytes();
+                        let made = io.create_new(&path, bytes, 0o644).await;
+                        if made.is_ok() {
+                            let e = journal::Entry { time: journal::now(), ..entry }.with_change("", &text);
+                            let _ = journal.append(&e);
+                        }
+                        made.map(|_| "created".to_string())
+                    }
+                };
+                let failed = outcome.is_err();
+                results.push((path, outcome.map_err(|e| format!("{e:#}"))));
+                if failed {
+                    break;
+                }
+            }
+            events.session(id, SessionMsg::PatchApplied(results));
+        });
     }
 
     /// Switch the browser to root (SFTP through sudo, set up first if
@@ -1610,7 +1724,7 @@ impl Session {
             }
             (active, _) => self.render_pane(active, ui, shared, settings),
         }
-        self.dialogs_ui(ui, shared);
+        self.dialogs_ui(ui, shared, settings);
     }
 
     fn render_pane(&mut self, pane: Option<Pane>, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
@@ -1670,12 +1784,19 @@ impl Session {
         }
     }
 
-    fn dialogs_ui(&mut self, ui: &mut egui::Ui, shared: &Shared) {
+    fn dialogs_ui(&mut self, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
         self.sync.ui(ui.ctx(), self.fs.as_ref(), shared, self.id);
         if let Some((path, backup)) = self.backups_ui(ui.ctx()) {
             self.restore_backup(path, backup, shared);
         }
         self.overwrite_ui(ui.ctx(), shared);
+        match self.patch.ui(ui.ctx(), self.id) {
+            Some(crate::patch_ui::PatchAction::Check { text, base, strip, sudo }) => {
+                self.patch_check(text, base, strip, sudo, shared)
+            }
+            Some(crate::patch_ui::PatchAction::Apply) => self.patch_apply(shared, settings),
+            None => {}
+        }
         match self.find.ui(ui.ctx(), self.id) {
             Some(FindAction::Search { dir, name, contains, depth, sudo }) => {
                 match commands::find(&dir, &name, &contains, depth, crate::find_ui::LIMIT) {

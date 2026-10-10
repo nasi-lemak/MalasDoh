@@ -25,6 +25,7 @@ use thiserror::Error;
 use crate::sftp::{RemoteFs, file_name, join, parent};
 use crate::ssh::{Connection, shell_quote};
 use crate::text::{self, TextFormat};
+use crate::validate::{CheckOutcome, CheckWhen, ValidationRule, builtin_check, command_for};
 
 /// Files bigger than this are not opened in the editor.
 pub const MAX_EDIT_SIZE: u64 = 20 * 1024 * 1024;
@@ -58,6 +59,12 @@ pub enum SaveError {
     Conflict { current: Vec<u8> },
     #[error("the file was deleted on the server since you opened it")]
     Deleted,
+    /// The config check failed. With `rolled_back`, the original is back on the
+    /// server; otherwise nothing was written.
+    #[error("{rule} check failed{}:\n{output}", if *.rolled_back { "; the original was put back" } else { "; nothing was written" })]
+    ValidationFailed { rule: String, output: String, rolled_back: bool },
+    #[error("{rule} check failed and putting the original back ALSO failed: {error}. A local backup is at {}", .backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "—".into()))]
+    RollbackFailed { rule: String, error: String, backup: Option<PathBuf> },
     #[error("the file on the server does not match what was written (a local backup was kept at {})", .backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "—".into()))]
     VerifyFailed { backup: Option<PathBuf> },
 }
@@ -109,6 +116,8 @@ pub struct SaveOptions {
     pub remote_backup: bool,
     /// Save even though the file changed on the server.
     pub force: bool,
+    /// Check the config as part of saving (see [`crate::validate`]).
+    pub validation: Option<ValidationRule>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +125,15 @@ pub struct SaveReport {
     pub bytes: usize,
     pub local_backup: Option<PathBuf>,
     pub remote_backup: Option<String>,
+    pub check: Option<CheckReport>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckReport {
+    pub rule: String,
+    pub outcome: CheckOutcome,
+    /// The reload command's success and output, if one ran.
+    pub reload: Option<(bool, String)>,
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -256,16 +274,121 @@ impl RemoteIo {
         };
         let remote_backup = if opts.remote_backup { Some(self.remote_backup(&s.path, &original).await?) } else { None };
 
+        let rule = opts.validation.as_ref();
+        let mut outcome = None;
+        if let Some(r) = rule.filter(|r| r.when == CheckWhen::BeforeWrite) {
+            outcome = Some(self.check_before(r, &s.path, &new_bytes).await?);
+        }
+
         self.write_bytes(&s.path, &new_bytes).await?;
 
         let written = self.read_bytes(&s.path).await?.unwrap_or_default();
         if sha256(&written) != sha256(&new_bytes) {
             return Err(SaveError::VerifyFailed { backup: local_backup }.into());
         }
+
+        if let Some(r) = rule.filter(|r| r.when == CheckWhen::AfterWrite) {
+            let out = self.run(&command_for(&r.check, &s.path)).await?;
+            match classify(&out) {
+                Ok(o) => outcome = Some(o),
+                Err(output) => {
+                    // Put the original back, and make sure it really is back.
+                    let restored = async {
+                        self.write_bytes(&s.path, &original).await?;
+                        let now = self.read_bytes(&s.path).await?.unwrap_or_default();
+                        if sha256(&now) != sha256(&original) {
+                            bail!("the restored file does not match the original");
+                        }
+                        anyhow::Ok(())
+                    }
+                    .await;
+                    if let Err(e) = restored {
+                        return Err(SaveError::RollbackFailed {
+                            rule: r.name.clone(),
+                            error: format!("{e:#}"),
+                            backup: local_backup,
+                        }
+                        .into());
+                    }
+                    // The server has `original` again; if that is not what the
+                    // editor was based on (a forced save), rebase onto it.
+                    let _ = s.rebase(&original);
+                    return Err(SaveError::ValidationFailed { rule: r.name.clone(), output, rolled_back: true }.into());
+                }
+            }
+        }
+
+        let check = match (rule, outcome) {
+            (Some(r), Some(outcome)) => {
+                let reload = if r.reload.trim().is_empty() || matches!(outcome, CheckOutcome::Unavailable { .. }) {
+                    None
+                } else {
+                    let out = self.run(&command_for(&r.reload, &s.path)).await?;
+                    Some((out.success(), combined(&out)))
+                };
+                Some(CheckReport { rule: r.name.clone(), outcome, reload })
+            }
+            _ => None,
+        };
+
         s.base_text = text::decode(&new_bytes).map(|(t, _)| t).unwrap_or_else(|_| new_text.to_string());
         s.base_hash = sha256(&new_bytes);
         s.size = new_bytes.len() as u64;
-        Ok(SaveReport { bytes: new_bytes.len(), local_backup, remote_backup })
+        Ok(SaveReport { bytes: new_bytes.len(), local_backup, remote_backup, check })
+    }
+
+    /// Run a shell command on the server, through sudo when editing as root.
+    pub async fn run(&self, command: &str) -> Result<crate::ssh::ExecOutput> {
+        match &self.access {
+            Access::Sftp => self.conn.exec(command, None).await,
+            Access::Sudo { password } => {
+                self.sudo(&format!("sudo -S -p '' -- sh -c {}", shell_quote(command)), password.as_deref()).await
+            }
+        }
+    }
+
+    /// Check new contents without touching the real file.
+    async fn check_before(&self, r: &ValidationRule, path: &str, new_bytes: &[u8]) -> Result<CheckOutcome> {
+        let fail = |output: String| SaveError::ValidationFailed { rule: r.name.clone(), output, rolled_back: false };
+        if let Some(result) = builtin_check(r.check.trim(), &String::from_utf8_lossy(new_bytes)) {
+            return match result {
+                Ok(()) => Ok(CheckOutcome::Passed { output: "syntax OK".into() }),
+                Err(e) => Err(fail(e).into()),
+            };
+        }
+        // Same file name, so tools that care about the extension still work.
+        let tmp = join(
+            &self.fs.home().await?,
+            &format!(".malasdoh-check-{}-{}", uuid::Uuid::new_v4().simple(), file_name(path)),
+        );
+        self.fs.create_new(&tmp, new_bytes, Some(0o600)).await?;
+        let out = self.run(&command_for(&r.check, &tmp)).await;
+        let _ = self.fs.remove(&tmp).await;
+        // Tools print the temp name; show the real one instead.
+        classify(&out?).map_err(|o| fail(o.replace(&tmp, path)).into())
+    }
+}
+
+fn combined(out: &crate::ssh::ExecOutput) -> String {
+    let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let err = out.stderr_text();
+    if !err.is_empty() {
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(&err);
+    }
+    s
+}
+
+/// Pass, "not installed", or the failure output.
+fn classify(out: &crate::ssh::ExecOutput) -> std::result::Result<CheckOutcome, String> {
+    let output = combined(out);
+    match out.status {
+        Some(0) => Ok(CheckOutcome::Passed { output }),
+        Some(127) => Ok(CheckOutcome::Unavailable { output }),
+        Some(s) => Err(if output.is_empty() { format!("exit status {s}") } else { output }),
+        None => Err(if output.is_empty() { "the check was killed".into() } else { output }),
     }
 }
 

@@ -9,6 +9,7 @@ use malasdoh_core::known_hosts::KnownHosts;
 use malasdoh_core::profile::{AuthMethod, Profile, ProfileId, ProfileStore};
 use malasdoh_core::secrets::{OsKeychain, SecretKey, SecretStore};
 use malasdoh_core::ssh::{SecretAnswer, SecretPrompt};
+use malasdoh_core::validate::{CheckWhen, ValidationRule, builtin_rules};
 use malasdoh_core::{AppPaths, ssh_config};
 
 use crate::bridge::{AppEvent, EventKind, Events, Question, SessionId};
@@ -32,6 +33,90 @@ pub struct App {
     answer: AnswerState,
     toast: Option<(String, bool, Instant)>,
     close_warned: Option<Instant>,
+    settings_tab: SettingsTab,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsTab {
+    #[default]
+    General,
+    Checks,
+}
+
+/// Editor for the config-check rules.
+fn checks_ui(ui: &mut egui::Ui, rules: &mut Vec<ValidationRule>) {
+    ui.label(
+        "When you save a file whose path matches a rule, its check runs. \
+         \"Before\" checks a copy and writes nothing if it fails; \"After\" writes, checks, and puts the original back on failure. \
+         {file} is the file's path. The first matching rule wins.",
+    );
+    ui.add_space(4.0);
+    let mut remove = None;
+    let mut swap = None;
+    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+        egui::Grid::new("rules").striped(true).num_columns(8).spacing([6.0, 4.0]).show(ui, |ui| {
+            for h in ["On", "Name", "Path pattern", "Check command", "When", "Then reload", "", ""] {
+                ui.label(RichText::new(h).strong());
+            }
+            ui.end_row();
+            for (i, r) in rules.iter_mut().enumerate() {
+                ui.checkbox(&mut r.enabled, "");
+                ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(110.0));
+                ui.add(
+                    egui::TextEdit::singleline(&mut r.pattern)
+                        .desired_width(170.0)
+                        .hint_text("/etc/nginx/** or *.json"),
+                );
+                ui.add(egui::TextEdit::singleline(&mut r.check).desired_width(180.0).font(egui::TextStyle::Monospace));
+                egui::ComboBox::from_id_salt(("when", i))
+                    .width(70.0)
+                    .selected_text(match r.when {
+                        CheckWhen::BeforeWrite => "Before",
+                        CheckWhen::AfterWrite => "After",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut r.when, CheckWhen::BeforeWrite, "Before writing (on a copy)");
+                        ui.selectable_value(&mut r.when, CheckWhen::AfterWrite, "After writing (roll back)");
+                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut r.reload)
+                        .desired_width(150.0)
+                        .hint_text("systemctl reload …")
+                        .font(egui::TextStyle::Monospace),
+                );
+                if ui
+                    .add_enabled(i > 0, egui::Button::new("⬆").small())
+                    .on_hover_text("Move up (earlier rules win)")
+                    .clicked()
+                {
+                    swap = Some(i);
+                }
+                if ui.small_button("✖").clicked() {
+                    remove = Some(i);
+                }
+                ui.end_row();
+            }
+        });
+    });
+    if let Some(i) = swap {
+        rules.swap(i - 1, i);
+    }
+    if let Some(i) = remove {
+        rules.remove(i);
+    }
+    ui.horizontal(|ui| {
+        if ui.button("+ Add rule").clicked() {
+            rules.push(ValidationRule { name: "custom".into(), ..Default::default() });
+        }
+        if ui.button("Reset to defaults").clicked() {
+            *rules = builtin_rules();
+        }
+    });
+    ui.label(
+        RichText::new("Built-in checks: builtin:json, builtin:toml, builtin:yaml (no server tools needed).")
+            .weak()
+            .small(),
+    );
 }
 
 /// Text typed into the current question dialog.
@@ -90,6 +175,7 @@ impl App {
             answer: AnswerState::default(),
             toast,
             close_warned: None,
+            settings_tab: SettingsTab::General,
         }
     }
 
@@ -802,25 +888,40 @@ impl App {
         }
         let before = self.settings.clone();
         let mut open = true;
-        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-            let s = &mut self.settings;
-            ui.add(egui::Slider::new(&mut s.terminal_font_size, 9.0..=28.0).text("Terminal font size"));
-            ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=28.0).text("Editor font size"));
-            ui.checkbox(&mut s.review_before_save, "Show changes and ask before saving a remote file");
-            ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
-            ui.checkbox(&mut s.dark_mode, "Dark mode");
-            ui.label("External editor command ({file} = path; empty = system default):");
-            ui.add(egui::TextEdit::singleline(&mut s.external_editor).hint_text("code --wait {file}"));
-            ui.separator();
-            ui.label(
-                RichText::new(format!("Settings and connections: {}", self.shared.paths.config_dir.display()))
-                    .weak()
-                    .small(),
-            );
-            ui.label(
-                RichText::new(format!("Local backups: {}", self.shared.paths.backups_dir().display())).weak().small(),
-            );
-        });
+        let paths = self.shared.paths.clone();
+        let tab = &mut self.settings_tab;
+        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(true).default_width(760.0).show(
+            ctx,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(tab, SettingsTab::General, "General");
+                    ui.selectable_value(tab, SettingsTab::Checks, "Config checks");
+                });
+                ui.separator();
+                let s = &mut self.settings;
+                match tab {
+                    SettingsTab::General => {
+                        ui.add(egui::Slider::new(&mut s.terminal_font_size, 9.0..=28.0).text("Terminal font size"));
+                        ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=28.0).text("Editor font size"));
+                        ui.checkbox(&mut s.review_before_save, "Show changes and ask before saving a remote file");
+                        ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
+                        ui.checkbox(&mut s.dark_mode, "Dark mode");
+                        ui.label("External editor command ({file} = path; empty = system default):");
+                        ui.add(egui::TextEdit::singleline(&mut s.external_editor).hint_text("code --wait {file}"));
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("Settings and connections: {}", paths.config_dir.display()))
+                                .weak()
+                                .small(),
+                        );
+                        ui.label(
+                            RichText::new(format!("Local backups: {}", paths.backups_dir().display())).weak().small(),
+                        );
+                    }
+                    SettingsTab::Checks => checks_ui(ui, &mut s.validation_rules),
+                }
+            },
+        );
         self.show_settings = open;
         if self.settings != before {
             ctx.set_visuals(if self.settings.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });

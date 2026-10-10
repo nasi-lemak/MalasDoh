@@ -14,6 +14,7 @@ use malasdoh_core::profile::Profile;
 use malasdoh_core::secrets::SecretStore;
 use malasdoh_core::sftp::{self, Progress, RemoteEntry, RemoteFs};
 use malasdoh_core::ssh::{self, ConnectContext, Connection, HostKeyError, ShellEvent};
+use malasdoh_core::validate::{CheckOutcome, find_rule};
 use malasdoh_core::{AppPaths, text};
 use tokio::sync::{mpsc, oneshot};
 
@@ -89,6 +90,14 @@ pub enum SessionMsg {
 
 pub enum SaveFailure {
     Conflict(Vec<u8>),
+    /// `session` is the editor's base afterwards (after a rollback, the
+    /// server holds the original again).
+    Check {
+        rule: String,
+        output: String,
+        rolled_back: bool,
+        session: Box<EditSession>,
+    },
     PermissionDenied(String),
     Other(String),
 }
@@ -371,7 +380,8 @@ impl Session {
             SessionMsg::Opened { path, result, reload, restore } => match result {
                 Ok((session, access)) if restore.is_some() => {
                     let id = self.next();
-                    let mut ed = Editor::new(id, session, access);
+                    let check = find_rule(&settings.validation_rules, &session.path).cloned();
+                    let mut ed = Editor::new(id, session, access, check);
                     ed.text = restore.unwrap();
                     ed.message = Some(("Backup loaded. Saving it restores the file.".into(), false));
                     // Review is forced here: restoring is exactly when you want to see what changes.
@@ -388,7 +398,8 @@ impl Session {
                         editor.message = Some(("Reloaded from the server.".into(), false));
                     } else {
                         let id = self.next();
-                        self.editors.push(Editor::new(id, session, access));
+                        let check = find_rule(&settings.validation_rules, &session.path).cloned();
+                        self.editors.push(Editor::new(id, session, access, check));
                         self.active = Some(Pane::Editor(id));
                     }
                 }
@@ -416,7 +427,25 @@ impl Session {
                         if report.local_backup.is_some() {
                             msg.push_str(" Original kept in local backups.");
                         }
-                        ed.message = Some((msg, false));
+                        let mut warn = false;
+                        if let Some(c) = &report.check {
+                            match &c.outcome {
+                                CheckOutcome::Passed { .. } => msg.push_str(&format!(" {} check passed.", c.rule)),
+                                CheckOutcome::Unavailable { .. } => {
+                                    warn = true;
+                                    msg.push_str(&format!(" Not checked: the {} check tool is not installed.", c.rule));
+                                }
+                            }
+                            match &c.reload {
+                                Some((true, _)) => msg.push_str(" Reloaded."),
+                                Some((false, out)) => {
+                                    warn = true;
+                                    msg.push_str(&format!(" Reload FAILED: {out}"));
+                                }
+                                None => {}
+                            }
+                        }
+                        ed.message = Some((msg, warn));
                         let refresh = sftp::parent(&ed.session.path) == self.browser.path;
                         // Keep a watched external file in step with what was saved.
                         if let Some(x) = self.externals.iter_mut().find(|x| Some(&x.local) == ed.external.as_ref()) {
@@ -433,6 +462,10 @@ impl Session {
                         let diff = malasdoh_core::diff::diff(&theirs, &ed.text, 3);
                         let merged = malasdoh_core::diff::merge3(&ed.session.base_text, &ed.text, &theirs);
                         ed.state = EditorState::Conflict { diff, theirs: current, merged };
+                    }
+                    Err(SaveFailure::Check { rule, output, rolled_back, session }) => {
+                        ed.session = *session;
+                        ed.state = EditorState::CheckFailed { rule, output, rolled_back };
                     }
                     Err(SaveFailure::PermissionDenied(e)) if !ed.access.is_sudo() => {
                         ed.state = EditorState::NeedsSudo(e)
@@ -472,7 +505,7 @@ impl Session {
                             if let Some(ed) = self.editors.iter_mut().find(|e| e.id == id) {
                                 ed.access = access;
                             }
-                            self.save_editor(id, false, shared, settings);
+                            self.save_editor(id, false, true, shared, settings);
                         }
                     }
                 }
@@ -580,7 +613,7 @@ impl Session {
         });
     }
 
-    fn save_editor(&mut self, editor: u64, force: bool, shared: &Shared, _settings: &Settings) {
+    fn save_editor(&mut self, editor: u64, force: bool, check: bool, shared: &Shared, _settings: &Settings) {
         let backup_root = edit::host_backup_dir(&shared.paths.backups_dir(), &self.profile.host, self.profile.port);
         let remote_backup = self.profile.remote_backup;
         let Some(ed) = self.editors.iter_mut().find(|e| e.id == editor) else { return };
@@ -595,13 +628,20 @@ impl Session {
         ed.state = EditorState::Busy("Saving…".into());
         let mut session = ed.session.clone();
         let text = ed.text.clone();
-        let opts = SaveOptions { local_backup_dir: Some(backup_root), remote_backup, force };
+        let validation = if check && ed.check_enabled { ed.check.clone() } else { None };
+        let opts = SaveOptions { local_backup_dir: Some(backup_root), remote_backup, force, validation };
         let (events, id) = (shared.events.clone(), self.id);
         shared.rt.spawn(async move {
             let result = match io.save(&mut session, &text, &opts).await {
                 Ok(report) => Ok((session, report)),
                 Err(e) => Err(match e.downcast_ref::<SaveError>() {
                     Some(SaveError::Conflict { current }) => SaveFailure::Conflict(current.clone()),
+                    Some(SaveError::ValidationFailed { rule, output, rolled_back }) => SaveFailure::Check {
+                        rule: rule.clone(),
+                        output: output.clone(),
+                        rolled_back: *rolled_back,
+                        session: Box::new(session.clone()),
+                    },
                     _ => {
                         let msg = format!("{e:#}");
                         if msg.to_lowercase().contains("permission denied") {
@@ -758,7 +798,7 @@ impl Session {
 
     pub fn editor_action(&mut self, editor: u64, action: EditorAction, shared: &Shared, settings: &Settings) {
         match action {
-            EditorAction::Save { force } => self.save_editor(editor, force, shared, settings),
+            EditorAction::Save { force, check } => self.save_editor(editor, force, check, shared, settings),
             EditorAction::Reload => self.reload_editor(editor, shared),
             EditorAction::RetryWithSudo => {
                 if let Some(ed) = self.editors.iter_mut().find(|e| e.id == editor) {
@@ -769,7 +809,7 @@ impl Session {
                         if let Some(ed) = self.editors.iter_mut().find(|e| e.id == editor) {
                             ed.access = access;
                         }
-                        self.save_editor(editor, false, shared, settings);
+                        self.save_editor(editor, false, true, shared, settings);
                     }
                     None => self.ensure_sudo(AfterSudo::Save(editor), shared),
                 }
@@ -804,7 +844,8 @@ impl Session {
                 Some(i) => self.editors[i].id,
                 None => {
                     let id = self.next();
-                    let mut ed = Editor::new(id, session, access);
+                    let check = find_rule(&settings.validation_rules, &session.path).cloned();
+                    let mut ed = Editor::new(id, session, access, check);
                     ed.external = Some(local.clone());
                     self.editors.push(ed);
                     id
@@ -816,7 +857,7 @@ impl Session {
             self.active = Some(Pane::Editor(id));
             // With review on this shows the diff first, as for any save.
             if ed.request_save(settings.review_before_save).is_some() {
-                self.save_editor(id, false, shared, settings);
+                self.save_editor(id, false, true, shared, settings);
             }
         }
     }

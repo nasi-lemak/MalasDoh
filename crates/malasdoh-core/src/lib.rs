@@ -12,6 +12,7 @@ pub mod sftp;
 pub mod ssh;
 pub mod ssh_config;
 pub mod text;
+pub mod validate;
 
 pub use paths::AppPaths;
 pub use profile::{AuthMethod, Profile, ProfileId, ProfileStore};

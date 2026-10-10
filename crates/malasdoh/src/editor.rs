@@ -3,6 +3,7 @@
 use egui::{Color32, RichText};
 use malasdoh_core::diff::{self, Diff, LineKind};
 use malasdoh_core::edit::{Access, EditSession};
+use malasdoh_core::validate::{CheckWhen, ValidationRule};
 
 pub enum State {
     Ready,
@@ -18,12 +19,21 @@ pub enum State {
     },
     /// Saving failed with "permission denied"; offer sudo.
     NeedsSudo(String),
+    /// The config check failed. `rolled_back`: the original is back on the
+    /// server; otherwise nothing was written.
+    CheckFailed {
+        rule: String,
+        output: String,
+        rolled_back: bool,
+    },
 }
 
 pub enum EditorAction {
     /// Write now. `force` overwrites a newer server copy.
     Save {
         force: bool,
+        /// Run the file's config check (if it has one and it is switched on).
+        check: bool,
     },
     Reload,
     RetryWithSudo,
@@ -38,13 +48,18 @@ pub struct Editor {
     pub message: Option<(String, bool)>,
     /// Edits made in an external editor arrive here; true once uploaded.
     pub external: Option<std::path::PathBuf>,
+    /// The config check that applies to this file, and whether to run it.
+    pub check: Option<ValidationRule>,
+    pub check_enabled: bool,
     find: String,
     show_find: bool,
 }
 
 impl Editor {
-    pub fn new(id: u64, session: EditSession, access: Access) -> Self {
+    pub fn new(id: u64, session: EditSession, access: Access, check: Option<ValidationRule>) -> Self {
         Self {
+            check_enabled: check.is_some(),
+            check,
             id,
             text: session.base_text.clone(),
             session,
@@ -78,7 +93,7 @@ impl Editor {
             self.state = State::Review(diff::diff(&self.session.base_text, &self.text, 3));
             None
         } else {
-            Some(EditorAction::Save { force: false })
+            Some(EditorAction::Save { force: false, check: true })
         }
     }
 
@@ -110,6 +125,17 @@ impl Editor {
                 }
                 if ui.button("🔍").on_hover_text("Find (Ctrl+F)").clicked() {
                     self.show_find = !self.show_find;
+                }
+                if let Some(rule) = &self.check {
+                    let when = match rule.when {
+                        CheckWhen::BeforeWrite => "on a copy before writing; nothing is written if it fails",
+                        CheckWhen::AfterWrite => "after writing; the original is put back if it fails",
+                    };
+                    let mut tip = format!("Runs `{}` {when}.", rule.check);
+                    if !rule.reload.trim().is_empty() {
+                        tip.push_str(&format!("\nThen: `{}`", rule.reload));
+                    }
+                    ui.checkbox(&mut self.check_enabled, format!("Check: {}", rule.name)).on_hover_text(tip);
                 }
             });
         });
@@ -190,7 +216,7 @@ impl Editor {
                         if ui.button("💾 Save").clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command)
                         {
-                            action = Some(EditorAction::Save { force: false });
+                            action = Some(EditorAction::Save { force: false, check: true });
                         }
                         if ui.button("Copy as patch").clicked() {
                             ui.ctx().copy_text(diff::unified(&self.session.base_text, &self.text, &self.session.path));
@@ -219,7 +245,7 @@ impl Editor {
                             take_merge = true;
                         }
                         if ui.button("Overwrite with mine").on_hover_text("Their version is backed up first").clicked() {
-                            action = Some(EditorAction::Save { force: true });
+                            action = Some(EditorAction::Save { force: true, check: true });
                         }
                         if ui.button("Copy my version").clicked() {
                             ui.ctx().copy_text(self.text.clone());
@@ -260,6 +286,36 @@ impl Editor {
                         }
                         if ui.button("Cancel").clicked() {
                             close = true;
+                        }
+                    });
+                });
+            }
+            State::CheckFailed { rule, output, rolled_back } => {
+                egui::Modal::new(egui::Id::new(("check-failed", self.id))).show(ctx, |ui| {
+                    ui.set_max_width(900.0);
+                    ui.heading(format!("⚠ {rule} check failed"));
+                    ui.label(if *rolled_back {
+                        "Your version was written, failed the check, and the original has been put back. The server is as it was."
+                    } else {
+                        "Your version failed the check, so nothing was written. The server is as it was."
+                    });
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(output).monospace()).selectable(true));
+                    });
+                    ui.label(RichText::new("Your edits are still in the editor.").weak());
+                    ui.horizontal(|ui| {
+                        if ui.button("Keep editing").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            close = true;
+                        }
+                        if ui.button("Copy output").clicked() {
+                            ui.ctx().copy_text(output.clone());
+                        }
+                        if ui
+                            .button("Save without checking")
+                            .on_hover_text("Write it anyway. The original is still backed up first.")
+                            .clicked()
+                        {
+                            action = Some(EditorAction::Save { force: false, check: false });
                         }
                     });
                 });

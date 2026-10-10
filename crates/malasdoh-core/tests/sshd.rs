@@ -19,6 +19,7 @@ use malasdoh_core::sftp::{EntryKind, Progress};
 use malasdoh_core::ssh::{
     self, ConnectContext, HostKeyError, HostKeyPrompt, KbdPrompt, Prompter, SecretAnswer, SecretPrompt, ShellEvent,
 };
+use malasdoh_core::validate::{CheckOutcome, CheckWhen, ValidationRule};
 
 const PASSPHRASE: &str = "correct horse";
 
@@ -321,7 +322,7 @@ async fn safe_edit_round_trip() {
     assert_eq!(s.base_text, "listen 80\nworkers 2\n", "CRLF hidden while editing");
 
     let backups = tempfile::tempdir().unwrap();
-    let opts = SaveOptions { local_backup_dir: Some(backups.path().into()), remote_backup: true, force: false };
+    let opts = SaveOptions { local_backup_dir: Some(backups.path().into()), remote_backup: true, ..Default::default() };
     let report = io.save(&mut s, "listen 8080\nworkers 2\n", &opts).await.unwrap();
 
     assert_eq!(std::fs::read(&path).unwrap(), b"listen 8080\r\nworkers 2\r\n", "line endings preserved");
@@ -403,6 +404,108 @@ async fn jump_host_chain() {
     // One host-key question (same host and port for both hops), one passphrase
     // (remembered after the first hop).
     assert_eq!(ctx.prompter.asked(), ["host", "passphrase retry=false"]);
+}
+
+fn rule(check: &str, when: CheckWhen, reload: &str) -> ValidationRule {
+    ValidationRule {
+        name: "test".into(),
+        pattern: "*".into(),
+        check: check.into(),
+        when,
+        reload: reload.into(),
+        enabled: true,
+    }
+}
+
+#[tokio::test]
+async fn validation_blocks_or_rolls_back_bad_configs() {
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let fs = conn.open_sftp().await.unwrap();
+    let work = env.scratch();
+    let io = RemoteIo { fs: fs.clone(), conn: conn.clone(), access: Access::Sftp };
+    let save = |rule: ValidationRule| SaveOptions { validation: Some(rule), ..Default::default() };
+
+    // A local syntax check: broken JSON is never written.
+    let json = format!("{work}/app.json");
+    std::fs::write(&json, "{\"a\": 1}\n").unwrap();
+    let mut s = io.open(&json).await.unwrap();
+    let err =
+        io.save(&mut s, "{\"a\": 1,}\n", &save(rule("builtin:json", CheckWhen::BeforeWrite, ""))).await.unwrap_err();
+    assert!(
+        matches!(err.downcast_ref::<SaveError>(), Some(SaveError::ValidationFailed { rolled_back: false, .. })),
+        "{err:#}"
+    );
+    assert_eq!(std::fs::read_to_string(&json).unwrap(), "{\"a\": 1}\n");
+
+    // A remote check on a temporary copy: same, and the copy is cleaned up.
+    let conf = format!("{work}/svc.conf");
+    std::fs::write(&conf, "good = 1\n").unwrap();
+    let mut s = io.open(&conf).await.unwrap();
+    let before = rule("grep -q good {file}", CheckWhen::BeforeWrite, "");
+    let err = io.save(&mut s, "bad = 1\n", &save(before.clone())).await.unwrap_err();
+    assert!(
+        matches!(err.downcast_ref::<SaveError>(), Some(SaveError::ValidationFailed { rolled_back: false, .. })),
+        "{err:#}"
+    );
+    assert_eq!(std::fs::read_to_string(&conf).unwrap(), "good = 1\n");
+    let home = fs.home().await.unwrap();
+    assert!(
+        !fs.list(&home).await.unwrap().iter().any(|e| e.name.starts_with(".malasdoh-check-")),
+        "temp copy left behind"
+    );
+
+    // After-write check: the bad version is written, fails, and the original comes back.
+    let after = rule("grep -q good {file}", CheckWhen::AfterWrite, &format!("touch {work}/reloaded"));
+    let err = io.save(&mut s, "bad = 2\n", &save(after.clone())).await.unwrap_err();
+    assert!(
+        matches!(err.downcast_ref::<SaveError>(), Some(SaveError::ValidationFailed { rolled_back: true, .. })),
+        "{err:#}"
+    );
+    assert_eq!(std::fs::read_to_string(&conf).unwrap(), "good = 1\n");
+    assert!(!Path::new(&format!("{work}/reloaded")).exists(), "no reload after a failed check");
+    assert_eq!(io.remote_state(&s).await.unwrap(), RemoteState::Unchanged, "editor base still matches the server");
+
+    // A passing check runs the reload command.
+    let report = io.save(&mut s, "good = 2\n", &save(after)).await.unwrap();
+    let check = report.check.unwrap();
+    assert!(matches!(check.outcome, CheckOutcome::Passed { .. }));
+    assert_eq!(check.reload.map(|(ok, _)| ok), Some(true));
+    assert!(Path::new(&format!("{work}/reloaded")).exists());
+
+    // A check tool that is not installed does not block the save.
+    let report = io
+        .save(&mut s, "good = 3\n", &save(rule("no-such-checker-xyz {file}", CheckWhen::AfterWrite, "")))
+        .await
+        .unwrap();
+    assert!(matches!(report.check.unwrap().outcome, CheckOutcome::Unavailable { .. }));
+    assert_eq!(std::fs::read_to_string(&conf).unwrap(), "good = 3\n");
+}
+
+#[tokio::test]
+async fn real_visudo_rejects_a_broken_sudoers_file() {
+    let Some(env) = Env::new() else { return };
+    if Command::new("visudo").arg("--version").output().is_err() {
+        eprintln!("visudo not installed; skipping");
+        return;
+    }
+    let conn = env.connect().await;
+    let fs = conn.open_sftp().await.unwrap();
+    let path = format!("{}/90-ops", env.scratch());
+    std::fs::write(&path, "root ALL=(ALL) ALL\n").unwrap();
+    let io = RemoteIo { fs, conn, access: Access::Sftp };
+    let mut s = io.open(&path).await.unwrap();
+    let sudoers = malasdoh_core::validate::builtin_rules().into_iter().find(|r| r.name == "sudoers").unwrap();
+    let opts = SaveOptions { validation: Some(sudoers), ..Default::default() };
+    let err = io.save(&mut s, "root ALL=(ALL ALL\n", &opts).await.unwrap_err();
+    match err.downcast_ref::<SaveError>() {
+        Some(SaveError::ValidationFailed { output, rolled_back: false, .. }) => {
+            assert!(output.contains("90-ops"), "temp path is shown as the real path: {output}")
+        }
+        other => panic!("{other:?} / {err:#}"),
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "root ALL=(ALL) ALL\n");
+    io.save(&mut s, "root ALL=(ALL) NOPASSWD: ALL\n", &opts).await.unwrap();
 }
 
 #[cfg(unix)]

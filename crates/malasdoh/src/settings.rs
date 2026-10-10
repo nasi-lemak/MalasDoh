@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use malasdoh_core::validate::{ValidationRule, builtin_rules};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct Settings {
     pub dark_mode: bool,
     /// Ask before deleting remote files.
     pub confirm_delete: bool,
+    /// Config checks run when saving matching files; first match wins.
+    pub validation_rules: Vec<ValidationRule>,
 }
 
 impl Default for Settings {
@@ -29,6 +32,7 @@ impl Default for Settings {
             external_editor: String::new(),
             dark_mode: true,
             confirm_delete: true,
+            validation_rules: builtin_rules(),
         }
     }
 }

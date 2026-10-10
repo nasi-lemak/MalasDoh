@@ -14,7 +14,7 @@ use malasdoh_core::ssh::{SecretAnswer, SecretPrompt};
 use malasdoh_core::validate::{CheckWhen, ValidationRule, builtin_rules};
 use malasdoh_core::{AppPaths, ssh_config};
 
-use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId};
+use crate::bridge::{AppEvent, EventKind, Events, MULTI_RUN, Question, SessionId, SudoAnswer};
 use crate::compare::Compares;
 use crate::journal_ui::JournalWindow;
 use crate::keys_ui::KeysWindow;
@@ -186,6 +186,7 @@ struct ProfileForm {
     is_new: bool,
     error: Option<String>,
     forget_password: bool,
+    forget_sudo: bool,
 }
 
 impl App {
@@ -1020,7 +1021,7 @@ impl App {
         }
         let session_name = match target {
             Some(i) => self.sessions[i].profile.display_name(),
-            None => "Run on many hosts".to_string(),
+            None => "many servers".to_string(),
         };
         let q = match target {
             Some(i) => self.sessions[i].questions.front().unwrap(),
@@ -1107,14 +1108,20 @@ impl App {
                         }
                     });
                 }
-                Question::Sudo { host, retry, .. } => {
+                Question::Sudo { host, retry, note, .. } => {
                     ui.heading("sudo password");
                     if *retry {
                         ui.colored_label(ui.visuals().error_fg_color, "sudo did not accept that password.");
+                    } else if let Some(n) = note {
+                        ui.colored_label(ui.visuals().warn_fg_color, n);
                     }
-                    ui.label(format!("Your password on {host}, for sudo. It is kept in memory for this connection only."));
+                    ui.label(format!("Your password on {host}, for sudo."));
                     let r = ui.add(egui::TextEdit::singleline(&mut a.secret).password(true));
                     r.request_focus();
+                    ui.checkbox(&mut a.remember, "Remember in the system keychain").on_hover_text(
+                        "Saved for this connection once sudo accepts it, so editing as root, root browsing and \
+                         editing on many servers do not ask again. Otherwise it is kept in memory until you disconnect.",
+                    );
                     if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         done = Some(true);
                     }
@@ -1146,7 +1153,7 @@ impl App {
                 let _ = tx.send(ok.then_some(a.fields));
             }
             Question::Sudo { reply, .. } => {
-                let _ = reply.send(ok.then_some(a.secret));
+                let _ = reply.send(ok.then_some(SudoAnswer { password: a.secret, remember: a.remember }));
             }
         }
     }
@@ -1216,8 +1223,18 @@ impl App {
                         }
                         _ => {}
                     }
+                    if matches!(p.auth, AuthMethod::Password | AuthMethod::Auto) {
+                        ui.checkbox(&mut p.sudo_uses_login_password, "Use the saved password for sudo too")
+                            .on_hover_text(
+                                "Tried before asking for the sudo password. Leave off if they differ: \
+                                 a wrong sudo password is logged on the server.",
+                            );
+                    }
                     if !form.is_new {
-                        ui.checkbox(&mut form.forget_password, "Forget saved password");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut form.forget_password, "Forget saved password");
+                            ui.checkbox(&mut form.forget_sudo, "Forget saved sudo password");
+                        });
                     }
                 });
                 ui.end_row();
@@ -1328,12 +1345,16 @@ impl App {
                 form.profile.host = form.profile.host.trim().to_string();
                 form.profile.user = form.profile.user.trim().to_string();
                 let profile = form.profile.clone();
-                let forget = form.forget_password;
+                let (forget, forget_sudo) = (form.forget_password, form.forget_sudo);
                 match self.profiles.upsert(profile.clone()) {
                     Ok(()) => {
                         if forget {
                             let secrets = self.shared.secrets.clone();
                             self.shared.rt.spawn_blocking(move || secrets.delete(&SecretKey::Password(profile.id)));
+                        }
+                        if forget_sudo {
+                            let secrets = self.shared.secrets.clone();
+                            self.shared.rt.spawn_blocking(move || secrets.delete(&SecretKey::SudoPassword(profile.id)));
                         }
                         self.form = None;
                         self.save_profiles();
@@ -1452,7 +1473,10 @@ impl App {
                     if ui.button("Delete").clicked() {
                         let orphaned = self.profiles.remove(id);
                         let secrets = self.shared.secrets.clone();
-                        self.shared.rt.spawn_blocking(move || secrets.delete(&SecretKey::Password(id)));
+                        self.shared.rt.spawn_blocking(move || {
+                            secrets.delete(&SecretKey::Password(id));
+                            secrets.delete(&SecretKey::SudoPassword(id));
+                        });
                         self.save_profiles();
                         if !orphaned.is_empty() {
                             self.notify(
@@ -1627,7 +1651,14 @@ impl App {
 
 impl ProfileForm {
     fn new(profile: Profile, is_new: bool) -> Self {
-        Self { port: profile.port.to_string(), profile, is_new, error: None, forget_password: false }
+        Self {
+            port: profile.port.to_string(),
+            profile,
+            is_new,
+            error: None,
+            forget_password: false,
+            forget_sudo: false,
+        }
     }
 }
 

@@ -36,6 +36,7 @@
   terminal's folder
 - Snippets, and running commands on many hosts
 - Editing one file on many servers (per-server preview, safe saves)
+- Saved sudo passwords in the OS keychain (forgotten when rejected), optional sudo with the saved login password
 - External editor round trip with the same checks
 - Disconnect detection and reconnect without losing unsaved edits
 - Release builds: Windows zip and portable zip, Linux .deb and tarball,

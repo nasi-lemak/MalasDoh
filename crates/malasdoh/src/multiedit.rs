@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use egui::RichText;
 use malasdoh_core::diff;
 use malasdoh_core::edit::{self, Access, EditSession, RemoteIo, SaveOptions};
@@ -19,14 +20,14 @@ use malasdoh_core::profile::{Profile, ProfileId, ProfileStore};
 use malasdoh_core::ssh::{self, ConnectContext};
 use malasdoh_core::validate::{ValidationRule, find_rule};
 
-use crate::bridge::{EventKind, MULTI_RUN, UiPrompter};
+use crate::bridge::{EventKind, Events, MULTI_RUN, UiPrompter};
 use crate::multirun::host_picker;
 use crate::session::{Session, Shared};
 
 const TIMEOUT: Duration = Duration::from_secs(90);
 
 pub enum EditMsg {
-    Loaded { run: u64, result: Result<String, String> },
+    Loaded { run: u64, from: ProfileId, result: Result<String, String> },
     Checked { run: u64, index: usize, result: Result<Prepared, String> },
     Saved { run: u64, index: usize, result: Result<String, String> },
     SaveDone { run: u64 },
@@ -73,6 +74,8 @@ pub struct MultiEdit {
     mode: Mode,
     /// The reference server's copy as loaded, and as edited.
     original: Option<String>,
+    /// The server `original` came from.
+    loaded_from: Option<ProfileId>,
     text: String,
     loading: bool,
     load_error: Option<String>,
@@ -95,6 +98,7 @@ impl Default for MultiEdit {
             as_root: false,
             mode: Mode::Change,
             original: None,
+            loaded_from: None,
             text: String::new(),
             loading: false,
             load_error: None,
@@ -148,6 +152,7 @@ impl MultiEdit {
 
     fn reset(&mut self) {
         self.original = None;
+        self.loaded_from = None;
         self.text.clear();
         self.load_error = None;
         self.clear_hosts();
@@ -169,12 +174,13 @@ impl MultiEdit {
 
     pub fn handle(&mut self, msg: EditMsg) {
         match msg {
-            EditMsg::Loaded { run, result } if run == self.run => {
+            EditMsg::Loaded { run, from, result } if run == self.run => {
                 self.loading = false;
                 match result {
                     Ok(t) => {
                         self.text = t.clone();
                         self.original = Some(t);
+                        self.loaded_from = Some(from);
                         self.load_error = None;
                     }
                     Err(e) => self.load_error = Some(e),
@@ -211,20 +217,46 @@ impl MultiEdit {
     }
 
     /// Connect and get ready to read and write files as the chosen user.
-    async fn io_for(chain: Vec<Profile>, ctx: &ConnectContext<UiPrompter>, as_root: bool) -> anyhow::Result<RemoteIo> {
+    /// As root, sudo uses the server's saved sudo password or asks for it
+    /// (in turn with the other servers' questions).
+    async fn io_for(
+        chain: Vec<Profile>,
+        ctx: &ConnectContext<UiPrompter>,
+        events: &Events,
+        as_root: bool,
+    ) -> anyhow::Result<RemoteIo> {
+        let target = chain.last().cloned().context("no server")?;
         let conn = Arc::new(ssh::connect(chain, ctx).await?);
         let access = if as_root {
-            // Passwordless sudo only: asking for a password per server is
-            // not workable for many servers.
-            RemoteIo::check_sudo(&conn, None)
+            let got = crate::sudo::obtain(&conn, &target, &ctx.secrets, events, MULTI_RUN)
                 .await
-                .map_err(|e| anyhow::anyhow!("{e:#}; only passwordless sudo is used here"))?;
-            Access::Sudo { password: None }
+                .map_err(|e| anyhow::anyhow!("sudo: {e}"))?;
+            Access::Sudo { password: got.password }
         } else {
             Access::Sftp
         };
         let fs = conn.open_fs().await?;
         Ok(RemoteIo { fs, conn, access })
+    }
+
+    /// Connect (no time limit: it may wait for the user's answers), then do
+    /// `work` within [`TIMEOUT`].
+    async fn with_io<T, F, Fut>(
+        chain: Vec<Profile>,
+        ctx: &ConnectContext<UiPrompter>,
+        events: &Events,
+        as_root: bool,
+        work: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce(RemoteIo) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<T>>,
+    {
+        let io = Self::io_for(chain, ctx, events, as_root).await.map_err(|e| format!("{e:#}"))?;
+        match tokio::time::timeout(TIMEOUT, work(io)).await {
+            Ok(r) => r.map_err(|e| format!("{e:#}")),
+            Err(_) => Err("timed out".into()),
+        }
     }
 
     fn load(&mut self, profiles: &ProfileStore, shared: &Shared) {
@@ -238,17 +270,13 @@ impl MultiEdit {
         let (run, path, as_root, ctx, events) =
             (self.run, self.path.trim().to_string(), self.as_root, Self::connect_ctx(shared), shared.events.clone());
         shared.rt.spawn(async move {
-            let work = async {
-                let io = Self::io_for(chain, &ctx, as_root).await?;
+            let result = Self::with_io(chain, &ctx, &events, as_root, |io| async move {
                 let s = io.open(&path).await;
                 io.conn.disconnect().await;
                 anyhow::Ok(s?.base_text)
-            };
-            let result = match tokio::time::timeout(TIMEOUT, work).await {
-                Ok(r) => r.map_err(|e| format!("{e:#}")),
-                Err(_) => Err("timed out".into()),
-            };
-            events.send(MULTI_RUN, EventKind::MultiEdit(EditMsg::Loaded { run, result }));
+            })
+            .await;
+            events.send(MULTI_RUN, EventKind::MultiEdit(EditMsg::Loaded { run, from: id, result }));
         });
     }
 
@@ -270,8 +298,7 @@ impl MultiEdit {
             let (original, edited) = (original.clone(), self.text.clone());
             shared.rt.spawn(async move {
                 let _permit = sem.acquire().await;
-                let work = async {
-                    let io = Self::io_for(chain, &ctx, as_root).await?;
+                let work = |io: RemoteIo| async move {
                     let exists = io.read_bytes(&path).await?.is_some();
                     let prep = if !exists {
                         if mode == Mode::Change {
@@ -293,10 +320,7 @@ impl MultiEdit {
                     };
                     anyhow::Ok(prep)
                 };
-                let result = match tokio::time::timeout(TIMEOUT, work).await {
-                    Ok(r) => r.map_err(|e| format!("{e:#}")),
-                    Err(_) => Err("timed out".into()),
-                };
+                let result = Self::with_io(chain, &ctx, &events, as_root, work).await;
                 events.send(MULTI_RUN, EventKind::MultiEdit(EditMsg::Checked { run, index, result }));
             });
         }
@@ -393,8 +417,11 @@ impl MultiEdit {
                             self.reset();
                         }
                         if ui
-                            .checkbox(&mut self.as_root, "As root (sudo -n)")
-                            .on_hover_text("Needs passwordless sudo; servers that need a password fail")
+                            .checkbox(&mut self.as_root, "As root (sudo)")
+                            .on_hover_text(
+                                "Uses each server's saved sudo password, or asks for it once per server \
+                                 (tick Remember to save it for next time)",
+                            )
                             .changed()
                         {
                             self.clear_hosts();
@@ -416,6 +443,11 @@ impl MultiEdit {
                         }
                         if self.loading {
                             ui.spinner();
+                        } else if let Some(from) = self.loaded_from
+                            && self.original.is_some()
+                            && self.reference != Some(from)
+                        {
+                            ui.label(RichText::new(format!("(the text below is from {})", name(from))).weak());
                         }
                     });
                     ui.horizontal(|ui| {

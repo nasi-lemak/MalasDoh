@@ -48,9 +48,12 @@ remote-editing loop, where they are weakest:
 - **Authentication**: SSH agent (OpenSSH agent and Pageant on Windows,
   `SSH_AUTH_SOCK` elsewhere), key files (OpenSSH, PEM, **PuTTY `.ppk`**,
   encrypted or not), password and keyboard-interactive (including OTP prompts).
-  Passwords and key passphrases are only stored if you tick "remember", and
-  then in the OS keychain (Windows Credential Manager, macOS Keychain, Secret
-  Service), never in MalasDoh's files.
+  Passwords, key passphrases and sudo passwords are only stored if you tick
+  "remember", and then in the OS keychain (Windows Credential Manager, macOS
+  Keychain, Secret Service), never in MalasDoh's files. A saved sudo password
+  that stops working is forgotten and you are asked again (not retried, since
+  failed sudo attempts are logged and can lock the account). Per connection
+  you can also let sudo try the saved login password first.
 - **Host keys**: checked against your existing `~/.ssh/known_hosts` (so hosts
   you trust in `ssh` are trusted here) and MalasDoh's own file. A new host shows
   its SHA256 fingerprint for you to confirm. A *changed* or `@revoked` key is
@@ -140,8 +143,9 @@ remote-editing loop, where they are weakest:
   the changed lines alone (its neighbours differ) is marked for a closer look.
   "Same content everywhere" sends the whole text. Saving goes server by server
   with the usual conflict check, backup, config check and journal entry,
-  stopping at the first failure unless told to keep going. As root it uses
-  passwordless sudo only.
+  stopping at the first failure unless told to keep going. As root, each
+  server's saved sudo password is used; servers without one ask once (tick
+  "remember" and they will not ask again).
 - **Resilience**: a dropped connection is detected; open files keep your
   unsaved edits, and Reconnect picks up where you were. Unsaved edits are
   also written to disk every few seconds, so after a crash, a power cut or

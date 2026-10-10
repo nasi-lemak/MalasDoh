@@ -17,6 +17,8 @@ pub enum SecretKey {
     Passphrase(String),
     /// The proxy password for a connection.
     ProxyPassword(ProfileId),
+    /// The sudo password on a connection's server.
+    SudoPassword(ProfileId),
 }
 
 impl SecretKey {
@@ -25,6 +27,7 @@ impl SecretKey {
             SecretKey::Password(id) => format!("password:{id}"),
             SecretKey::Passphrase(path) => format!("passphrase:{path}"),
             SecretKey::ProxyPassword(id) => format!("proxy-password:{id}"),
+            SecretKey::SudoPassword(id) => format!("sudo-password:{id}"),
         }
     }
 }

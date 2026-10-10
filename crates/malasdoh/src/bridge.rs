@@ -19,12 +19,20 @@ pub enum Question {
     HostKey(HostKeyPrompt, oneshot::Sender<bool>),
     Secret(SecretPrompt, oneshot::Sender<Option<SecretAnswer>>),
     Keyboard(KbdPrompt, oneshot::Sender<Option<Vec<String>>>),
-    /// The sudo password for `host`; `retry` after a wrong one.
+    /// The sudo password for `host`; `retry` after a wrong one. `note` says
+    /// why a saved password was not used.
     Sudo {
         host: String,
         retry: bool,
-        reply: oneshot::Sender<Option<String>>,
+        note: Option<String>,
+        reply: oneshot::Sender<Option<SudoAnswer>>,
     },
+}
+
+pub struct SudoAnswer {
+    pub password: String,
+    /// Save it in the system keychain once sudo accepts it.
+    pub remember: bool,
 }
 
 pub struct AppEvent {

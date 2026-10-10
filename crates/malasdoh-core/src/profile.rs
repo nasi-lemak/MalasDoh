@@ -90,6 +90,9 @@ pub struct Profile {
     /// to `git pull` with your key. Only for servers you trust: while you are
     /// connected, their administrators can use your keys too.
     pub forward_agent: bool,
+    /// Try the saved login password for sudo before asking (most servers
+    /// use the same one). Off by default: a wrong guess is logged there.
+    pub sudo_uses_login_password: bool,
     /// How to reach this server when it is the first hop.
     #[serde(skip_serializing_if = "crate::proxy::Proxy::is_none")]
     pub proxy: crate::proxy::Proxy,
@@ -122,6 +125,7 @@ impl Default for Profile {
             follow_terminal: false,
             bookmarks: Vec::new(),
             forward_agent: false,
+            sudo_uses_login_password: false,
             proxy: crate::proxy::Proxy::None,
             keepalive_secs: 30,
             forwards: Vec::new(),

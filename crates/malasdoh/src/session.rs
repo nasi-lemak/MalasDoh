@@ -9,7 +9,7 @@ use std::time::{Instant, SystemTime};
 
 use egui::RichText;
 use malasdoh_core::drafts::Draft;
-use malasdoh_core::edit::{self, Access, EditSession, RemoteIo, SaveError, SaveOptions, SaveReport, SudoError};
+use malasdoh_core::edit::{self, Access, EditSession, RemoteIo, SaveError, SaveOptions, SaveReport};
 use malasdoh_core::journal::{self, Journal};
 use malasdoh_core::known_hosts::KnownHosts;
 use malasdoh_core::profile::Profile;
@@ -122,6 +122,7 @@ pub enum SessionMsg {
     },
     SudoReady {
         password: Result<Option<String>, String>,
+        warning: Option<String>,
         then: AfterSudo,
     },
 }
@@ -750,8 +751,11 @@ impl Session {
                 self.externals.retain(|x| x.session.path != session.path);
                 self.externals.push(ExternalEdit { local, session, access, mtime });
             }
-            SessionMsg::SudoReady { password, then } => match password {
+            SessionMsg::SudoReady { password, warning, then } => match password {
                 Ok(password) => {
+                    if let Some(w) = warning {
+                        self.notify(w, true);
+                    }
                     self.sudo = Some(Access::Sudo { password });
                     match then {
                         AfterSudo::Open(path) => self.open_file(path, true, shared),
@@ -1076,32 +1080,17 @@ impl Session {
         });
     }
 
-    /// Check sudo works, asking for the password if it needs one.
+    /// Check sudo works, with a saved password or by asking if it needs one.
     fn ensure_sudo(&mut self, then: AfterSudo, shared: &Shared) {
         let Some(conn) = self.conn.clone() else { return };
-        let (events, id, host) = (shared.events.clone(), self.id, self.profile.host.clone());
+        let (events, id, profile, secrets) =
+            (shared.events.clone(), self.id, self.profile.clone(), shared.secrets.clone());
         shared.rt.spawn(async move {
-            let mut password: Option<String> = None;
-            let mut retry = false;
-            let result = loop {
-                match RemoteIo::check_sudo(&conn, password.as_deref()).await {
-                    Ok(()) => break Ok(password),
-                    Err(e) if matches!(e.downcast_ref::<SudoError>(), Some(SudoError::PasswordRequired)) => {
-                        let (reply, rx) = oneshot::channel();
-                        events.send(
-                            id,
-                            crate::bridge::EventKind::Question(Question::Sudo { host: host.clone(), retry, reply }),
-                        );
-                        match rx.await.ok().flatten() {
-                            Some(p) => password = Some(p),
-                            None => break Err("cancelled".to_string()),
-                        }
-                        retry = true;
-                    }
-                    Err(e) => break Err(format!("{e:#}")),
-                }
+            let (password, warning) = match crate::sudo::obtain(&conn, &profile, &secrets, &events, id).await {
+                Ok(o) => (Ok(o.password), o.warning),
+                Err(e) => (Err(e), None),
             };
-            events.session(id, SessionMsg::SudoReady { password: result, then });
+            events.session(id, SessionMsg::SudoReady { password, warning, then });
         });
     }
 

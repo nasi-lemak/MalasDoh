@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=MalasDoh
+GenericName=SSH and SFTP client
+Comment=SSH terminal, file browser and safe remote file editing
+Exec=malasdoh
+Icon=malasdoh
+Terminal=false
+Categories=Network;RemoteAccess;System;Utility;
+Keywords=ssh;sftp;scp;terminal;remote;server;
+StartupWMClass=malasdoh

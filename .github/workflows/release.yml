@@ -1,0 +1,133 @@
+name: Release
+
+# Push a tag like v0.2.0 to build every package and publish a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    # An older Ubuntu keeps the glibc requirement low, so the binary runs on
+    # more distributions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p malasdoh
+      - run: cargo install cargo-deb --locked
+      - run: cargo deb -p malasdoh --no-build
+      - name: Tarball
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          d="malasdoh-$v-linux-x86_64"
+          mkdir -p "$d"
+          cp target/release/malasdoh README.md assets/malasdoh.desktop "$d/"
+          cp assets/icon.png "$d/malasdoh.png"
+          tar czf "$d.tar.gz" "$d"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            malasdoh-*-linux-x86_64.tar.gz
+            target/debian/*.deb
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p malasdoh
+      - name: Zips (installed and portable)
+        shell: pwsh
+        run: |
+          $v = "$env:GITHUB_REF_NAME".TrimStart("v")
+          $d = "malasdoh-$v-windows-x86_64"
+          New-Item -ItemType Directory $d | Out-Null
+          Copy-Item target/release/malasdoh.exe, README.md $d
+          Compress-Archive -Path $d -DestinationPath "$d.zip"
+          # Portable: settings, keys and backups stay in a data folder next to the exe.
+          New-Item -ItemType File "$d/malasdoh.portable" | Out-Null
+          Compress-Archive -Path $d -DestinationPath "$d-portable.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: malasdoh-*-windows-x86_64*.zip
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo build --release -p malasdoh --target aarch64-apple-darwin
+          cargo build --release -p malasdoh --target x86_64-apple-darwin
+      - name: App bundle and disk image (universal, unsigned)
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          app=MalasDoh.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/malasdoh" \
+            target/aarch64-apple-darwin/release/malasdoh target/x86_64-apple-darwin/release/malasdoh
+          mkdir icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/icon.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) assets/icon.png --out icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns icon.iconset -o "$app/Contents/Resources/MalasDoh.icns"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>MalasDoh</string>
+            <key>CFBundleDisplayName</key><string>MalasDoh</string>
+            <key>CFBundleIdentifier</key><string>io.github.nasi-lemak.malasdoh</string>
+            <key>CFBundleExecutable</key><string>malasdoh</string>
+            <key>CFBundleIconFile</key><string>MalasDoh</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          hdiutil create -volname MalasDoh -srcfolder "$app" -ov -format UDZO "malasdoh-$v-macos-universal.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: malasdoh-*-macos-universal.dmg
+
+  publish:
+    needs: [linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          find . -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.deb' -o -name '*.dmg' \) -exec mv {} . \;
+          sha256sum *.zip *.tar.gz *.deb *.dmg > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+          generate_release_notes: true

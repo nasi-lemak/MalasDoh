@@ -24,6 +24,7 @@ remote-editing loop, where they are weakest:
 | Does it keep CRLF line endings, a BOM, a missing final newline? | Yes, byte for byte on the lines you did not touch. |
 | Did the write actually land? | The file is read back after saving and must match. |
 | The file is owned by root? | "Edit as root (sudo)", or "Save as root" when a save hits *Permission denied*. |
+| Is the config still valid? | Matching files are checked as part of saving: `visudo -c`, `sshd -t`, `nginx -t`, `apachectl configtest`, HAProxy, BIND, systemd units, fstab, Caddy, and JSON/TOML/YAML syntax. Checks that must not see a broken file (sudoers) run on a copy first; others run in place and **the original is put back automatically** if the check fails. An optional reload command runs only after a pass. |
 
 ![Someone else changed the file: keep both changes](docs/screenshots/conflict-merge.png)
 
@@ -32,6 +33,9 @@ remote-editing loop, where they are weakest:
 - **Connections**: saved profiles with groups and search; jump hosts
   (ProxyJump) with chains; import from `~/.ssh/config`; duplicate; copy as an
   `ssh` command.
+- **Port forwarding**: local (`-L`), remote (`-R`) and SOCKS5 (`-D`), saved per
+  connection or added for one session, started with the connection if you
+  like, and restarted after a reconnect, with live connection and byte counts.
 - **Authentication**: SSH agent (OpenSSH agent and Pageant on Windows,
   `SSH_AUTH_SOCK` elsewhere), key files (OpenSSH, PEM, **PuTTY `.ppk`**,
   encrypted or not), password and keyboard-interactive (including OTP prompts).
@@ -41,23 +45,50 @@ remote-editing loop, where they are weakest:
 - **Host keys**: checked against your existing `~/.ssh/known_hosts` (so hosts
   you trust in `ssh` are trusted here) and MalasDoh's own file. A new host shows
   its SHA256 fingerprint for you to confirm. A *changed* or `@revoked` key is
-  refused outright and never offered as "accept anyway".
+  refused outright and never offered as "accept anyway". Host certificates
+  signed by a `@cert-authority` you trust are accepted without a prompt.
+- **Certificates for you**: `id_ed25519-cert.pub` next to your key, or a
+  certificate in your agent, is used automatically.
 - **Terminal**: xterm-256color and truecolor, full-screen programs (vim, nano,
   htop, less), scrollback, selection and copy, bracketed paste, several
   terminals per connection. Ctrl+C copies when text is selected and interrupts
-  otherwise.
+  otherwise. Search the scrollback (Ctrl+Shift+F), and log a terminal to a
+  plain-text file.
 - **File browser**: navigate, filter, hidden files, upload (button or drag and
   drop from the desktop) and download (files or whole folders, with progress and
   cancel), new file/folder, rename, delete, chmod, copy path, "cd here in
   terminal".
-- **Editor**: line numbers, find, Ctrl+S, and the save safety above. Or open
-  the file in your own editor (VS Code, Notepad++, vim…): each save there is
-  uploaded with the same checks.
+- **Folder compare and sync**: local to server, server to local, or both ways
+  (newer wins), by size and time and optionally contents. You see every copy
+  and deletion first and can untick any of them; deletes are opt-in.
+- **Servers without SFTP** (busybox, dropbear, routers, appliances): files go
+  through plain shell commands instead, and everything above still works.
+- **Editor**: syntax highlighting for nginx/Apache/sshd-style configs,
+  INI/systemd/TOML, YAML, JSON, shell, `.env`, XML and Dockerfiles; line
+  numbers, find, Ctrl+S, and the save safety above. Or open the file in your
+  own editor (VS Code, Notepad++, vim…): each save there is uploaded with the
+  same checks.
+- **Snippets**: saved commands in folders with `{{placeholders}}` asked for on
+  use; insert into the terminal, run, or send to many hosts.
+- **Run on many hosts**: pick hosts or whole groups, run a command in parallel,
+  and compare exit codes and output side by side; retry the failures.
 - **Resilience**: a dropped connection is detected; open files keep your
   unsaved edits, and Reconnect picks up where you were.
 - **Portable mode**: put a file named `malasdoh.portable` next to the
   executable and everything (profiles, known hosts, backups) is kept in a
   `data` folder beside it.
+
+## Download
+
+Tagged releases (from `.github/workflows/release.yml`) publish:
+
+- **Windows**: `malasdoh-<version>-windows-x86_64.zip`, and a `-portable.zip`
+  that keeps everything in a folder next to the exe.
+- **Linux**: a `.deb` (desktop entry and icon included) and a `.tar.gz`.
+- **macOS**: a universal (Apple Silicon and Intel) `.dmg`.
+
+Builds are not code-signed yet: Windows SmartScreen and macOS Gatekeeper will
+ask before the first run (macOS: right-click → Open).
 
 ## Building
 
@@ -80,6 +111,8 @@ Linux needs the usual desktop libraries at run time (X11 or Wayland, OpenGL,
 | Settings | `settings.toml` beside it |
 | Host keys you accepted | `known_hosts` in the data directory (`~/.ssh/known_hosts` is read but never written) |
 | Backups of edited files | `backups/<host>/<remote path>/<file>.<UTC time>` in the data directory, owner-only permissions |
+| Snippets | `snippets.toml` in the config directory |
+| Terminal logs | `logs/<host>/` in the data directory, owner-only permissions |
 
 Settings → shows the exact paths. `MALASDOH_HOME=/some/dir` overrides all of
 them.
@@ -88,7 +121,8 @@ them.
 
 - `crates/malasdoh-core`: everything that touches the network or disk.
   Profiles, `known_hosts`, SSH connect/auth (on [`russh`](https://github.com/warp-tech/russh),
-  pure Rust), SFTP, the safe-edit logic, diff and three-way merge. No GUI code.
+  pure Rust), SFTP and the shell fallback, port forwarding, folder sync, config
+  checks, the safe-edit logic, diff and three-way merge. No GUI code.
 - `crates/malasdoh`: the [egui](https://github.com/emilk/egui) desktop app.
 
 ## Tests
@@ -100,8 +134,10 @@ cargo test --workspace
 `crates/malasdoh-core/tests/sshd.rs` starts a real OpenSSH `sshd` on a free
 local port (throwaway keys, nothing on the machine is touched) and checks the
 whole path end to end: host-key trust and refusal, passphrase retry and
-remember, jump hosts, shell, exec, SFTP transfers, safe save, conflict
-detection, CRLF and permission preservation, and sudo editing. If `sshd` is not
+remember, jump hosts, host and user certificates, shell, exec, SFTP transfers,
+the no-SFTP shell fallback, safe save, conflict detection, CRLF and permission
+preservation, sudo editing, config checks with rollback (including real
+`visudo`), port forwarding in all three directions, and folder sync. If `sshd` is not
 installed those tests are skipped; CI installs it.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is planned next.

@@ -5,6 +5,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+build = "build.rs"
+
+[package.metadata.deb]
+maintainer = "MalasDoh contributors"
+section = "net"
+# The window system and GL libraries are loaded at run time, so dpkg cannot
+# see them; name them.
+depends = "$auto, libgl1, libxkbcommon0, libxkbcommon-x11-0, libxcursor1, libxrandr2, libxi6"
+recommends = "libwayland-client0, libwayland-egl1"
+extended-description = "A native SSH client for patching files and fixing configs on servers: terminal, SFTP browser and an editor that shows a diff before saving, refuses to overwrite changes made by someone else, keeps backups and can check configs (nginx -t, visudo, sshd -t) before keeping them."
+assets = [
+    ["target/release/malasdoh", "usr/bin/", "755"],
+    ["../../assets/malasdoh.desktop", "usr/share/applications/", "644"],
+    ["../../assets/icon.png", "usr/share/icons/hicolor/512x512/apps/malasdoh.png", "644"],
+    ["../../assets/icon-128.png", "usr/share/icons/hicolor/128x128/apps/malasdoh.png", "644"],
+    ["../../README.md", "usr/share/doc/malasdoh/README.md", "644"],
+]
 
 [dependencies]
 malasdoh-core.workspace = true
@@ -23,3 +40,6 @@ time.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[build-dependencies]
+winresource = "0.1"

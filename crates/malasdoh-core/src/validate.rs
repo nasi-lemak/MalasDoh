@@ -71,6 +71,12 @@ pub fn builtin_rules() -> Vec<ValidationRule> {
         rule("BIND", "/etc/bind/**|/etc/named.conf|/etc/named/**", "named-checkconf", AfterWrite),
         rule("systemd unit", "/etc/systemd/**", "systemd-analyze verify {file}", AfterWrite),
         rule("fstab", "/etc/fstab", "findmnt --verify --tab-file {file}", BeforeWrite),
+        rule(
+            "PostgreSQL",
+            "/etc/postgresql/**|postgresql.conf|postgresql.auto.conf|pg_hba.conf|pg_ident.conf",
+            crate::pgconf::CHECK,
+            AfterWrite,
+        ),
         rule("Caddy", "/etc/caddy/Caddyfile", "caddy validate --adapter caddyfile --config {file}", BeforeWrite),
         rule("JSON syntax", "*.json", "builtin:json", BeforeWrite),
         rule("TOML syntax", "*.toml", "builtin:toml", BeforeWrite),
@@ -119,9 +125,32 @@ pub fn builtin_check(kind: &str, text: &str) -> Option<Result<(), String>> {
     })
 }
 
-/// The command line for a rule, with `{file}` filled in.
+/// The command line for a rule, with `{file}` filled in. The PostgreSQL
+/// built-ins stand for scripts (see [`crate::pgconf`]).
 pub fn command_for(template: &str, path: &str) -> String {
-    template.replace("{file}", &crate::ssh::shell_quote(path))
+    match template.trim() {
+        crate::pgconf::CHECK => crate::pgconf::check_script(path),
+        crate::pgconf::RELOAD => crate::pgconf::reload_script(path),
+        _ => template.replace("{file}", &crate::ssh::shell_quote(path)),
+    }
+}
+
+/// A command as people should read it: the built-ins say what they do.
+pub fn describe(command: &str) -> String {
+    match command.trim() {
+        crate::pgconf::CHECK => {
+            "`postgres -C` on the whole configuration (and, for pg_hba.conf, the running server)".into()
+        }
+        crate::pgconf::RELOAD => "a PostgreSQL reload".into(),
+        "builtin:json" | "builtin:toml" | "builtin:yaml" => "a syntax check".into(),
+        c => format!("`{c}`"),
+    }
+}
+
+/// Built-ins that run on the server and explain themselves: their output is
+/// worth showing even when they pass.
+pub fn speaks_for_itself(command: &str) -> bool {
+    matches!(command.trim(), crate::pgconf::CHECK | crate::pgconf::RELOAD)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +187,8 @@ mod tests {
         assert_eq!(find_rule(&rules, "/etc/ssh/sshd_config").unwrap().when, CheckWhen::BeforeWrite);
         assert_eq!(find_rule(&rules, "/etc/ssh/sshd_config.d/10.conf").unwrap().check, "sshd -t");
         assert!(find_rule(&rules, "/home/me/notes.txt").is_none());
+        assert_eq!(find_rule(&rules, "/etc/postgresql/17/main/conf.d/tuning.conf").unwrap().name, "PostgreSQL");
+        assert_eq!(find_rule(&rules, "/var/lib/pgsql/16/data/pg_hba.conf").unwrap().name, "PostgreSQL");
         rules.iter_mut().find(|r| r.name == "nginx").unwrap().enabled = false;
         assert!(find_rule(&rules, "/etc/nginx/nginx.conf").is_none());
     }

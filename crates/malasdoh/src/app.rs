@@ -166,9 +166,12 @@ fn checks_ui(ui: &mut egui::Ui, rules: &mut Vec<ValidationRule>) {
         }
     });
     ui.label(
-        RichText::new("Built-in checks: builtin:json, builtin:toml, builtin:yaml (no server tools needed).")
-            .weak()
-            .small(),
+        RichText::new(
+            "Built-in checks: builtin:json, builtin:toml, builtin:yaml (no server tools needed); \
+             builtin:postgresql, and builtin:postgresql-reload as a reload.",
+        )
+        .weak()
+        .small(),
     );
 }
 
@@ -757,8 +760,20 @@ impl App {
             let mut close_editor = None;
             let mut activate = None;
             for (n, t) in s.terms.iter().enumerate() {
-                let label = format!("⌨ Terminal {}", n + 1);
-                if ui.selectable_label(s.active == Some(Pane::Term(t.id)), label).clicked() {
+                let label = if t.lasting.is_some() {
+                    format!("⟳ Terminal {}", n + 1)
+                } else {
+                    format!("⌨ Terminal {}", n + 1)
+                };
+                let r = ui.selectable_label(s.active == Some(Pane::Term(t.id)), label);
+                let r = match &t.lasting {
+                    Some(name) => r.on_hover_text(format!(
+                        "Lasting terminal ({name}): it keeps running on the server if the connection drops, \
+                         and comes back on reconnect. In tmux, scroll back with Ctrl+B then [ (q to leave)."
+                    )),
+                    None => r,
+                };
+                if r.clicked() {
                     activate = Some(Pane::Term(t.id));
                 }
                 if s.active == Some(Pane::Term(t.id)) && ui.small_button("✖").clicked() {
@@ -814,8 +829,59 @@ impl App {
                     None => s.local = Some(crate::local::LocalBrowser::new(self.last_local_dir.clone())),
                 }
             }
-            if s.state == ConnState::Connected && ui.button("+ Terminal").clicked() {
-                s.open_terminal(&shared, &settings);
+            if s.state == ConnState::Connected {
+                if ui.button("+ Terminal").clicked() {
+                    s.open_terminal(&shared, &settings);
+                }
+                let menu = ui.menu_button("⏷", |ui| {
+                    if ui
+                        .button("⟳ Lasting terminal")
+                        .on_hover_text(
+                            "Runs in tmux (or screen) on the server: long jobs like pg_upgrade, a dump or a \
+                             release upgrade keep going if the connection drops, and the tab goes back to them \
+                             when you reconnect, even after restarting MalasDoh.",
+                        )
+                        .clicked()
+                    {
+                        s.open_lasting_terminal(None, &shared, &settings);
+                        ui.close();
+                    }
+                    ui.separator();
+                    match &s.lasting_list {
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Looking for lasting terminals…");
+                            });
+                        }
+                        Some(list) => {
+                            let open: Vec<&str> = s.terms.iter().filter_map(|t| t.lasting.as_deref()).collect();
+                            let others: Vec<&(String, bool)> =
+                                list.iter().filter(|(n, _)| !open.contains(&n.as_str())).collect();
+                            if others.is_empty() {
+                                ui.label(RichText::new("No other lasting terminals on this server").weak());
+                            }
+                            let mut pick = None;
+                            for (name, attached) in others {
+                                let label = if *attached {
+                                    format!("Reattach {name} (open elsewhere)")
+                                } else {
+                                    format!("Reattach {name}")
+                                };
+                                if ui.button(label).clicked() {
+                                    pick = Some(name.clone());
+                                    ui.close();
+                                }
+                            }
+                            if let Some(name) = pick {
+                                s.open_lasting_terminal(Some(name), &shared, &settings);
+                            }
+                        }
+                    }
+                });
+                if menu.response.on_hover_text("More terminals: lasting, or reattach one").clicked() {
+                    s.list_lasting(&shared);
+                }
             }
             let fw = format!("🔌 Forwards {}/{}", s.forwards.running(), s.forwards.len());
             if ui.selectable_label(s.forwards.open, fw).on_hover_text("Port forwarding (-L, -R, SOCKS)").clicked() {

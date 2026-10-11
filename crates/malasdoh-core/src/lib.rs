@@ -14,6 +14,7 @@ pub mod keys;
 pub mod known_hosts;
 pub mod patch;
 pub mod paths;
+pub mod pgconf;
 pub mod profile;
 pub mod proxy;
 pub mod secrets;

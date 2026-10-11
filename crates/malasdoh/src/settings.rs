@@ -33,6 +33,11 @@ pub struct Settings {
     pub reopen_on_start: bool,
     /// Config checks run when saving matching files; first match wins.
     pub validation_rules: Vec<ValidationRule>,
+    /// Names of the built-in checks this settings file has been offered, so
+    /// checks added in later versions are added once, and deleted ones stay
+    /// deleted. Empty in files written before it existed.
+    #[serde(default)]
+    pub builtin_rules_seen: Vec<String>,
 }
 
 impl Default for Settings {
@@ -50,23 +55,78 @@ impl Default for Settings {
             copy_on_select: false,
             confirm_paste: true,
             validation_rules: builtin_rules(),
+            builtin_rules_seen: builtin_rules().into_iter().map(|r| r.name).collect(),
         }
     }
 }
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut s = match std::fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
                 tracing::warn!("ignoring unreadable {}: {e}", path.display());
                 Self::default()
             }),
             Err(_) => Self::default(),
+        };
+        s.add_new_builtin_rules();
+        s
+    }
+
+    /// Add built-in checks that are newer than this settings file.
+    fn add_new_builtin_rules(&mut self) {
+        // Files from before the list was kept had been offered these.
+        const FIRST: &[&str] = &[
+            "sudoers",
+            "sshd (main config)",
+            "sshd (drop-in)",
+            "nginx",
+            "Apache",
+            "HAProxy",
+            "BIND",
+            "systemd unit",
+            "fstab",
+            "Caddy",
+            "JSON syntax",
+            "TOML syntax",
+            "YAML syntax",
+        ];
+        if self.builtin_rules_seen.is_empty() {
+            self.builtin_rules_seen = FIRST.iter().map(|s| s.to_string()).collect();
+        }
+        for r in builtin_rules() {
+            if self.builtin_rules_seen.contains(&r.name) {
+                continue;
+            }
+            self.builtin_rules_seen.push(r.name.clone());
+            if !self.validation_rules.iter().any(|x| x.name == r.name) {
+                self.validation_rules.push(r);
+            }
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self).context("encoding settings")?;
         malasdoh_core::paths::write_atomic(path, text.as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_builtin_checks_are_added_once() {
+        // An older file: no list, and the user deleted the nginx rule.
+        let mut s = Settings::default();
+        s.builtin_rules_seen.clear();
+        s.validation_rules.retain(|r| r.name != "nginx" && r.name != "PostgreSQL");
+        s.add_new_builtin_rules();
+        assert!(s.validation_rules.iter().any(|r| r.name == "PostgreSQL"));
+        assert!(!s.validation_rules.iter().any(|r| r.name == "nginx"));
+        // Deleting it afterwards sticks.
+        s.validation_rules.retain(|r| r.name != "PostgreSQL");
+        s.add_new_builtin_rules();
+        assert!(!s.validation_rules.iter().any(|r| r.name == "PostgreSQL"));
     }
 }

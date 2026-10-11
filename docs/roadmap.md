@@ -22,6 +22,8 @@
 - Compare files across servers, with local files and with backups
 - Change journal of every save, with patches, check results and rollbacks
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line, changed-lines gutter
+- PostgreSQL: config check with rollback (`postgres -C`, `pg_hba_file_rules`), restart-needed notes, warnings for removed settings
+- Lasting terminals (tmux/screen) that survive disconnects and app restarts
 - Terminal: themes, font file, copy-on-select, right/middle-click paste,
   multi-line paste check, links, mouse reporting, split panes, typing into
   several servers, agent forwarding

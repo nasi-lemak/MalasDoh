@@ -60,6 +60,8 @@ pub struct Editor {
     hl_cache: Option<(u64, egui::text::LayoutJob)>,
     /// Lines changed since the file was opened or last saved, and for what.
     marks: Option<(u64, Vec<diff::LineMark>)>,
+    /// Settings this PostgreSQL version will not accept, for the text hash.
+    pg_findings: Option<(u64, Vec<malasdoh_core::pgconf::Finding>)>,
     find: Find,
     /// The "go to line" box, when open, and whether it still needs focus.
     goto: Option<(String, bool)>,
@@ -95,6 +97,7 @@ impl Editor {
             lang: highlight::detect(&session.path, &session.base_text),
             hl_cache: None,
             marks: None,
+            pg_findings: None,
             check_enabled: check.is_some(),
             check,
             id,
@@ -199,9 +202,9 @@ impl Editor {
                     CheckWhen::BeforeWrite => "on a copy before writing; nothing is written if it fails",
                     CheckWhen::AfterWrite => "after writing; the original is put back if it fails",
                 };
-                let mut tip = format!("Runs `{}` {when}.", rule.check);
+                let mut tip = format!("Runs {} {when}.", malasdoh_core::validate::describe(&rule.check));
                 if !rule.reload.trim().is_empty() {
-                    tip.push_str(&format!("\nThen: `{}`", rule.reload));
+                    tip.push_str(&format!("\nThen: {}", malasdoh_core::validate::describe(&rule.reload)));
                 }
                 ui.checkbox(&mut self.check_enabled, format!("Check: {}", rule.name)).on_hover_text(tip);
             }
@@ -227,6 +230,7 @@ impl Editor {
         self.update_matches();
         self.find_ui(ui);
 
+        self.pg_findings_ui(ui);
         if let Some((l, c)) = self.cursor_pos(ui.ctx()) {
             ui.label(RichText::new(format!("Ln {l}, Col {c} · {} lines", self.text.lines().count())).weak().small());
         }
@@ -294,9 +298,15 @@ impl Editor {
                 let numbers: String = (1..=lines).map(|n| format!("{n:>4}\n")).collect();
                 let spacing = std::mem::replace(&mut ui.spacing_mut().item_spacing.x, 2.0);
                 let gutter = ui.allocate_exact_size(egui::vec2(4.0, lines as f32 * row_h), egui::Sense::hover());
-                ui.label(RichText::new(numbers).font(egui::FontId::monospace(font_size)).weak());
+                let numbers = ui.label(RichText::new(numbers).font(egui::FontId::monospace(font_size)).weak());
                 ui.spacing_mut().item_spacing.x = spacing;
-                gutter_ui(ui, gutter, &marks, row_h);
+                // The numbers sit beside their lines, so their spacing is the
+                // real line height (row_h is only close to it).
+                // (Each number ends in a newline: one more, empty, row.)
+                let line_h = numbers.rect.height() / (lines + 1) as f32;
+                let gutter =
+                    (egui::Rect::from_min_size(gutter.0.min, egui::vec2(4.0, numbers.rect.height())), gutter.1);
+                gutter_ui(ui, gutter, &marks, line_h);
                 ui.add(
                     egui::TextEdit::multiline(&mut self.text)
                         .id(te_id)
@@ -315,6 +325,40 @@ impl Editor {
             action = Some(a);
         }
         action
+    }
+
+    /// Warn about settings the PostgreSQL version will refuse (it would not
+    /// start); click one to go to its line.
+    fn pg_findings_ui(&mut self, ui: &mut egui::Ui) {
+        if !malasdoh_core::pgconf::is_settings_file(&self.session.path) {
+            return;
+        }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.text.hash(&mut h);
+            h.finish()
+        };
+        if self.pg_findings.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.pg_findings = Some((key, malasdoh_core::pgconf::lint(&self.session.path, &self.text)));
+        }
+        let Some((_, findings)) = &self.pg_findings else { return };
+        let mut go = None;
+        for f in findings.iter().take(4) {
+            let text = RichText::new(format!("⚠ Line {}: {}", f.line, f.message)).color(ui.visuals().warn_fg_color);
+            if ui.add(egui::Label::new(text).sense(egui::Sense::click())).on_hover_text("Go to the line").clicked() {
+                go = Some(f.line);
+            }
+        }
+        if findings.len() > 4 {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("… and {} more", findings.len() - 4));
+        }
+        if let Some(n) = go {
+            let c = textops::line_start(&self.text, n);
+            self.pending_select = Some(c..c);
+            self.scroll_to_line = Some(n - 1);
+            self.focus_text = true;
+        }
     }
 
     /// The gutter marks for the current text, recomputed only when it changed.
@@ -581,7 +625,8 @@ impl Editor {
                             CheckWhen::BeforeWrite => "before writing",
                             CheckWhen::AfterWrite => "after writing (rolled back if it fails)",
                         };
-                        ui.label(RichText::new(format!("{} check `{}` runs {when}.", rule.name, rule.check)).weak());
+                        let what = malasdoh_core::validate::describe(&rule.check);
+                        ui.label(RichText::new(format!("{} check: {what}, {when}.", rule.name)).weak());
                     }
                 });
             }

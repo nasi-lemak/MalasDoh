@@ -24,7 +24,7 @@ remote-editing loop, where they are weakest:
 | Does it keep CRLF line endings, a BOM, a missing final newline? | Yes, byte for byte on the lines you did not touch. |
 | Did the write actually land? | The file is read back after saving and must match. |
 | The file is owned by root? | "Edit as root (sudo)", or "Save as root" when a save hits *Permission denied*. |
-| Is the config still valid? | Matching files are checked as part of saving: `visudo -c`, `sshd -t`, `nginx -t`, `apachectl configtest`, HAProxy, BIND, systemd units, fstab, Caddy, and JSON/TOML/YAML syntax. Checks that must not see a broken file (sudoers) run on a copy first; others run in place and **the original is put back automatically** if the check fails. An optional reload command runs only after a pass. |
+| Is the config still valid? | Matching files are checked as part of saving: `visudo -c`, `sshd -t`, `nginx -t`, `apachectl configtest`, HAProxy, BIND, systemd units, fstab, Caddy, PostgreSQL, and JSON/TOML/YAML syntax. Checks that must not see a broken file (sudoers) run on a copy first; others run in place and **the original is put back automatically** if the check fails. An optional reload command runs only after a pass. |
 
 ![Someone else changed the file: keep both changes](docs/screenshots/conflict-merge.png)
 
@@ -147,6 +147,24 @@ remote-editing loop, where they are weakest:
   stopping at the first failure unless told to keep going. As root, each
   server's saved sudo password is used; servers without one ask once (tick
   "remember" and they will not ask again).
+- **PostgreSQL**: saving `postgresql.conf`, a `conf.d` file or
+  `postgresql.auto.conf` runs that cluster's own `postgres -C` over the whole
+  configuration (as the `postgres` user, running or not), so a typo, a bad
+  value or a setting the version dropped is refused and the original put
+  back. `pg_hba.conf` and `pg_ident.conf` are checked by the running server
+  (`pg_hba_file_rules`), line by line; a stopped server cannot, which is
+  said. A passing save says which changes need a restart (`shared_buffers`)
+  rather than a reload. Debian/Ubuntu (`/etc/postgresql/<version>/<name>`)
+  and data-folder layouts (Red Hat, source builds) are both found. The editor
+  also flags settings the cluster's version no longer accepts, such as
+  `wal_keep_segments` in 13+ or `promote_trigger_file` in 16+, with what to
+  use instead; click one to go to it. For a check that also reloads, set the
+  rule's reload to `builtin:postgresql-reload` in Settings → Checks.
+- **Lasting terminals** (the ⏷ next to + Terminal): the shell runs in tmux
+  (or screen) on the server, so `pg_upgrade`, a dump or a release upgrade
+  keeps going when the connection drops. The tab goes back into it on
+  reconnect, and after restarting MalasDoh; closed tabs can be reattached
+  from the same menu. Type `exit` in it to end it.
 - **Resilience**: a dropped connection is detected; open files keep your
   unsaved edits, and Reconnect picks up where you were. Unsaved edits are
   also written to disk every few seconds, so after a crash, a power cut or

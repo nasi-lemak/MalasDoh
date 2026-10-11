@@ -137,6 +137,9 @@ pub struct CheckReport {
     pub outcome: CheckOutcome,
     /// The reload command's success and output, if one ran.
     pub reload: Option<(bool, String)>,
+    /// What a self-explaining check said when it passed or could not run
+    /// (e.g. "needs a restart: shared_buffers").
+    pub note: Option<String>,
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -353,7 +356,15 @@ impl RemoteIo {
                     let out = self.run(&command_for(&r.reload, &s.path)).await?;
                     Some((out.success(), combined(&out)))
                 };
-                Some(CheckReport { rule: r.name.clone(), outcome, reload })
+                let note = match &outcome {
+                    CheckOutcome::Passed { output } | CheckOutcome::Unavailable { output }
+                        if crate::validate::speaks_for_itself(&r.check) && !output.trim().is_empty() =>
+                    {
+                        Some(output.trim().to_string())
+                    }
+                    _ => None,
+                };
+                Some(CheckReport { rule: r.name.clone(), outcome, reload, note })
             }
             _ => None,
         };

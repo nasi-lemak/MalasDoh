@@ -56,7 +56,26 @@ const FOLLOW_HOOK: &str = concat!(
     "\r"
 );
 
+/// Typed into a new shell to start or rejoin lasting terminal `name`. `exec`,
+/// so leaving tmux ends the SSH channel too; the leading space keeps it out
+/// of history where the shell ignores such lines.
+fn lasting_command(name: &str) -> String {
+    format!(
+        " if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {name}; \
+         elif command -v screen >/dev/null 2>&1; then exec screen -D -RR -S {name}; \
+         else echo 'MalasDoh: a lasting terminal needs tmux or screen on the server (e.g. apt install tmux).'; fi\r"
+    )
+}
+
+/// Names MalasDoh gives lasting terminals (and so trusts in a command line).
+fn is_lasting_name(name: &str) -> bool {
+    name.strip_prefix("malasdoh-")
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
 pub enum SessionMsg {
+    /// Lasting terminals on the server: name, and whether something is attached.
+    LastingList(Vec<(String, bool)>),
     RootFs(Result<RemoteFs, String>),
     PatchChecked(Result<Vec<crate::patch_ui::FileCheck>, String>),
     PatchApplied(Vec<(String, Result<String, String>)>),
@@ -180,6 +199,10 @@ pub struct TermPane {
     pub id: u64,
     pub term: Terminal,
     tx: Option<mpsc::UnboundedSender<ShellCmd>>,
+    /// The tmux (or screen) session this terminal runs in, for a "lasting"
+    /// terminal: it keeps running on the server when the connection drops,
+    /// and the tab goes back to it on reconnect.
+    pub lasting: Option<String>,
 }
 
 impl TermPane {
@@ -212,6 +235,8 @@ pub struct Session {
     conn: Option<Arc<Connection>>,
     fs: Option<RemoteFs>,
     pub terms: Vec<TermPane>,
+    /// The server's lasting terminals, for "Reattach"; `None` while asking.
+    pub lasting_list: Option<Vec<(String, bool)>>,
     pub editors: Vec<Editor>,
     pub active: Option<Pane>,
     pub browser: Browser,
@@ -275,6 +300,7 @@ impl Session {
             conn: None,
             fs: None,
             terms: Vec::new(),
+            lasting_list: None,
             editors: Vec::new(),
             active: None,
             browser: {
@@ -394,21 +420,44 @@ impl Session {
     }
 
     pub fn open_terminal(&mut self, shared: &Shared, settings: &Settings) {
-        let Some(conn) = self.conn.clone() else { return };
+        self.add_terminal(None, shared, settings);
+    }
+
+    /// A terminal whose shell runs in tmux (or screen) on the server, so
+    /// what runs in it survives a dropped connection. `attach` names one
+    /// that is already there; otherwise a new one is started.
+    pub fn open_lasting_terminal(&mut self, attach: Option<String>, shared: &Shared, settings: &Settings) {
+        let name = attach.unwrap_or_else(|| format!("malasdoh-{}", &uuid::Uuid::new_v4().simple().to_string()[..6]));
+        self.add_terminal(Some(name), shared, settings);
+    }
+
+    fn add_terminal(&mut self, lasting: Option<String>, shared: &Shared, settings: &Settings) {
         let id = self.next();
+        let Some(tx) = self.start_shell(id, lasting.as_deref(), shared) else { return };
+        self.terms.push(TermPane { id, term: Terminal::new(settings.terminal_font_size), tx: Some(tx), lasting });
+        self.active = Some(Pane::Term(id));
+    }
+
+    /// Open a shell for terminal `id`, or go back into its lasting session.
+    fn start_shell(&self, id: u64, lasting: Option<&str>, shared: &Shared) -> Option<mpsc::UnboundedSender<ShellCmd>> {
+        let conn = self.conn.clone()?;
         let (tx, mut rx) = mpsc::unbounded_channel();
         // Queued before the shell is open; the shell reads them as typed-ahead
         // input. The folder hook goes first, so a startup command like
         // `sudo -i` cannot swallow it as a password.
-        if self.profile.follow_terminal {
-            let _ = tx.send(ShellCmd::Input(FOLLOW_HOOK.as_bytes().to_vec()));
+        if let Some(name) = lasting {
+            // Inside tmux the startup command would run again on every
+            // reattach, so neither it nor the folder hook is typed.
+            let _ = tx.send(ShellCmd::Input(lasting_command(name).into_bytes()));
+        } else {
+            if self.profile.follow_terminal {
+                let _ = tx.send(ShellCmd::Input(FOLLOW_HOOK.as_bytes().to_vec()));
+            }
+            let startup = self.profile.startup_command.trim();
+            if !startup.is_empty() {
+                let _ = tx.send(ShellCmd::Input(format!("{startup}\r").into_bytes()));
+            }
         }
-        let startup = self.profile.startup_command.trim();
-        if !startup.is_empty() {
-            let _ = tx.send(ShellCmd::Input(format!("{startup}\r").into_bytes()));
-        }
-        self.terms.push(TermPane { id, term: Terminal::new(settings.terminal_font_size), tx: Some(tx) });
-        self.active = Some(Pane::Term(id));
         let events = shared.events.clone();
         let session = self.id;
         shared.rt.spawn(async move {
@@ -441,6 +490,29 @@ impl Session {
                 }
             }
         });
+        Some(tx)
+    }
+
+    /// Ask the server which lasting terminals (tmux sessions) it has.
+    pub fn list_lasting(&mut self, shared: &Shared) {
+        let Some(conn) = self.conn.clone() else { return };
+        self.lasting_list = None;
+        let (events, id) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let out = conn.exec("tmux ls -F '#{session_name} #{session_attached}' 2>/dev/null", None).await;
+            let list = out
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter_map(|l| {
+                            let (name, attached) = l.split_once(' ')?;
+                            is_lasting_name(name).then(|| (name.to_string(), attached.trim() != "0"))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            events.session(id, SessionMsg::LastingList(list));
+        });
     }
 
     /// What to reopen next time.
@@ -454,6 +526,7 @@ impl Session {
                 .map(|e| crate::restore::OpenFile { path: e.session.path.clone(), sudo: e.access.is_sudo() })
                 .collect(),
             terminals: self.terms.len().max(1),
+            lasting: self.terms.iter().filter_map(|t| t.lasting.clone()).collect(),
             local_dir: self.local.as_ref().map(|l| l.path.clone()),
         }
     }
@@ -545,10 +618,27 @@ impl Session {
                     }
                     Err(e) => self.browser.error = Some(format!("SFTP is not available: {e}")),
                 }
-                // Reuse terminals from before a reconnect; open one if there are none.
+                // Lasting terminals go back into their session on the server;
+                // other terminals from before a reconnect are gone. Open one if
+                // there are none.
+                let back: Vec<(u64, String)> = self
+                    .terms
+                    .iter()
+                    .filter(|t| t.tx.is_none())
+                    .filter_map(|t| t.lasting.clone().map(|n| (t.id, n)))
+                    .collect();
+                for (id, name) in back {
+                    let tx = self.start_shell(id, Some(&name), shared);
+                    if let Some(t) = self.terms.iter_mut().find(|t| t.id == id) {
+                        t.tx = tx;
+                        t.term.exited = None;
+                    }
+                }
                 let old: Vec<u64> = self.terms.iter().filter(|t| t.tx.is_none()).map(|t| t.id).collect();
                 self.terms.retain(|t| !old.contains(&t.id));
-                if self.terms.is_empty() {
+                // Reopening lasting terminals counts as having one.
+                let lasting_to_restore = self.restore.as_ref().is_some_and(|r| !r.lasting.is_empty());
+                if self.terms.is_empty() && !lasting_to_restore {
                     self.open_terminal(shared, settings);
                 }
                 if self.active.is_none() || matches!(self.active, Some(Pane::Term(id)) if old.contains(&id)) {
@@ -564,6 +654,11 @@ impl Session {
                     .filter(|d| !open.contains(&(d.session.path.clone(), d.sudo)))
                     .collect();
                 if let Some(r) = self.restore.take() {
+                    for name in r.lasting.iter().filter(|n| is_lasting_name(n)).take(8) {
+                        if !self.terms.iter().any(|t| t.lasting.as_deref() == Some(name.as_str())) {
+                            self.open_lasting_terminal(Some(name.clone()), shared, settings);
+                        }
+                    }
                     while self.terms.len() < r.terminals.min(8) {
                         self.open_terminal(shared, settings);
                     }
@@ -601,12 +696,21 @@ impl Session {
                     self.navigate(dir, shared);
                 }
             }
+            SessionMsg::LastingList(list) => self.lasting_list = Some(list),
             SessionMsg::ShellExited { term, status } => {
                 if let Some(t) = self.terms.iter_mut().find(|t| t.id == term) {
                     t.tx = None;
-                    t.term.exited = Some(match status {
-                        Some(s) => format!("Shell exited with status {s}"),
-                        None => "Shell closed".into(),
+                    // Ended or detached on purpose (not a dropped connection):
+                    // nothing to go back to.
+                    if status.is_some() {
+                        t.lasting = None;
+                    }
+                    t.term.exited = Some(match (status, &t.lasting) {
+                        (Some(s), _) => format!("Shell exited with status {s}"),
+                        (None, Some(_)) => "Connection lost. This terminal is still running on the server; \
+                                            Reconnect to go back to it."
+                            .into(),
+                        (None, None) => "Shell closed".into(),
                     });
                 }
                 if self.conn.as_ref().is_some_and(|c| c.is_closed()) {
@@ -682,14 +786,26 @@ impl Session {
                         }
                         let mut warn = false;
                         if let Some(c) = &report.check {
-                            match &c.outcome {
-                                CheckOutcome::Passed { .. } => msg.push_str(&format!(" {} check passed.", c.rule)),
-                                CheckOutcome::Unavailable { .. } => {
+                            match (&c.outcome, &c.note) {
+                                (CheckOutcome::Passed { .. }, None) => {
+                                    msg.push_str(&format!(" {} check passed.", c.rule))
+                                }
+                                (CheckOutcome::Passed { .. }, Some(n)) => {
+                                    msg.push_str(&format!(" {} check passed. {n}", c.rule))
+                                }
+                                (CheckOutcome::Unavailable { .. }, None) => {
                                     warn = true;
                                     msg.push_str(&format!(" Not checked: the {} check tool is not installed.", c.rule));
                                 }
+                                (CheckOutcome::Unavailable { .. }, Some(n)) => {
+                                    warn = true;
+                                    msg.push_str(&format!(" Not checked: {n}"));
+                                }
                             }
                             match &c.reload {
+                                Some((true, out)) if !out.trim().is_empty() => {
+                                    msg.push_str(&format!(" Reloaded. {}", out.trim()))
+                                }
                                 Some((true, _)) => msg.push_str(" Reloaded."),
                                 Some((false, out)) => {
                                     warn = true;
@@ -1605,6 +1721,12 @@ impl Session {
     }
 
     pub fn close_terminal(&mut self, id: u64) {
+        if let Some(name) = self.terms.iter().find(|t| t.id == id && t.is_live()).and_then(|t| t.lasting.clone()) {
+            self.notify(
+                format!("{name} keeps running on the server. Reattach it from the ⏷ next to + Terminal, or type exit in it to end it."),
+                false,
+            );
+        }
         self.terms.retain(|t| t.id != id);
         if self.active == Some(Pane::Term(id)) {
             self.active =
@@ -1975,4 +2097,18 @@ fn launch_editor(command: &str, file: &std::path::Path) -> std::io::Result<()> {
         std::process::Command::new("xdg-open").arg(file).spawn()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_our_tmux_names_reach_a_command_line() {
+        assert!(is_lasting_name("malasdoh-2d0feb"));
+        assert!(!is_lasting_name("malasdoh-"));
+        assert!(!is_lasting_name("work"));
+        assert!(!is_lasting_name("malasdoh-x;rm -rf ~"));
+        assert!(lasting_command("malasdoh-2d0feb").contains("tmux new-session -A -s malasdoh-2d0feb;"));
+    }
 }

@@ -28,6 +28,9 @@ pub struct Tab {
     /// The local pane's folder, if it was open.
     #[serde(default)]
     pub local_dir: Option<PathBuf>,
+    /// Lasting terminals (tmux sessions) to go back into.
+    #[serde(default)]
+    pub lasting: Vec<String>,
 }
 
 fn one() -> usize {
@@ -67,13 +70,21 @@ mod tests {
         let (a, b) = (ProfileId::new(), ProfileId::new());
         let mut s = LastSession {
             tabs: vec![
-                Tab { profile: a, dir: "/srv".into(), files: vec![], terminals: 2, local_dir: None },
+                Tab {
+                    profile: a,
+                    dir: "/srv".into(),
+                    files: vec![],
+                    terminals: 2,
+                    local_dir: None,
+                    lasting: vec!["malasdoh-ab12cd".into()],
+                },
                 Tab {
                     profile: b,
                     dir: "/etc".into(),
                     files: vec![OpenFile { path: "/etc/hosts".into(), sudo: true }],
                     terminals: 1,
                     local_dir: Some("/home/me".into()),
+                    lasting: vec![],
                 },
             ],
             active: Some(1),

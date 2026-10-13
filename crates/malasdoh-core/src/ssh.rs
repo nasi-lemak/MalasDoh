@@ -261,7 +261,17 @@ fn same_family(a: &Algorithm, b: &Algorithm) -> bool {
     }
 }
 
-fn config_for(known: &[Algorithm], want_certificates: bool, keepalive_secs: u32) -> Arc<client::Config> {
+/// Compression wanted: the delayed kind OpenSSH prefers, then plain zlib,
+/// then none for servers that allow no compression.
+const COMPRESS: &[russh::compression::Name] =
+    &[russh::compression::ZLIB_LEGACY, russh::compression::ZLIB, russh::compression::NONE];
+
+fn config_for(
+    known: &[Algorithm],
+    want_certificates: bool,
+    keepalive_secs: u32,
+    compress: bool,
+) -> Arc<client::Config> {
     // Offer key types we already trust for this host first, as OpenSSH does,
     // so a server with several host keys presents the one we can verify.
     let mut keys: Vec<Algorithm> = Preferred::DEFAULT.key.to_vec();
@@ -272,6 +282,7 @@ fn config_for(known: &[Algorithm], want_certificates: bool, keepalive_secs: u32)
         preferred: Preferred {
             host_key_certificates: if want_certificates { Cow::Owned(keys.clone()) } else { Cow::Borrowed(&[]) },
             key: Cow::Owned(keys),
+            compression: if compress { Cow::Borrowed(COMPRESS) } else { Preferred::DEFAULT.compression },
             ..Preferred::DEFAULT
         },
         keepalive_interval: (keepalive_secs > 0).then(|| Duration::from_secs(keepalive_secs as u64)),
@@ -335,6 +346,7 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
             &ctx.known_hosts.known_algorithms(&hop.host, hop.port),
             !ctx.known_hosts.trusted_cas(&hop.host, hop.port).is_empty(),
             hop.keepalive_secs,
+            hop.compression,
         );
         let result = match hops.last() {
             None if !hop.proxy.is_none() => {
@@ -1031,9 +1043,10 @@ mod tests {
 
     #[test]
     fn known_key_types_go_first() {
-        let cfg = config_for(&[Algorithm::Rsa { hash: None }], false, 30);
+        let cfg = config_for(&[Algorithm::Rsa { hash: None }], false, 30, false);
         assert!(matches!(cfg.preferred.key[0], Algorithm::Rsa { .. }));
-        let cfg = config_for(&[], true, 0);
+        let cfg = config_for(&[], true, 0, true);
+        assert_eq!(cfg.preferred.compression[0], russh::compression::ZLIB_LEGACY);
         assert!(cfg.keepalive_interval.is_none());
         assert!(!cfg.preferred.host_key_certificates.is_empty());
         assert_eq!(cfg.preferred.key[0], Algorithm::Ed25519);

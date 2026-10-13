@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime};
 
 use egui::RichText;
@@ -16,12 +17,13 @@ use malasdoh_core::profile::Profile;
 use malasdoh_core::secrets::SecretStore;
 use malasdoh_core::sftp::{self, Progress, RemoteEntry, RemoteFs};
 use malasdoh_core::ssh::{self, ConnectContext, Connection, HostKeyError, ShellEvent};
+use malasdoh_core::transfer::{self, Ended, Job};
 use malasdoh_core::validate::{CheckOutcome, find_rule};
 use malasdoh_core::{AppPaths, text};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bridge::{Events, Question, SessionId, UiPrompter};
-use crate::browser::{self, Browser, Transfer};
+use crate::browser::{self, Browser};
 use crate::compare::{CompareRequest, Side};
 use crate::editor::{Editor, EditorAction, State as EditorState};
 use crate::find_ui::{FindAction, FindWindow};
@@ -42,6 +44,8 @@ pub struct Shared {
     pub secrets: Arc<dyn SecretStore>,
     pub known_hosts: KnownHosts,
     pub paths: AppPaths,
+    /// Settings → Transfers, kept current by the app.
+    pub transfer: Arc<std::sync::RwLock<malasdoh_core::transfer::TransferOptions>>,
 }
 
 /// Typed into a new terminal when "follow the terminal" is on: bash and zsh
@@ -132,9 +136,21 @@ pub enum SessionMsg {
         editor: u64,
         result: Result<(EditSession, SaveReport), SaveFailure>,
     },
+    /// A transfer run elsewhere (a copy between servers) finished.
     TransferDone {
-        index: usize,
+        id: u64,
         result: Result<String, String>,
+    },
+    /// The files of a queued transfer are known.
+    JobPlanned {
+        id: u64,
+        job: Result<Job, String>,
+    },
+    /// A run of a queued transfer ended.
+    JobRan {
+        id: u64,
+        job: Job,
+        ended: Result<Ended, String>,
     },
     ExternalReady {
         session: EditSession,
@@ -245,6 +261,8 @@ pub struct Session {
     pub questions: VecDeque<Question>,
     /// sudo access once it has been checked; kept in memory only.
     sudo: Option<Access>,
+    /// Files copied at once by this connection's transfers.
+    transfer_limit: Option<(usize, Arc<tokio::sync::Semaphore>)>,
     externals: Vec<ExternalEdit>,
     last_external_check: Instant,
     next_id: u64,
@@ -312,6 +330,7 @@ impl Session {
             },
             questions: VecDeque::new(),
             sudo: None,
+            transfer_limit: None,
             externals: Vec::new(),
             last_external_check: Instant::now(),
             next_id: 1,
@@ -615,6 +634,10 @@ impl Session {
                             .is_shell()
                             .then(|| "No SFTP on this server: files go through shell commands.".to_string());
                         self.fs = Some(fs);
+                        // Transfers the lost connection interrupted carry on.
+                        for id in self.browser.transfers.interrupted() {
+                            self.run_job(id, shared);
+                        }
                         let dir = match &self.restore {
                             Some(r) if !r.dir.is_empty() => r.dir.clone(),
                             _ => dir,
@@ -852,10 +875,23 @@ impl Session {
                     }
                 }
             }
-            SessionMsg::TransferDone { index, result } => {
-                if let Some(t) = self.browser.transfers.get_mut(index) {
-                    t.result = Some(result);
+            SessionMsg::TransferDone { id, result } => {
+                self.browser.transfers.finish_external(id, result);
+                if let Some(l) = &mut self.local {
+                    l.refresh();
                 }
+                self.refresh(shared);
+            }
+            SessionMsg::JobPlanned { id, job } => {
+                let ok = job.is_ok();
+                self.browser.transfers.planned(id, job);
+                if ok {
+                    self.run_job(id, shared);
+                }
+            }
+            SessionMsg::JobRan { id, job, ended } => {
+                let lost = self.state != ConnState::Connected || self.conn.as_ref().is_none_or(|c| c.is_closed());
+                self.browser.transfers.ran(id, job, ended, lost);
                 if let Some(l) = &mut self.local {
                     l.refresh();
                 }
@@ -1232,29 +1268,123 @@ impl Session {
         }
     }
 
+    /// Queue an upload of `files` (files or folders) into `dir`.
     fn start_upload(&mut self, files: Vec<PathBuf>, dir: String, shared: &Shared) {
-        for f in files {
-            let dir = dir.clone();
-            let label = format!("⬆ {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-            self.transfer(label, shared, move |fs, progress| {
-                Box::pin(async move {
-                    let dest = fs.upload(&f, &dir, &progress).await?;
-                    Ok(format!("Uploaded {dest}"))
-                })
-            });
+        if files.is_empty() {
+            return;
+        }
+        let what = match files.as_slice() {
+            [one] => one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            many => format!("{} items", many.len()),
+        };
+        let id = self.browser.transfers.add(format!("⬆ {what} to {dir}"), None);
+        let opts = shared.transfer.read().unwrap().clone();
+        let (events, sid) = (shared.events.clone(), self.id);
+        shared.rt.spawn_blocking(move || {
+            let job = transfer::plan_upload(&files, &dir, &opts).map_err(|e| format!("{e:#}"));
+            events.session(sid, SessionMsg::JobPlanned { id, job });
+        });
+    }
+
+    /// Queue a download of `paths` (files or folders) into `dir`.
+    fn start_download(&mut self, paths: Vec<String>, dir: PathBuf, shared: &Shared) {
+        let Some(fs) = self.fs.clone() else { return };
+        if paths.is_empty() {
+            return;
+        }
+        let what = match paths.as_slice() {
+            [one] => sftp::file_name(one).to_string(),
+            many => format!("{} items", many.len()),
+        };
+        let id = self.browser.transfers.add(format!("⬇ {what} to {}", dir.display()), None);
+        let opts = shared.transfer.read().unwrap().clone();
+        let (events, sid) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let job = transfer::plan_download(&fs, &paths, &dir, &opts).await.map_err(|e| format!("{e:#}"));
+            events.session(sid, SessionMsg::JobPlanned { id, job });
+        });
+    }
+
+    /// The limit on files copied at once, shared by this connection's transfers.
+    fn transfer_limit(&mut self, parallel: usize) -> Arc<tokio::sync::Semaphore> {
+        let n = parallel.clamp(1, 16);
+        match &self.transfer_limit {
+            Some((have, sem)) if *have == n => sem.clone(),
+            _ => {
+                let sem = Arc::new(tokio::sync::Semaphore::new(n));
+                self.transfer_limit = Some((n, sem.clone()));
+                sem
+            }
         }
     }
 
-    fn start_download(&mut self, paths: Vec<String>, dir: PathBuf, shared: &Shared) {
-        for p in paths {
-            let dir = dir.clone();
-            let label = format!("⬇ {}", sftp::file_name(&p));
-            self.transfer(label, shared, move |fs, progress| {
-                Box::pin(async move {
-                    let dest = fs.download(&p, &dir, &progress).await?;
-                    Ok(format!("Downloaded {}", dest.display()))
-                })
-            });
+    /// Start (or continue) a queued transfer.
+    fn run_job(&mut self, id: u64, shared: &Shared) {
+        let (Some(fs), Some(conn)) = (self.fs.clone(), self.conn.clone()) else {
+            if let Some(t) = self.browser.transfers.get_mut(id) {
+                t.state = crate::queue::State::Interrupted;
+            }
+            return;
+        };
+        let opts = shared.transfer.read().unwrap().clone();
+        let limit = self.transfer_limit(opts.parallel);
+        let Some((progress, mut job)) = self.browser.transfers.started(id) else { return };
+        let sudo = self.checker_sudo();
+        let (events, sid) = (shared.events.clone(), self.id);
+        shared.rt.spawn(async move {
+            let checker = transfer::Checker::new(conn, sudo);
+            let ended = transfer::run(&fs, &mut job, &opts, &progress, limit, Some(&checker))
+                .await
+                .map_err(|e| format!("{e:#}"));
+            events.session(sid, SessionMsg::JobRan { id, job, ended });
+        });
+    }
+
+    /// Checksums are computed as root while browsing as root, so the files
+    /// can be read.
+    pub fn checker_sudo(&self) -> Option<Option<String>> {
+        match (&self.sudo, self.browser.root) {
+            (Some(Access::Sudo { password }), true) => Some(password.clone()),
+            _ => None,
+        }
+    }
+
+    fn queue_control(&mut self, c: crate::queue::Control, shared: &Shared) {
+        use crate::queue::{Control, State};
+        match c {
+            Control::Resume(id) => self.run_job(id, shared),
+            Control::Pause(id) => {
+                if let Some(t) = self.browser.transfers.get_mut(id) {
+                    t.progress.pause.store(true, Ordering::Relaxed);
+                    t.progress.cancel.store(true, Ordering::Relaxed);
+                    t.state = State::Stopping;
+                }
+            }
+            Control::Cancel(id) => {
+                let fs = self.fs.clone();
+                let Some(t) = self.browser.transfers.get_mut(id) else { return };
+                if t.is_active() {
+                    t.progress.pause.store(false, Ordering::Relaxed);
+                    t.progress.cancel.store(true, Ordering::Relaxed);
+                    t.state = State::Stopping;
+                    return;
+                }
+                // Paused or waiting: remove what it left behind.
+                let Some(mut job) = t.job.take() else { return };
+                t.state = State::Stopping;
+                let (events, sid) = (shared.events.clone(), self.id);
+                shared.rt.spawn(async move {
+                    if let Some(fs) = fs {
+                        transfer::discard_partials(&fs, &mut job).await;
+                    } else if job.way == transfer::Way::Down {
+                        // Local partials can go even while disconnected.
+                        for f in &job.files {
+                            let _ = std::fs::remove_file(format!("{}{}", f.local.display(), transfer::PART));
+                        }
+                    }
+                    events.session(sid, SessionMsg::JobRan { id, job, ended: Ok(Ended::Cancelled) });
+                });
+            }
         }
     }
 
@@ -1267,11 +1397,9 @@ impl Session {
     }
 
     /// A transfer run by someone else (a copy between servers), shown in this
-    /// session's list; finish it with `SessionMsg::TransferDone { index, .. }`.
-    pub fn add_transfer(&mut self, label: String) -> (usize, Arc<Progress>) {
-        let progress = Arc::new(Progress::default());
-        self.browser.transfers.push(Transfer { label, progress: progress.clone(), result: None });
-        (self.browser.transfers.len() - 1, progress)
+    /// session's list; finish it with `SessionMsg::TransferDone { id, .. }`.
+    pub fn add_transfer(&mut self, label: String) -> (u64, Arc<Progress>) {
+        self.browser.transfers.add_external(label)
     }
 
     /// Show the local pane's actions in this session.
@@ -1283,24 +1411,6 @@ impl Session {
                 LocalAction::Download { paths, dir } => self.download_to(paths, dir, shared),
             }
         }
-    }
-
-    fn transfer(
-        &mut self,
-        label: String,
-        shared: &Shared,
-        f: impl FnOnce(RemoteFs, Arc<Progress>) -> futures::Transfer,
-    ) {
-        let Some(fs) = self.fs.clone() else { return };
-        let progress = Arc::new(Progress::default());
-        let index = self.browser.transfers.len();
-        self.browser.transfers.push(Transfer { label, progress: progress.clone(), result: None });
-        let fut = f(fs, progress);
-        let (events, id) = (shared.events.clone(), self.id);
-        shared.rt.spawn(async move {
-            let result = fut.await.map_err(|e| format!("{e:#}"));
-            events.session(id, SessionMsg::TransferDone { index, result });
-        });
     }
 
     pub fn browser_action(&mut self, action: browser::Action, shared: &Shared) {
@@ -1365,6 +1475,7 @@ impl Session {
             },
             A::Follow { path, sudo } => self.follow(path, sudo, shared),
             A::OpenFind => self.find.show(&self.browser.path.clone()),
+            A::Queue(c) => self.queue_control(c, shared),
             A::ToggleRoot => self.toggle_root(shared),
             A::OpenPatch => {
                 let (dir, root) = (self.browser.path.clone(), self.browser.root);
@@ -1907,7 +2018,8 @@ impl Session {
     }
 
     fn dialogs_ui(&mut self, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
-        self.sync.ui(ui.ctx(), self.fs.as_ref(), shared, self.id);
+        let checker = self.conn.clone().map(|c| (c, self.checker_sudo()));
+        self.sync.ui(ui.ctx(), self.fs.as_ref(), checker, shared, self.id);
         if let Some((path, backup)) = self.backups_ui(ui.ctx()) {
             self.restore_backup(path, backup, shared);
         }
@@ -2069,10 +2181,6 @@ impl Session {
         let conn = self.conn.clone().filter(|_| self.state == ConnState::Connected);
         self.forwards.ui(ctx, &title, conn.as_ref(), shared, self.id).then(|| self.forwards.saved_specs())
     }
-}
-
-mod futures {
-    pub type Transfer = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>>;
 }
 
 /// Start the user's editor on a local file without waiting for it.

@@ -55,7 +55,12 @@ pub struct Progress {
     pub done_bytes: AtomicU64,
     pub total_bytes: AtomicU64,
     pub done_files: AtomicU64,
+    pub total_files: AtomicU64,
     pub cancel: AtomicBool,
+    /// With `cancel`: stop but keep partial files, to continue later.
+    pub pause: AtomicBool,
+    /// Bytes not copied again because a partial file was continued.
+    pub resumed_bytes: AtomicU64,
     pub current: Mutex<String>,
 }
 
@@ -67,7 +72,7 @@ impl Progress {
         Ok(())
     }
 
-    fn set_current(&self, s: &str) {
+    pub(crate) fn set_current(&self, s: &str) {
         *self.current.lock().unwrap() = s.to_string();
     }
 }
@@ -248,6 +253,119 @@ impl RemoteFs {
             bail!("{path} grew past the size limit while being read");
         }
         Ok(buf)
+    }
+
+    /// `len` bytes of a file starting at `offset`.
+    pub async fn read_range(&self, path: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let Backend::Sftp(s) = &self.b else { bail!("reading part of a file needs SFTP") };
+        let mut f = s.open(path).await.with_context(|| format!("opening {path}"))?;
+        tokio::io::AsyncSeekExt::seek(&mut f, std::io::SeekFrom::Start(offset)).await?;
+        let mut buf = vec![0; len as usize];
+        f.read_exact(&mut buf).await.with_context(|| format!("reading {path}"))?;
+        Ok(buf)
+    }
+
+    /// Stream a file from `offset` on into `w`, counting into `progress`.
+    pub(crate) async fn read_into(
+        &self,
+        path: &str,
+        offset: u64,
+        w: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+        progress: &Progress,
+    ) -> Result<()> {
+        let s = match &self.b {
+            Backend::Sftp(s) => s,
+            Backend::Shell(sh) => {
+                if offset > 0 {
+                    bail!("continuing a download needs SFTP");
+                }
+                sh.read_to(path, w, Some(progress), u64::MAX).await?;
+                return Ok(());
+            }
+        };
+        let mut src = s.open(path).await.with_context(|| format!("opening {path}"))?;
+        if offset > 0 {
+            tokio::io::AsyncSeekExt::seek(&mut src, std::io::SeekFrom::Start(offset)).await?;
+        }
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            progress.check_cancel()?;
+            let n = src.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            w.write_all(&buf[..n]).await?;
+            progress.done_bytes.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Write `r` into `path` from `offset` on (creating it with `mode` if it
+    /// is missing), and set its modification time to `mtime` as it is
+    /// closed. From 0 the file is truncated first; from further on, what
+    /// follows `offset` is replaced. Returns the bytes written.
+    pub(crate) async fn write_from_offset(
+        &self,
+        path: &str,
+        offset: u64,
+        r: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        mode: Option<u32>,
+        mtime: Option<u32>,
+        progress: &Progress,
+    ) -> Result<u64> {
+        let Backend::Sftp(s) = &self.b else { bail!("writing part of a file needs SFTP") };
+        let mut flags = OpenFlags::WRITE | OpenFlags::CREATE;
+        if offset == 0 {
+            flags |= OpenFlags::TRUNCATE;
+        }
+        let mut attrs = FileAttributes::empty();
+        attrs.permissions = mode;
+        let mut f = s
+            .open_with_flags_and_attributes(path, flags, attrs)
+            .await
+            .with_context(|| format!("opening {path} for writing"))?;
+        if offset > 0 {
+            tokio::io::AsyncSeekExt::seek(&mut f, std::io::SeekFrom::Start(offset)).await?;
+        }
+        let mut buf = vec![0u8; CHUNK];
+        let mut written = 0;
+        loop {
+            progress.check_cancel()?;
+            let n = r.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            f.write_all(&buf[..n]).await.with_context(|| format!("writing {path}"))?;
+            progress.done_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            written += n as u64;
+        }
+        // Closing waits for every write to be acknowledged. The time is set
+        // in the same round trip (requests are handled in order); a server
+        // that refuses it (a file someone else owns) still gets the data.
+        let mut times = FileAttributes::empty();
+        times.mtime = mtime;
+        times.atime = mtime;
+        let (closed, _) = futures::join!(f.shutdown(), async {
+            if mtime.is_some() {
+                let _ = s.set_metadata(path, times).await;
+            }
+        });
+        closed.with_context(|| format!("writing {path}"))?;
+        Ok(written)
+    }
+
+    /// Shell backend: stream `r` into `path` (created with `mode` if new).
+    pub(crate) async fn write_stream(
+        &self,
+        path: &str,
+        r: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        mode: Option<u32>,
+        progress: &Progress,
+    ) -> Result<()> {
+        match &self.b {
+            Backend::Shell(sh) => sh.write_from(path, r, WriteMode::Upload(mode), Some(progress)).await,
+            Backend::Sftp(_) => self.write_from_offset(path, 0, r, mode, None, progress).await.map(drop),
+        }
     }
 
     /// Overwrite an existing file's contents without replacing the file, so its

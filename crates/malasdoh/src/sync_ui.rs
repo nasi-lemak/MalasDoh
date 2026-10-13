@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use egui::RichText;
 use malasdoh_core::sftp::{Progress, RemoteFs, human_size};
 use malasdoh_core::sync::{self, Action, Direction, Plan, SyncOptions, SyncReport};
+use malasdoh_core::transfer::Checker;
 
 use crate::bridge::SessionId;
 use crate::session::{SessionMsg, Shared};
@@ -57,7 +58,15 @@ impl SyncWindow {
         };
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, fs: Option<&RemoteFs>, shared: &Shared, session: SessionId) {
+    /// `checker`: the connection (and sudo password, as root) for checksums.
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        fs: Option<&RemoteFs>,
+        checker: Option<(Arc<malasdoh_core::ssh::Connection>, Option<Option<String>>)>,
+        shared: &Shared,
+        session: SessionId,
+    ) {
         if !self.open {
             return;
         }
@@ -178,6 +187,12 @@ impl SyncWindow {
                     }
                     Phase::Done(r) => {
                         ui.label(format!("✔ Done: {} item(s).", r.done));
+                        if r.verified > 0 {
+                            ui.label(format!("{} copied file(s) checked by SHA-256: they match.", r.verified));
+                        }
+                        if let Some(why) = &r.unverified {
+                            ui.label(RichText::new(format!("Not compared by checksum: {why}.")).weak());
+                        }
                         for (path, e) in &r.failed {
                             ui.colored_label(ui.visuals().error_fg_color, format!("✖ {path}: {e}"));
                         }
@@ -199,9 +214,10 @@ impl SyncWindow {
                 return;
             }
             self.phase = Phase::Planning;
-            let (fs, opts, events) = (fs.clone(), self.opts.clone(), shared.events.clone());
+            let (fs, opts, events, checker) = (fs.clone(), self.opts.clone(), shared.events.clone(), checker.clone());
             shared.rt.spawn(async move {
-                let r = sync::plan(&fs, &local, &remote, &opts)
+                let checker = checker.map(|(c, sudo)| Checker::new(c, sudo));
+                let r = sync::plan(&fs, &local, &remote, &opts, checker.as_ref())
                     .await
                     .map(|p| (p, local, remote))
                     .map_err(|e| format!("{e:#}"));
@@ -212,8 +228,12 @@ impl SyncWindow {
             let progress = Arc::new(Progress::default());
             self.phase = Phase::Running(progress.clone());
             let (fs, events) = (fs.clone(), shared.events.clone());
+            let topts = shared.transfer.read().unwrap().clone();
             shared.rt.spawn(async move {
-                let r = sync::execute(&fs, &local, &remote, &plan, &progress).await.map_err(|e| format!("{e:#}"));
+                let checker = checker.map(|(c, sudo)| Checker::new(c, sudo));
+                let r = sync::execute(&fs, &local, &remote, &plan, &progress, &topts, checker.as_ref())
+                    .await
+                    .map_err(|e| format!("{e:#}"));
                 events.session(session, SessionMsg::Sync(SyncMsg::Done(r)));
             });
         }

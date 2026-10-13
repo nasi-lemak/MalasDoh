@@ -135,9 +135,28 @@ remote-editing loop, where they are weakest:
   including saves that were rolled back. Search it by server, path or changed
   text, and compare any save's backup with the server's file now. "Change
   history…" on a file shows just that file.
+- **Transfer queue**: each upload or download is one row with files done,
+  speed and time left. Several files are copied at once (4 by default, set in
+  Settings → Transfers), which is what makes SFTP fast over a slow link:
+  over a 50 ms round trip, 60 small files take 3.3 s instead of 16.5 s.
+  Pause and continue; a dropped connection continues by itself after
+  reconnecting; Retry copies only the files that failed. An interrupted file
+  continues where it stopped, after checking its start and end still match
+  the source. Nobody sees half a file: downloads and new uploads are written
+  as `name.malasdoh-part` and renamed when complete (files already on the
+  server are written in place, keeping their owner and permissions, as when
+  editing). Modification times are kept both ways. Afterwards each file's
+  SHA-256 is compared, computed on the server with `sha256sum` (or `shasum`),
+  so nothing is downloaded again. Folder transfers can leave out names or
+  patterns (`node_modules, *.tmp`).
+- **Compression** per connection (`ssh -C`), for text and logs over slow
+  links.
 - **Folder compare and sync**: local to server, server to local, or both ways
-  (newer wins), by size and time and optionally contents. You see every copy
-  and deletion first and can untick any of them; deletes are opt-in.
+  (newer wins), by size and time and optionally contents (by SHA-256 on the
+  server, so files are not downloaded to compare). You see every copy and
+  deletion first and can untick any of them; deletes are opt-in. Copies go
+  through the transfer queue's engine: several at once, times kept, checked
+  by checksum.
 - **Servers without SFTP** (busybox, dropbear, routers, appliances): files go
   through plain shell commands instead, and everything above still works.
 - **Editor**: syntax highlighting for nginx/Apache/sshd-style configs,

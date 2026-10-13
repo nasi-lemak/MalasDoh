@@ -24,6 +24,7 @@
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line, changed-lines gutter
 - PostgreSQL: config check with rollback (`postgres -C`, `pg_hba_file_rules`), restart-needed notes, warnings for removed settings
 - Lasting terminals (tmux/screen) that survive disconnects and app restarts
+- Transfer queue: parallel files, pause/resume, continue interrupted files, temp-name writes, kept times, SHA-256 checks on the server, skip patterns; compression per connection
 - Teleport: password + authenticator login without tsh, server list, proxy jump (separate SSH port or TLS routing), CA trust, login-expired prompt
 - Terminal: themes, font file, copy-on-select, right/middle-click paste,
   multi-line paste check, links, mouse reporting, split panes, typing into
@@ -50,6 +51,8 @@
 1. Code signing for the Windows and macOS builds (needs certificates).
 2. Run through docs/windows-testing.md on real Windows and fix what turns up.
 3. Teleport: per-session MFA (`require_session_mfa`), SSO and security-key logins.
+4. rsync as an optional speed-up when the server has it (large files that changed a little).
+5. From the WinSCP list: keep a server folder up to date from a local one, synchronized browsing, delete to a trash folder, folder sizes.
 
 ## Known limitations
 

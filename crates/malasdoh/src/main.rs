@@ -17,6 +17,7 @@ mod logview;
 mod multiedit;
 mod multirun;
 mod patch_ui;
+mod queue;
 mod restore;
 mod session;
 mod settings;

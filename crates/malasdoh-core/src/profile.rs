@@ -99,6 +99,10 @@ pub struct Profile {
     /// Seconds between keepalive messages (0: none). They keep idle
     /// connections open through NAT and firewalls, and notice a dead link.
     pub keepalive_secs: u32,
+    /// Compress the connection (zlib), like `ssh -C`. Helps text over slow
+    /// links; costs CPU and does nothing for compressed files.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub compression: bool,
     /// Saved folders in the file browser.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bookmarks: Vec<String>,
@@ -131,6 +135,7 @@ impl Default for Profile {
             sudo_uses_login_password: false,
             proxy: crate::proxy::Proxy::None,
             keepalive_secs: 30,
+            compression: false,
             forwards: Vec::new(),
             teleport: None,
         }

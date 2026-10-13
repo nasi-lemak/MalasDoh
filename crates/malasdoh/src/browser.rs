@@ -1,12 +1,9 @@
 //! The remote file browser. It only draws and collects intent; the session
 //! carries out each [`Action`] on the connection.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-
 use egui::{Align, Layout, RichText, Sense};
 use malasdoh_core::commands::Archive;
-use malasdoh_core::sftp::{self, EntryKind, Progress, RemoteEntry, human_size, mode_string};
+use malasdoh_core::sftp::{self, EntryKind, RemoteEntry, human_size, mode_string};
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -69,6 +66,8 @@ pub enum Action {
     /// Browse as root (SFTP through sudo), or back to your own user.
     ToggleRoot,
     OpenPatch,
+    /// Pause, resume or cancel a row of the transfer queue.
+    Queue(crate::queue::Control),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -77,12 +76,6 @@ pub enum SortBy {
     Name,
     Size,
     Modified,
-}
-
-pub struct Transfer {
-    pub label: String,
-    pub progress: Arc<Progress>,
-    pub result: Option<Result<String, String>>,
 }
 
 #[derive(Default)]
@@ -134,7 +127,7 @@ pub struct Browser {
     /// Set while a "back" navigation is in flight, so it is not recorded again.
     going_back: Option<String>,
     dialog: Dialog,
-    pub transfers: Vec<Transfer>,
+    pub transfers: crate::queue::Queue,
     /// The owning session, for drag and drop.
     pub session: crate::bridge::SessionId,
     sort: SortBy,
@@ -316,7 +309,9 @@ impl Browser {
         }
         ui.separator();
 
-        self.transfers_ui(ui);
+        for c in self.transfers.ui(ui, self.session) {
+            actions.push(Action::Queue(c));
+        }
 
         let filter = self.filter.to_lowercase();
         let mut visible: Vec<RemoteEntry> = self
@@ -581,49 +576,6 @@ impl Browser {
                 ui.close();
             }
         });
-    }
-
-    fn transfers_ui(&mut self, ui: &mut egui::Ui) {
-        if self.transfers.is_empty() {
-            return;
-        }
-        let mut clear = false;
-        for t in &self.transfers {
-            // Errors wrap so the reason is readable; the rest stays one line.
-            if let Some(Err(e)) = &t.result {
-                ui.add(
-                    egui::Label::new(RichText::new(format!("✖ {}: {e}", t.label)).color(ui.visuals().error_fg_color))
-                        .wrap(),
-                );
-                continue;
-            }
-            ui.horizontal(|ui| {
-                let total = t.progress.total_bytes.load(Ordering::Relaxed).max(1);
-                let done = t.progress.done_bytes.load(Ordering::Relaxed);
-                match &t.result {
-                    None => {
-                        ui.add(
-                            egui::ProgressBar::new(done as f32 / total as f32).desired_width(120.0).show_percentage(),
-                        );
-                        if ui.small_button("✖").on_hover_text("Cancel").clicked() {
-                            t.progress.cancel.store(true, Ordering::Relaxed);
-                        }
-                        ui.add(egui::Label::new(&t.label).truncate());
-                    }
-                    Some(Ok(msg)) => {
-                        ui.add(egui::Label::new(format!("✔ {msg}")).truncate()).on_hover_text(msg);
-                    }
-                    Some(Err(_)) => {}
-                }
-            });
-        }
-        if self.transfers.iter().all(|t| t.result.is_some()) && ui.small_button("Clear finished").clicked() {
-            clear = true;
-        }
-        if clear {
-            self.transfers.clear();
-        }
-        ui.separator();
     }
 
     fn dialog_ui(&mut self, ctx: &egui::Context, confirm_delete: bool, actions: &mut Vec<Action>) {

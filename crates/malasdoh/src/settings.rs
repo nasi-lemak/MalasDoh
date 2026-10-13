@@ -38,6 +38,8 @@ pub struct Settings {
     /// deleted. Empty in files written before it existed.
     #[serde(default)]
     pub builtin_rules_seen: Vec<String>,
+    /// Uploads, downloads and folder sync.
+    pub transfer: malasdoh_core::transfer::TransferOptions,
 }
 
 impl Default for Settings {
@@ -56,6 +58,7 @@ impl Default for Settings {
             confirm_paste: true,
             validation_rules: builtin_rules(),
             builtin_rules_seen: builtin_rules().into_iter().map(|r| r.name).collect(),
+            transfer: Default::default(),
         }
     }
 }

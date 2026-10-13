@@ -61,6 +61,16 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
 - [ ] 4.5 **Open in external editor** (right-click a file): it opens in Notepad
   (or the editor set in Settings, e.g. VS Code); saving there uploads after
   the review.
+- [ ] 4.6 Drag a folder with many files (and one big file, say 200 MB) to
+  the server. The **Transfers** row shows files done, speed and time left.
+  Press ⏸ while the big file is copying, then ▶: it continues rather than
+  starting over. At the end it says the checksums match.
+- [ ] 4.7 Start a big download, then pull the network cable (or turn off
+  Wi-Fi) for a moment. The row says it is waiting; **Reconnect** and it
+  carries on. A cancelled download leaves no `.malasdoh-part` file behind.
+- [ ] 4.8 **Settings → Transfers**: put `node_modules, *.tmp` in the skip
+  list and upload a folder containing those: they are left out, and the
+  row's **Details** lists them.
 
 ## 5. Root and many servers
 

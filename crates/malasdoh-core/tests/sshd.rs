@@ -498,6 +498,8 @@ async fn folder_sync_plans_then_mirrors() {
     let Some(env) = Env::new() else { return };
     let conn = env.connect().await;
     let fs = conn.open_sftp().await.unwrap();
+    let checker = malasdoh_core::transfer::Checker::new(conn.clone(), None);
+    let topts = malasdoh_core::transfer::TransferOptions::default();
     let remote = format!("{}/site", env.scratch());
     let local = tempfile::tempdir().unwrap();
     let l = local.path();
@@ -517,13 +519,14 @@ async fn folder_sync_plans_then_mirrors() {
     std::fs::File::options().write(true).open(format!("{remote}/same.txt")).unwrap().set_modified(t).unwrap();
     // index.html: same size, different bytes, written within the same second.
     // By size and time it looks unchanged; comparing contents finds it.
-    let quick =
-        sync::plan(&fs, l, &remote, &SyncOptions { compare_contents: false, ..Default::default() }).await.unwrap();
+    let quick = sync::plan(&fs, l, &remote, &SyncOptions { compare_contents: false, ..Default::default() }, None)
+        .await
+        .unwrap();
     assert!(!quick.items.iter().any(|i| i.rel == "index.html"));
 
     let opts =
         SyncOptions { direction: Direction::Upload, delete_extra: true, compare_contents: true, ..Default::default() };
-    let plan = sync::plan(&fs, l, &remote, &opts).await.unwrap();
+    let plan = sync::plan(&fs, l, &remote, &opts, Some(&checker)).await.unwrap();
     let mut got: Vec<(String, Action)> = plan.items.iter().map(|i| (i.rel.clone(), i.action.clone())).collect();
     got.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
@@ -540,7 +543,8 @@ async fn folder_sync_plans_then_mirrors() {
     // Planning changes nothing.
     assert_eq!(std::fs::read_to_string(format!("{remote}/index.html")).unwrap(), "v1");
 
-    let report = sync::execute(&fs, l, &remote, &plan, &Progress::default()).await.unwrap();
+    let report = sync::execute(&fs, l, &remote, &plan, &Progress::default(), &topts, Some(&checker)).await.unwrap();
+    assert_eq!(report.verified, 2, "copies are checked by checksum: {:?}", report.unverified);
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(std::fs::read_to_string(format!("{remote}/index.html")).unwrap(), "v2");
     assert_eq!(std::fs::read_to_string(format!("{remote}/css/app.css")).unwrap(), "body{}");
@@ -548,15 +552,15 @@ async fn folder_sync_plans_then_mirrors() {
     assert!(!Path::new(&format!("{remote}/.git")).exists());
 
     // Times were copied, so a second comparison finds nothing to do.
-    let again = sync::plan(&fs, l, &remote, &opts).await.unwrap();
+    let again = sync::plan(&fs, l, &remote, &opts, None).await.unwrap();
     assert!(again.items.is_empty(), "{:?}", again.items);
 
     // And back the other way into an empty folder, honouring unticked items.
     let back = tempfile::tempdir().unwrap();
     let down = SyncOptions { direction: Direction::Download, ..Default::default() };
-    let mut plan = sync::plan(&fs, back.path(), &remote, &down).await.unwrap();
+    let mut plan = sync::plan(&fs, back.path(), &remote, &down, None).await.unwrap();
     plan.items.iter_mut().filter(|i| i.rel == "same.txt").for_each(|i| i.enabled = false);
-    sync::execute(&fs, back.path(), &remote, &plan, &Progress::default()).await.unwrap();
+    sync::execute(&fs, back.path(), &remote, &plan, &Progress::default(), &topts, None).await.unwrap();
     assert_eq!(std::fs::read_to_string(back.path().join("css/app.css")).unwrap(), "body{}");
     assert!(!back.path().join("same.txt").exists(), "unticked item was skipped");
 }
@@ -707,13 +711,26 @@ async fn without_sftp_files_work_through_the_shell() {
     let tree = local.path().join("site");
     std::fs::create_dir_all(tree.join("css")).unwrap();
     std::fs::write(tree.join("css/a.css"), "x{}").unwrap();
-    let remote_site = fs.upload(&tree, &work, &Progress::default()).await.unwrap();
+    // The transfer queue's engine works here too (no continuing, no temp
+    // names), and still checks copies by checksum.
+    use malasdoh_core::transfer::{self, Checker, Ended, TransferOptions};
+    let (topts, checker) = (TransferOptions::default(), Checker::new(conn.clone(), None));
+    let mut job = transfer::plan_upload(std::slice::from_ref(&tree), &work, &topts).unwrap();
+    let ended = transfer::run(&fs, &mut job, &topts, &Progress::default(), topts.limit(), Some(&checker)).await;
+    assert_eq!(ended.unwrap(), Ended::Finished);
+    assert!(job.is_finished() && job.verified() == 1, "{:?} {:?}", job.failures(), job.unverified);
+    let remote_site = format!("{work}/site");
     assert_eq!(std::fs::read_to_string(format!("{remote_site}/css/a.css")).unwrap(), "x{}");
-    let plan = sync::plan(&fs, &tree, &remote_site, &SyncOptions::default()).await.unwrap();
+    let plan = sync::plan(&fs, &tree, &remote_site, &SyncOptions::default(), Some(&checker)).await.unwrap();
     assert!(plan.items.is_empty(), "{:?}", plan.items);
     let back = tempfile::tempdir().unwrap();
-    let got = fs.download(&remote_site, back.path(), &Progress::default()).await.unwrap();
+    let mut job = transfer::plan_download(&fs, std::slice::from_ref(&remote_site), back.path(), &topts).await.unwrap();
+    transfer::run(&fs, &mut job, &topts, &Progress::default(), topts.limit(), Some(&checker)).await.unwrap();
+    assert!(job.is_finished(), "{:?}", job.failures());
+    let got = back.path().join("site");
     assert_eq!(std::fs::read_to_string(got.join("css/a.css")).unwrap(), "x{}");
+    let old = fs.download(&remote_site, tempfile::tempdir().unwrap().path(), &Progress::default()).await;
+    assert!(old.is_ok());
 
     fs.remove(&remote_site).await.unwrap();
     assert!(!fs.exists(&remote_site).await.unwrap());
@@ -1158,4 +1175,270 @@ async fn create_new_through_sudo_never_replaces() {
     assert_eq!(mode_of(&path), 0o644);
     assert!(io.create_new(&path, b"other\n", 0o644).await.is_err(), "an existing file is not replaced");
     assert_eq!(std::fs::read(&path).unwrap(), b"Managed by ops\n");
+}
+
+/// Pseudo-random bytes (so nothing compresses or dedupes by accident).
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// Stop `progress` once `after` bytes have gone through: paused (partial
+/// files kept) or cancelled.
+fn stop_after(progress: Arc<Progress>, after: u64, pause: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    tokio::spawn(async move {
+        while progress.done_bytes.load(Relaxed) < after {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        progress.pause.store(pause, Relaxed);
+        progress.cancel.store(true, Relaxed);
+    });
+}
+
+fn list_tree(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    fn walk(base: &Path, d: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(d).unwrap() {
+            let e = e.unwrap();
+            let rel = e.path().strip_prefix(base).unwrap().display().to_string();
+            if e.file_type().unwrap().is_dir() {
+                walk(base, &e.path(), out);
+            }
+            out.push(rel);
+        }
+    }
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn transfer_queue_parallel_pause_resume_verify() {
+    use malasdoh_core::transfer::{self, Checker, Ended, TransferOptions};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let fs = conn.open_sftp().await.unwrap();
+    let checker = Checker::new(conn.clone(), None);
+    let work = env.scratch();
+    const BIG: usize = 48 << 20;
+
+    let local = tempfile::tempdir().unwrap();
+    let tree = local.path().join("proj");
+    for d in ["a", "b", "node_modules/pkg"] {
+        std::fs::create_dir_all(tree.join(d)).unwrap();
+    }
+    for i in 0..40 {
+        std::fs::write(tree.join(if i % 2 == 0 { "a" } else { "b" }).join(format!("f{i}.txt")), format!("file {i}\n"))
+            .unwrap();
+    }
+    std::fs::write(tree.join("node_modules/pkg/index.js"), "x").unwrap();
+    std::fs::write(tree.join("notes.tmp"), "scratch").unwrap();
+    std::fs::write(tree.join("run.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(tree.join("run.sh"), std::fs::Permissions::from_mode(0o750)).unwrap();
+    std::fs::write(tree.join("big.bin"), noise(BIG, 7)).unwrap();
+    std::fs::write(tree.join("a/keep.conf"), "new\n").unwrap();
+    // Already on the server, with its own permissions: written in place.
+    std::fs::create_dir_all(format!("{work}/proj/a")).unwrap();
+    std::fs::write(format!("{work}/proj/a/keep.conf"), "old contents\n").unwrap();
+    std::fs::set_permissions(format!("{work}/proj/a/keep.conf"), std::fs::Permissions::from_mode(0o640)).unwrap();
+
+    let opts = TransferOptions { parallel: 4, verify: true, skip: vec!["node_modules".into(), "*.tmp".into()] };
+    let mut job = transfer::plan_upload(std::slice::from_ref(&tree), &work, &opts).unwrap();
+    assert_eq!(job.skipped, ["proj/node_modules", "proj/notes.tmp"]);
+    assert_eq!(job.files.len(), 43);
+
+    // Pause part-way through the big file.
+    let progress = Arc::new(Progress::default());
+    stop_after(progress.clone(), 8 << 20, true);
+    let ended = transfer::run(&fs, &mut job, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    assert_eq!(ended, Ended::Paused);
+    assert!(!Path::new(&format!("{work}/proj/big.bin")).exists(), "nobody sees half a new file");
+    let part = format!("{work}/proj/.big.bin.malasdoh-part");
+    let had = std::fs::metadata(&part).expect("partial kept for resuming").len();
+    assert!(had > 0 && (had as usize) < BIG);
+
+    // Resume: the partial is continued, everything arrives and is checked.
+    let progress = Progress::default();
+    let ended = transfer::run(&fs, &mut job, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    assert_eq!(ended, Ended::Finished);
+    assert!(job.is_finished(), "{:?}", job.failures());
+    assert!(progress.resumed_bytes.load(Relaxed) > 0, "the partial upload was continued");
+    assert_eq!(job.verified(), 43, "{:?}", job.unverified);
+    assert_eq!(std::fs::read(format!("{work}/proj/big.bin")).unwrap(), std::fs::read(tree.join("big.bin")).unwrap());
+    assert!(!Path::new(&part).exists());
+    let server = list_tree(Path::new(&format!("{work}/proj")));
+    assert!(
+        !server.iter().any(|p| p.contains("node_modules") || p.ends_with(".tmp") || p.contains("malasdoh-part")),
+        "{server:?}"
+    );
+    // In place: new contents, its own permissions. New files: the local ones.
+    assert_eq!(std::fs::read_to_string(format!("{work}/proj/a/keep.conf")).unwrap(), "new\n");
+    let mode = |p: &str| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&format!("{work}/proj/a/keep.conf")), 0o640);
+    assert_eq!(mode(&format!("{work}/proj/run.sh")), 0o750);
+    // Times kept.
+    // To the second: SFTP carries whole seconds.
+    let mtime = |p: &Path| {
+        std::fs::metadata(p).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    };
+    assert_eq!(mtime(Path::new(&format!("{work}/proj/b/f1.txt"))), mtime(&tree.join("b/f1.txt")));
+
+    // Download it back; a cancel (not a pause) removes the partial.
+    let back = tempfile::tempdir().unwrap();
+    let remote = format!("{work}/proj");
+    let mut down = transfer::plan_download(&fs, std::slice::from_ref(&remote), back.path(), &opts).await.unwrap();
+    let progress = Arc::new(Progress::default());
+    stop_after(progress.clone(), 8 << 20, false);
+    let ended = transfer::run(&fs, &mut down, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    assert_eq!(ended, Ended::Cancelled);
+    assert!(!back.path().join("proj/big.bin.malasdoh-part").exists(), "cancel cleans up");
+    assert!(!back.path().join("proj/big.bin").exists());
+
+    // Pause, then change the file on the server: the partial no longer fits
+    // and the file starts over rather than being spliced.
+    let progress = Arc::new(Progress::default());
+    stop_after(progress.clone(), 8 << 20, true);
+    let ended = transfer::run(&fs, &mut down, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    assert_eq!(ended, Ended::Paused);
+    assert!(back.path().join("proj/big.bin.malasdoh-part").exists());
+    let changed = noise(BIG, 99);
+    std::fs::write(format!("{remote}/big.bin"), &changed).unwrap();
+    let progress = Progress::default();
+    let ended = transfer::run(&fs, &mut down, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    assert_eq!(ended, Ended::Finished);
+    assert!(down.is_finished(), "{:?}", down.failures());
+    assert_eq!(std::fs::read(back.path().join("proj/big.bin")).unwrap(), changed);
+    assert_eq!(down.verified(), 43);
+    assert_eq!(mtime(&back.path().join("proj/b/f1.txt")), mtime(Path::new(&format!("{remote}/b/f1.txt"))));
+    assert!(!list_tree(back.path()).iter().any(|p| p.contains("malasdoh-part")));
+
+    // Pausing a download and resuming it continues the partial.
+    std::fs::remove_dir_all(back.path().join("proj")).unwrap();
+    let mut again = transfer::plan_download(&fs, std::slice::from_ref(&remote), back.path(), &opts).await.unwrap();
+    let progress = Arc::new(Progress::default());
+    stop_after(progress.clone(), 8 << 20, true);
+    transfer::run(&fs, &mut again, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    let progress = Progress::default();
+    transfer::run(&fs, &mut again, &opts, &progress, opts.limit(), Some(&checker)).await.unwrap();
+    assert!(again.is_finished() && progress.resumed_bytes.load(Relaxed) > 0);
+    assert_eq!(std::fs::read(back.path().join("proj/big.bin")).unwrap(), changed);
+}
+
+#[tokio::test]
+async fn server_checksums() {
+    use malasdoh_core::transfer::{Checker, local_sha256};
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let work = env.scratch();
+    let names = ["plain", "with space", "it's", "new\nline", "-dash"];
+    let mut paths = Vec::new();
+    for n in names {
+        let p = format!("{work}/{n}");
+        std::fs::write(&p, n).unwrap();
+        paths.push(p);
+    }
+    paths.push(format!("{work}/missing"));
+    let got = Checker::new(conn, None).sha256(&paths).await.unwrap();
+    assert_eq!(got.len(), 6);
+    for (p, h) in paths.iter().zip(&got).take(5) {
+        assert_eq!(h.as_deref(), Some(local_sha256(Path::new(p)).await.unwrap().as_str()), "{p:?}");
+    }
+    assert_eq!(got[5], None, "a missing file is reported, not fatal");
+}
+
+/// Timing, not run by default: `MALASDOH_DELAY_PROXY=delay.py cargo test
+/// --test sshd transfer_speed -- --ignored --nocapture`, where the script is
+/// a ProxyCommand adding latency (`script host port`).
+#[tokio::test]
+#[ignore]
+async fn transfer_speed_with_latency() {
+    use malasdoh_core::transfer::{self, TransferOptions};
+    let Ok(script) = std::env::var("MALASDOH_DELAY_PROXY") else { return };
+    let Some(env) = Env::new() else { return };
+    let mut p = env.profile();
+    p.proxy = malasdoh_core::proxy::Proxy::Command { command: format!("python3 {script} %h %p") };
+    let conn = Arc::new(ssh::connect(vec![p], &env.ctx(TestPrompter::accepting())).await.unwrap());
+    let fs = conn.open_sftp().await.unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let tree = local.path().join("many");
+    std::fs::create_dir_all(&tree).unwrap();
+    for i in 0..60 {
+        std::fs::write(tree.join(format!("f{i}.txt")), noise(4096, i)).unwrap();
+    }
+    std::fs::write(local.path().join("one.bin"), noise(4 << 20, 3)).unwrap();
+    for (name, src) in [("60 x 4 KiB", tree.clone()), ("1 x 4 MiB", local.path().join("one.bin"))] {
+        let dest = format!("{}/old-{}", env.scratch(), name.len());
+        std::fs::create_dir_all(&dest).unwrap();
+        let t = std::time::Instant::now();
+        fs.upload(&src, &dest, &Progress::default()).await.unwrap();
+        eprintln!("{name}: one at a time (before): {:.1?}", t.elapsed());
+        for parallel in [1, 4, 8] {
+            let dest = format!("{}/p{parallel}-{}", env.scratch(), name.len());
+            std::fs::create_dir_all(&dest).unwrap();
+            let opts = TransferOptions { parallel, verify: false, ..Default::default() };
+            let mut job = transfer::plan_upload(std::slice::from_ref(&src), &dest, &opts).unwrap();
+            let t = std::time::Instant::now();
+            transfer::run(&fs, &mut job, &opts, &Progress::default(), opts.limit(), None).await.unwrap();
+            assert!(job.is_finished());
+            eprintln!("{name}: queue, {parallel} at once: {:.1?}", t.elapsed());
+        }
+    }
+}
+
+#[tokio::test]
+async fn compressed_connection_works() {
+    use malasdoh_core::transfer::{self, TransferOptions};
+    let Some(env) = Env::new() else { return };
+    let mut p = env.profile();
+    p.compression = true;
+    let conn = Arc::new(ssh::connect(vec![p], &env.ctx(TestPrompter::accepting())).await.expect("compressed"));
+    let out = conn.exec("echo squeezed", None).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "squeezed");
+    // A compressible file goes through intact.
+    let fs = conn.open_sftp().await.unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let f = local.path().join("log.txt");
+    std::fs::write(&f, "GET /index.html 200\n".repeat(50_000)).unwrap();
+    let opts = TransferOptions::default();
+    let mut job = transfer::plan_upload(std::slice::from_ref(&f), &env.scratch(), &opts).unwrap();
+    let checker = transfer::Checker::new(conn.clone(), None);
+    transfer::run(&fs, &mut job, &opts, &Progress::default(), opts.limit(), Some(&checker)).await.unwrap();
+    assert!(job.is_finished() && job.verified() == 1, "{:?}", job.failures());
+}
+
+/// Timing, not run by default (see `transfer_speed_with_latency`): text
+/// through a link capped at 1 MB/s, with and without compression.
+#[tokio::test]
+#[ignore]
+async fn compression_speed() {
+    use malasdoh_core::transfer::{self, TransferOptions};
+    let Ok(script) = std::env::var("MALASDOH_DELAY_PROXY") else { return };
+    let Some(env) = Env::new() else { return };
+    let local = tempfile::tempdir().unwrap();
+    let f = local.path().join("access.log");
+    std::fs::write(&f, "203.0.113.7 - - [13/Oct/2026] \"GET /index.html HTTP/1.1\" 200 512\n".repeat(150_000)).unwrap();
+    for compression in [false, true] {
+        let mut p = env.profile();
+        p.compression = compression;
+        p.proxy = malasdoh_core::proxy::Proxy::Command { command: format!("python3 {script} %h %p 0.005 1000000") };
+        let conn = Arc::new(ssh::connect(vec![p], &env.ctx(TestPrompter::accepting())).await.unwrap());
+        let fs = conn.open_sftp().await.unwrap();
+        let dest = format!("{}/c{compression}", env.scratch());
+        std::fs::create_dir_all(&dest).unwrap();
+        let opts = TransferOptions { verify: false, ..Default::default() };
+        let mut job = transfer::plan_upload(std::slice::from_ref(&f), &dest, &opts).unwrap();
+        let t = std::time::Instant::now();
+        transfer::run(&fs, &mut job, &opts, &Progress::default(), opts.limit(), None).await.unwrap();
+        eprintln!("10 MB of log text at 1 MB/s, compression {compression}: {:.1?}", t.elapsed());
+    }
 }

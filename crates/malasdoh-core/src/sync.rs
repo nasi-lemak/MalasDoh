@@ -6,15 +6,15 @@
 //! time is set to the source's, so the next comparison sees them as equal.
 //! Symlinks and special files are reported and skipped, never followed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::sftp::{EntryKind, Progress, RemoteFs, join, local_name};
+use crate::transfer::{self, Checker, Ended, Status, TransferOptions, Way};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Direction {
@@ -183,18 +183,62 @@ async fn same_bytes(fs: &RemoteFs, local: &Path, remote: &str) -> Result<bool> {
     Ok(here == there)
 }
 
+/// Which of `rels` differ in contents. By SHA-256 computed on the server
+/// when possible (nothing is downloaded); otherwise by reading both.
+async fn differing(
+    fs: &RemoteFs,
+    local_root: &Path,
+    remote_root: &str,
+    rels: &[String],
+    checker: Option<&Checker>,
+) -> Result<BTreeSet<String>> {
+    let mut out = BTreeSet::new();
+    let remote: Vec<String> = rels.iter().map(|r| join(remote_root, r)).collect();
+    let hashes = match checker {
+        Some(c) if !rels.is_empty() => c.sha256(&remote).await.unwrap_or_else(|_| vec![None; rels.len()]),
+        _ => vec![None; rels.len()],
+    };
+    for ((rel, path), theirs) in rels.iter().zip(&remote).zip(hashes) {
+        let local = local_root.join(rel);
+        let same = match theirs {
+            Some(theirs) => transfer::local_sha256(&local).await? == theirs,
+            None => same_bytes(fs, &local, path).await?,
+        };
+        if !same {
+            out.insert(rel.clone());
+        }
+    }
+    Ok(out)
+}
+
 fn same(a: &Meta, b: &Meta) -> bool {
     a.size == b.size && a.mtime.abs_diff(b.mtime) <= 2
 }
 
 /// Work out what to do. Nothing is changed.
-pub async fn plan(fs: &RemoteFs, local_root: &Path, remote_root: &str, opts: &SyncOptions) -> Result<Plan> {
+pub async fn plan(
+    fs: &RemoteFs,
+    local_root: &Path,
+    remote_root: &str,
+    opts: &SyncOptions,
+    checker: Option<&Checker>,
+) -> Result<Plan> {
     let mut plan = Plan::default();
     let mut local = BTreeMap::new();
     let mut remote = BTreeMap::new();
     scan_local(local_root, "", &opts.exclude, &mut local, &mut plan.skipped)?;
     scan_remote(fs, remote_root, "", &opts.exclude, &mut remote, &mut plan.skipped).await?;
     let item = |rel: &str, action, reason| PlanItem { rel: rel.to_string(), action, reason, enabled: true };
+    let candidates: Vec<String> = if opts.compare_contents {
+        local
+            .iter()
+            .filter(|(rel, l)| !l.dir && remote.get(*rel).is_some_and(|r| !r.dir && same(l, r)))
+            .map(|(rel, _)| rel.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let differ = differing(fs, local_root, remote_root, &candidates, checker).await?;
 
     let up = matches!(opts.direction, Direction::Upload | Direction::Both);
     let down = matches!(opts.direction, Direction::Download | Direction::Both);
@@ -214,9 +258,7 @@ pub async fn plan(fs: &RemoteFs, local_root: &Path, remote_root: &str, opts: &Sy
                 plan.skipped.push(format!("{rel} (a file on one side, a folder on the other)"))
             }
             Some(r) if same(l, r) && !opts.compare_contents => plan.unchanged += 1,
-            Some(r) if same(l, r) && same_bytes(fs, &local_root.join(rel), &join(remote_root, rel)).await? => {
-                plan.unchanged += 1
-            }
+            Some(r) if same(l, r) && !differ.contains(rel) => plan.unchanged += 1,
             Some(r) if same(l, r) => plan.items.push(match opts.direction {
                 Direction::Download => item(rel, Action::Download { size: r.size }, "contents differ"),
                 Direction::Upload => item(rel, Action::Upload { size: l.size }, "contents differ"),
@@ -282,71 +324,105 @@ pub async fn plan(fs: &RemoteFs, local_root: &Path, remote_root: &str, opts: &Sy
 pub struct SyncReport {
     pub done: usize,
     pub failed: Vec<(String, String)>,
+    /// Copies whose checksums were compared and matched.
+    pub verified: usize,
+    /// Why copies were not compared, if they were not.
+    pub unverified: Option<String>,
 }
 
-/// Carry out the enabled items: folders first, then copies, then deletions
-/// (deepest first). A failing item is recorded and the rest continue.
+/// Carry out the enabled items: folders first, then copies (several at
+/// once, through [`transfer::run`], so times are kept and copies are
+/// checked), then deletions (deepest first). A failing item is recorded and
+/// the rest continue.
 pub async fn execute(
     fs: &RemoteFs,
     local_root: &Path,
     remote_root: &str,
     plan: &Plan,
     progress: &Progress,
+    topts: &TransferOptions,
+    checker: Option<&Checker>,
 ) -> Result<SyncReport> {
     let mut report = SyncReport::default();
-    progress.total_bytes.store(plan.bytes(), Ordering::Relaxed);
     let local_path = |rel: &str| -> PathBuf { rel.split('/').fold(local_root.to_path_buf(), |p, c| p.join(c)) };
-    let mut items: Vec<&PlanItem> = plan.items.iter().filter(|i| i.enabled).collect();
-    let rank = |a: &Action| match a {
-        Action::MkdirRemote | Action::MkdirLocal => 0,
-        Action::Upload { .. } | Action::Download { .. } => 1,
-        _ => 2,
-    };
-    items.sort_by(|a, b| {
-        rank(&a.action).cmp(&rank(&b.action)).then_with(|| {
-            let depth = |s: &str| s.matches('/').count();
-            if rank(&a.action) == 2 { depth(&b.rel).cmp(&depth(&a.rel)) } else { depth(&a.rel).cmp(&depth(&b.rel)) }
-        })
-    });
-    for it in items {
-        progress.check_cancel()?;
-        let remote = join(remote_root, &it.rel);
-        let local = local_path(&it.rel);
-        let r: Result<()> = async {
-            match &it.action {
-                Action::MkdirRemote => fs.mkdir(&remote).await,
-                Action::MkdirLocal => Ok(std::fs::create_dir_all(&local)?),
-                Action::Upload { .. } => {
-                    fs.upload_inner(&local, &remote, progress).await?;
-                    if let Some(t) =
-                        std::fs::metadata(&local)?.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    {
-                        fs.set_mtime(&remote, t.as_secs() as u32).await?;
-                    }
-                    Ok(())
-                }
-                Action::Download { .. } => {
-                    if let Some(parent) = local.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    fs.download_inner(&remote, &local, progress).await?;
-                    if let Some(t) = fs.stat(&remote).await?.mtime {
-                        let f = std::fs::File::options().write(true).open(&local)?;
-                        f.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(t as u64))?;
-                    }
-                    Ok(())
-                }
-                Action::DeleteRemote { .. } => fs.remove(&remote).await,
-                Action::DeleteLocal { dir: true } => Ok(std::fs::remove_dir_all(&local)?),
-                Action::DeleteLocal { dir: false } => Ok(std::fs::remove_file(&local)?),
-            }
-        }
-        .await;
+    let enabled: Vec<&PlanItem> = plan.items.iter().filter(|i| i.enabled).collect();
+    fn record(report: &mut SyncReport, rel: &str, r: Result<()>) -> Result<()> {
         match r {
             Ok(()) => report.done += 1,
             Err(e) if e.is::<crate::ssh::Cancelled>() => return Err(e),
-            Err(e) => report.failed.push((it.rel.clone(), format!("{e:#}"))),
+            Err(e) => report.failed.push((rel.to_string(), format!("{e:#}"))),
         }
+        Ok(())
+    }
+
+    let mut dirs: Vec<&&PlanItem> =
+        enabled.iter().filter(|i| matches!(i.action, Action::MkdirRemote | Action::MkdirLocal)).collect();
+    dirs.sort_by_key(|i| i.rel.matches('/').count());
+    for it in dirs {
+        progress.check_cancel()?;
+        let r = match it.action {
+            Action::MkdirRemote => fs.mkdir(&join(remote_root, &it.rel)).await,
+            _ => std::fs::create_dir_all(local_path(&it.rel)).map_err(Into::into),
+        };
+        record(&mut report, &it.rel, r)?;
+    }
+
+    let limit = topts.limit();
+    for way in [Way::Up, Way::Down] {
+        let files: Vec<(PathBuf, String, u64)> = enabled
+            .iter()
+            .filter_map(|i| match (i.action.clone(), way) {
+                (Action::Upload { size }, Way::Up) | (Action::Download { size }, Way::Down) => {
+                    Some((local_path(&i.rel), join(remote_root, &i.rel), size))
+                }
+                _ => None,
+            })
+            .collect();
+        if files.is_empty() {
+            continue;
+        }
+        if way == Way::Down {
+            for (l, ..) in &files {
+                if let Some(p) = l.parent() {
+                    std::fs::create_dir_all(p)?;
+                }
+            }
+        }
+        let mut job = transfer::job_of(way, files);
+        match transfer::run(fs, &mut job, topts, progress, limit.clone(), checker).await? {
+            Ended::Finished => {}
+            Ended::Paused | Ended::Cancelled => return Err(crate::ssh::Cancelled.into()),
+        }
+        let rel = |f: &transfer::FileTask| {
+            f.remote.strip_prefix(remote_root).unwrap_or(&f.remote).trim_start_matches('/').to_string()
+        };
+        for f in &job.files {
+            match &f.status {
+                Status::Done => report.done += 1,
+                Status::Failed(e) => report.failed.push((rel(f), e.clone())),
+                Status::Waiting => {}
+            }
+        }
+        report.verified += job.verified();
+        if report.unverified.is_none() {
+            report.unverified = job.unverified.clone();
+        }
+    }
+
+    let mut deletes: Vec<&&PlanItem> = enabled
+        .iter()
+        .filter(|i| matches!(i.action, Action::DeleteRemote { .. } | Action::DeleteLocal { .. }))
+        .collect();
+    deletes.sort_by_key(|i| std::cmp::Reverse(i.rel.matches('/').count()));
+    for it in deletes {
+        progress.check_cancel()?;
+        let local = local_path(&it.rel);
+        let r = match &it.action {
+            Action::DeleteRemote { .. } => fs.remove(&join(remote_root, &it.rel)).await,
+            Action::DeleteLocal { dir: true } => std::fs::remove_dir_all(&local).map_err(Into::into),
+            _ => std::fs::remove_file(&local).map_err(Into::into),
+        };
+        record(&mut report, &it.rel, r)?;
     }
     Ok(report)
 }

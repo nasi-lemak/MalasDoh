@@ -57,6 +57,8 @@ pub struct App {
     journal: Journal,
     journal_win: JournalWindow,
     keys_win: KeysWindow,
+    /// Settings → Transfers' skip list as typed.
+    skip_text: String,
     teleport: malasdoh_core::teleport::TeleportStore,
     teleport_win: crate::teleport_ui::TeleportWindow,
     export_dlg: Option<backup::ExportDialog>,
@@ -96,7 +98,47 @@ struct PendingSnippet {
 enum SettingsTab {
     #[default]
     General,
+    Transfers,
     Checks,
+}
+
+/// Settings → Transfers.
+fn transfers_ui(ui: &mut egui::Ui, t: &mut malasdoh_core::transfer::TransferOptions, skip_text: &mut String) {
+    ui.add(egui::Slider::new(&mut t.parallel, 1..=8).text("Files copied at the same time, per connection"))
+        .on_hover_text(
+            "Each file waits for the server at every step; copying several at once keeps the link busy. \
+         More helps most with many small files over a slow link.",
+        );
+    ui.checkbox(&mut t.verify, "Compare checksums (SHA-256) after copying").on_hover_text(
+        "Computed on the server with sha256sum (or shasum), so nothing is downloaded again. \
+         Skipped with a note when the server has neither.",
+    );
+    ui.add_space(6.0);
+    ui.label("Leave out of folder transfers (names or patterns, separated by commas):");
+    if ui
+        .add(egui::TextEdit::singleline(skip_text).hint_text(".git, node_modules, *.tmp").desired_width(420.0))
+        .changed()
+    {
+        t.skip = skip_text.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    }
+    ui.label(
+        RichText::new(
+            "A pattern with / matches a path inside the folder (e.g. build/**). What you select yourself is \
+             always copied. Folder sync has its own list.",
+        )
+        .weak()
+        .small(),
+    );
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(
+            "Interrupted files continue where they stopped when you resume (Pause, or a lost connection). \
+             Downloads and new uploads are written as name.malasdoh-part and renamed when complete; files \
+             already on the server are written in place, keeping their owner and permissions.",
+        )
+        .weak()
+        .small(),
+    );
 }
 
 /// Editor for the config-check rules.
@@ -214,6 +256,7 @@ impl App {
         });
         let snippets_path = paths.config_dir.join("snippets.toml");
         let paths_journal = paths.journal_file();
+        let settings_skip = settings.transfer.skip.join(", ");
         let paths_teleport = paths.teleport_file();
         // Copies made for external editors are kept a week, then tidied away.
         let cache = paths.edit_cache_dir();
@@ -227,6 +270,7 @@ impl App {
             secrets: Arc::new(OsKeychain) as Arc<dyn SecretStore>,
             known_hosts: KnownHosts::standard(paths.known_hosts_file(), vec![paths.teleport_dir().join("known_hosts")]),
             paths,
+            transfer: Arc::new(std::sync::RwLock::new(settings.transfer.clone())),
         };
         let mut app = Self {
             shared,
@@ -258,6 +302,7 @@ impl App {
             journal: Journal::new(paths_journal),
             journal_win: JournalWindow::default(),
             keys_win: KeysWindow::default(),
+            skip_text: settings_skip,
             teleport: malasdoh_core::teleport::TeleportStore::load(paths_teleport),
             teleport_win: Default::default(),
             broadcast: None,
@@ -1378,6 +1423,12 @@ impl App {
                     ui.label(RichText::new("0 = off. Keeps idle sessions open through firewalls.").weak());
                 });
                 ui.end_row();
+                ui.label("Compression");
+                ui.checkbox(&mut p.compression, "Compress the connection (ssh -C)").on_hover_text(
+                    "Helps with text and logs over a slow link. Costs CPU on both ends and does nothing \
+                     for files that are already compressed (images, archives).",
+                );
+                ui.end_row();
                 ui.label("Agent");
                 ui.checkbox(&mut p.forward_agent, "Forward my SSH agent (ssh -A)").on_hover_text(
                     "Lets programs on this server use your keys, e.g. git pull. Only for servers you trust: \
@@ -1522,8 +1573,7 @@ impl App {
         let tmp_root = self.shared.paths.edit_cache_dir();
         let events = self.shared.events.clone();
         for p in c.paths {
-            let (index, progress) =
-                dst.add_transfer(format!("⬇⬆ {} from {src_name}", malasdoh_core::sftp::file_name(&p)));
+            let (id, progress) = dst.add_transfer(format!("⬇⬆ {} from {src_name}", malasdoh_core::sftp::file_name(&p)));
             let (src_fs, dst_fs, dest, tmp) = (
                 src_fs.clone(),
                 dst_fs.clone(),
@@ -1546,7 +1596,7 @@ impl App {
                 let _ = std::fs::remove_dir_all(&tmp);
                 events.session(
                     to,
-                    crate::session::SessionMsg::TransferDone { index, result: result.map_err(|e| format!("{e:#}")) },
+                    crate::session::SessionMsg::TransferDone { id, result: result.map_err(|e| format!("{e:#}")) },
                 );
             });
         }
@@ -1638,6 +1688,7 @@ impl App {
             |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(tab, SettingsTab::General, "General");
+                    ui.selectable_value(tab, SettingsTab::Transfers, "Transfers");
                     ui.selectable_value(tab, SettingsTab::Checks, "Config checks");
                 });
                 ui.separator();
@@ -1704,6 +1755,7 @@ impl App {
                             RichText::new(format!("Local backups: {}", paths.backups_dir().display())).weak().small(),
                         );
                     }
+                    SettingsTab::Transfers => transfers_ui(ui, &mut s.transfer, &mut self.skip_text),
                     SettingsTab::Checks => checks_ui(ui, &mut s.validation_rules),
                 }
             },
@@ -1719,6 +1771,7 @@ impl App {
             if let Err(e) = self.settings.save(&self.shared.paths.settings_file()) {
                 self.notify(format!("Could not save settings: {e:#}"), true);
             }
+            *self.shared.transfer.write().unwrap() = self.settings.transfer.clone();
         }
     }
 
@@ -1947,7 +2000,7 @@ impl eframe::App for App {
 
         // Keep polling while something is in flight.
         let busy = self.sessions.iter().any(|s| {
-            matches!(s.state, ConnState::Connecting(_)) || !s.browser.transfers.iter().all(|t| t.result.is_some())
+            matches!(s.state, ConnState::Connecting(_)) || s.browser.transfers.items.iter().any(|t| t.is_active())
         });
         if busy {
             ctx.request_repaint_after(Duration::from_millis(200));

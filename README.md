@@ -33,6 +33,21 @@ remote-editing loop, where they are weakest:
 - **Connections**: saved profiles with groups and search; jump hosts
   (ProxyJump) with chains; import from `~/.ssh/config`; duplicate; copy as an
   `ssh` command.
+- **Teleport** (Connection → Teleport…): add your cluster by its web address,
+  log in with your password and authenticator code, and its servers become
+  ordinary connections (terminal, files, editor, saving checks), without
+  `tsh` or a browser. The key is made on this computer and Teleport signs it
+  for as long as the cluster allows (often 12 hours); the password can be
+  kept in the system keychain, the code is asked each time. "Find servers"
+  lists the servers you may use (it needs its own code: Teleport takes each
+  code once) and adds them in a "Teleport · cluster" group. Servers are
+  reached through the proxy, on its SSH port or over its web port when the
+  cluster serves everything on one port, and trusted through the cluster's
+  host CA, so there are no fingerprint questions. When the login runs out,
+  connecting asks for it and then carries on. A self-signed proxy can be
+  trusted by its fingerprint. Not supported: single sign-on and security-key
+  logins, and clusters that want a code for every session
+  (`require_session_mfa`); those need `tsh` or the web page.
 - **Proxies**: reach the first server through SOCKS5, an HTTP proxy
   (`CONNECT`), or any command (`ProxyCommand`, e.g. `nc -X connect -x
   proxy:3128 %h %p`, imported from `~/.ssh/config`). Proxy passwords are
@@ -249,5 +264,12 @@ the no-SFTP shell fallback, safe save, conflict detection, CRLF and permission
 preservation, sudo editing, config checks with rollback (including real
 `visudo`), port forwarding in all three directions, and folder sync. If `sshd` is not
 installed those tests are skipped; CI installs it.
+
+`crates/malasdoh-core/tests/teleport.rs` runs against a real Teleport cluster
+when `MALASDOH_TELEPORT="address user password totp-secret"` is set (a local
+user with an authenticator; the secret is the base32 one from its QR code):
+trusting a self-signed proxy, a refused wrong code, login and login again,
+the server list, and a connection through the proxy with a command and SFTP
+and no host key questions. Otherwise it is skipped.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is planned next.

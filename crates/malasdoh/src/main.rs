@@ -23,6 +23,7 @@ mod settings;
 mod snippets;
 mod sudo;
 mod sync_ui;
+mod teleport_ui;
 mod terminal;
 mod textops;
 mod themes;

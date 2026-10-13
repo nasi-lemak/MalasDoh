@@ -2,6 +2,7 @@
 //! a connection's questions.
 
 mod backup;
+mod teleport;
 
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -56,6 +57,8 @@ pub struct App {
     journal: Journal,
     journal_win: JournalWindow,
     keys_win: KeysWindow,
+    teleport: malasdoh_core::teleport::TeleportStore,
+    teleport_win: crate::teleport_ui::TeleportWindow,
     export_dlg: Option<backup::ExportDialog>,
     import_dlg: Option<backup::ImportDialog>,
     /// "Type into several terminals": the sessions that get what is typed.
@@ -211,6 +214,7 @@ impl App {
         });
         let snippets_path = paths.config_dir.join("snippets.toml");
         let paths_journal = paths.journal_file();
+        let paths_teleport = paths.teleport_file();
         // Copies made for external editors are kept a week, then tidied away.
         let cache = paths.edit_cache_dir();
         rt.spawn_blocking(move || {
@@ -221,7 +225,7 @@ impl App {
             rt: rt.handle().clone(),
             events,
             secrets: Arc::new(OsKeychain) as Arc<dyn SecretStore>,
-            known_hosts: KnownHosts::standard(paths.known_hosts_file()),
+            known_hosts: KnownHosts::standard(paths.known_hosts_file(), vec![paths.teleport_dir().join("known_hosts")]),
             paths,
         };
         let mut app = Self {
@@ -254,6 +258,8 @@ impl App {
             journal: Journal::new(paths_journal),
             journal_win: JournalWindow::default(),
             keys_win: KeysWindow::default(),
+            teleport: malasdoh_core::teleport::TeleportStore::load(paths_teleport),
+            teleport_win: Default::default(),
             broadcast: None,
             export_dlg: None,
             import_dlg: None,
@@ -351,6 +357,15 @@ impl App {
                     self.keys_win.handle(m, &self.sessions);
                     continue;
                 }
+                AppEvent { kind: EventKind::Teleport(m), .. } => {
+                    let actions = self.teleport_win.handle(m, &self.teleport);
+                    self.teleport_actions(actions);
+                    continue;
+                }
+                AppEvent { kind: EventKind::Session(crate::session::SessionMsg::TeleportLogin(c)), session } => {
+                    self.teleport_win.ask_login(c, session);
+                    continue;
+                }
                 ev => ev,
             };
             if ev.session == MULTI_RUN {
@@ -371,7 +386,11 @@ impl App {
                 }
                 EventKind::Question(q) => s.questions.push_back(q),
                 EventKind::Session(msg) => s.handle(msg, &self.shared, &self.settings),
-                EventKind::Multi(_) | EventKind::MultiEdit(_) | EventKind::Compare(_) | EventKind::Keys(_) => {}
+                EventKind::Multi(_)
+                | EventKind::MultiEdit(_)
+                | EventKind::Compare(_)
+                | EventKind::Keys(_)
+                | EventKind::Teleport(_) => {}
             }
         }
     }
@@ -488,6 +507,12 @@ impl App {
                 }
                 if ui.button("Import connections…").on_hover_text("From a MalasDoh export").clicked() {
                     self.start_import();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Teleport…").on_hover_text("Log in to a Teleport cluster and use its servers").clicked()
+                {
+                    self.teleport_win.open = true;
                     ui.close();
                 }
                 ui.separator();
@@ -1786,6 +1811,7 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
             Proxy::Socks5 { .. } => "SOCKS5",
             Proxy::Http { .. } => "HTTP CONNECT",
             Proxy::Command { .. } => "Command",
+            Proxy::TeleportTls { .. } => "Teleport",
         };
         egui::ComboBox::from_id_salt("proxy-kind").selected_text(kind).show_ui(ui, |ui| {
             if ui.selectable_label(kind == "Direct", "Direct").clicked() {
@@ -1815,6 +1841,9 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
                 ui.add(egui::TextEdit::singleline(command).desired_width(320.0)).on_hover_text(
                     "Run on this computer; its input and output carry the SSH connection. %h, %p, %r: host, port, user",
                 );
+            }
+            Proxy::TeleportTls { host, port, .. } => {
+                ui.label(format!("Teleport proxy at {host}:{port} (set up from the Connection menu, Teleport…)"));
             }
         }
         if !proxy.is_none() {
@@ -1892,6 +1921,8 @@ impl eframe::App for App {
             self.compares.open(a, b, &self.sessions, &self.shared);
         }
         self.compares.ui(&ctx, &self.sessions, &self.shared);
+        let actions = self.teleport_win.ui(&ctx, &self.teleport, &self.shared);
+        self.teleport_actions(actions);
         if let Some((id, key)) = self.keys_win.ui(&ctx, &self.sessions, &self.shared)
             && let Some(mut p) = self.profiles.get(id).cloned()
         {

@@ -105,6 +105,9 @@ pub struct Profile {
     /// Port forwards for this connection.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<crate::forward::ForwardSpec>,
+    /// The Teleport cluster whose login this connection uses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teleport: Option<crate::teleport::ClusterId>,
 }
 
 impl Default for Profile {
@@ -129,6 +132,7 @@ impl Default for Profile {
             proxy: crate::proxy::Proxy::None,
             keepalive_secs: 30,
             forwards: Vec::new(),
+            teleport: None,
         }
     }
 }

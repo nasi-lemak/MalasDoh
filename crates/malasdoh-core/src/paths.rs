@@ -60,6 +60,16 @@ impl AppPaths {
     }
 
     /// The change journal: every save, with its patch.
+    /// Teleport logins: a folder per cluster with its key and certificate,
+    /// and the host CA lines for its servers.
+    pub fn teleport_dir(&self) -> PathBuf {
+        self.data_dir.join("teleport")
+    }
+
+    pub fn teleport_file(&self) -> PathBuf {
+        self.config_dir.join("teleport.toml")
+    }
+
     pub fn journal_file(&self) -> PathBuf {
         self.data_dir.join("journal.jsonl")
     }

@@ -29,6 +29,10 @@ serde_json = "1"
 yaml-rust2 = "0.13"
 rand = "0.10"
 ring = "0.17"
+# Teleport: its web API and TLS-routed SSH. ring, like russh.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

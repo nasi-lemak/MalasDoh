@@ -23,6 +23,7 @@ pub mod shellfs;
 pub mod ssh;
 pub mod ssh_config;
 pub mod sync;
+pub mod teleport;
 pub mod text;
 pub mod validate;
 

@@ -60,10 +60,12 @@ impl KnownHosts {
         Self { read, write: app_file }
     }
 
-    /// The usual setup: `~/.ssh/known_hosts` plus MalasDoh's own file.
-    pub fn standard(app_file: PathBuf) -> Self {
-        let user = crate::paths::user_ssh_dir().map(|d| d.join("known_hosts")).into_iter().collect();
-        Self::new(app_file, user)
+    /// The usual setup: `~/.ssh/known_hosts` plus MalasDoh's own file, and
+    /// any `extra` files MalasDoh writes (Teleport's host CAs).
+    pub fn standard(app_file: PathBuf, extra: Vec<PathBuf>) -> Self {
+        let mut read: Vec<PathBuf> = crate::paths::user_ssh_dir().map(|d| d.join("known_hosts")).into_iter().collect();
+        read.extend(extra);
+        Self::new(app_file, read)
     }
 
     pub fn app_file(&self) -> &Path {

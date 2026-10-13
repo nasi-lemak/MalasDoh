@@ -297,6 +297,16 @@ pub struct Connection {
 /// [`crate::ProfileStore::chain`].
 pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) -> Result<Connection> {
     let target = chain.last().cloned().context("nothing to connect to")?;
+    // A Teleport login that has run out would only fail at authentication,
+    // after a round trip and with a vaguer message.
+    for hop in &chain {
+        if let (Some(cluster), AuthMethod::Key { path }) = (hop.teleport, &hop.auth) {
+            let path = crate::paths::expand_tilde(path);
+            if !crate::teleport::cert_state(&path).is_some_and(|c| c.is_valid()) {
+                return Err(crate::teleport::LoginNeeded { cluster, server: target.display_name() }.into());
+            }
+        }
+    }
     let prompter = ctx.prompter.clone();
     let confirm: ConfirmHostKey = Arc::new(move |prompt| {
         let prompter = prompter.clone();
@@ -505,7 +515,19 @@ where
     }
 
     let methods = st.remaining.map(|m| m.iter().map(<&str>::from).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-    Err(AuthError { user, host: p.host.clone(), methods }.into())
+    let err = anyhow::Error::from(AuthError { user, host: p.host.clone(), methods });
+    if p.teleport.is_some() && p.jump.is_some() {
+        // The proxy took the certificate, the server did not: most often the
+        // login is not allowed there, or the cluster wants a code per session.
+        return Err(err.context(format!(
+            "Teleport refused {} on {}. Check that this login is allowed there (Find servers lists each server's logins). \
+             If the cluster asks for a code for every session (require_session_mfa), MalasDoh cannot do that yet; \
+             use tsh or the web page for it",
+            p.user,
+            p.display_name()
+        )));
+    }
+    Err(err)
 }
 
 /// A raw connection to the local agent, for forwarding.

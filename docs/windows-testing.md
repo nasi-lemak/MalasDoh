@@ -72,15 +72,28 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
 - [ ] 5.3 If you have two servers: **Tools → Edit a file on many servers**,
   load a harmless file, change a line, **Preview**, **Save**.
 
-## 6. Safety nets
+## 6. Teleport (if you use it)
 
-- [ ] 6.1 Edit a file without saving, then end MalasDoh in **Task Manager**.
+- [ ] 6.1 **Connection → Teleport…** → **+ Add a cluster**: the web address
+  you use in the browser, and your user name. **Check** shows the cluster's
+  name and version.
+- [ ] 6.2 Password and authenticator code → **Log in**: it says how long the
+  login lasts and which server logins you have.
+- [ ] 6.3 Wait for the next code, then **Find servers** → tick some → **Add**.
+  They appear under "Teleport · <cluster>" in the list; double-click one:
+  terminal and files work, with no fingerprint question.
+- [ ] 6.4 **Log out**, then connect again: the login form opens; after
+  logging in, the connection carries on by itself.
+
+## 7. Safety nets
+
+- [ ] 7.1 Edit a file without saving, then end MalasDoh in **Task Manager**.
   Start it, connect again: it offers the unsaved edits back.
-- [ ] 6.2 **Port forward**: add a local forward (e.g. 8080 → localhost:80 on
+- [ ] 7.2 **Port forward**: add a local forward (e.g. 8080 → localhost:80 on
   the server) and open `http://localhost:8080` in your browser. Windows
   Firewall should not ask (it only listens on 127.0.0.1).
-- [ ] 6.3 Quit with a session open; start again: "Reopen last session" works.
-- [ ] 6.4 **Connection → Export connections…** to a file with a passphrase,
+- [ ] 7.3 Quit with a session open; start again: "Reopen last session" works.
+- [ ] 7.4 **Connection → Export connections…** to a file with a passphrase,
   then **Import connections…** it back: nothing is duplicated.
 
 ## Reporting

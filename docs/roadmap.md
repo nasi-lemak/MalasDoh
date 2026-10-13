@@ -24,6 +24,7 @@
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line, changed-lines gutter
 - PostgreSQL: config check with rollback (`postgres -C`, `pg_hba_file_rules`), restart-needed notes, warnings for removed settings
 - Lasting terminals (tmux/screen) that survive disconnects and app restarts
+- Teleport: password + authenticator login without tsh, server list, proxy jump (separate SSH port or TLS routing), CA trust, login-expired prompt
 - Terminal: themes, font file, copy-on-select, right/middle-click paste,
   multi-line paste check, links, mouse reporting, split panes, typing into
   several servers, agent forwarding
@@ -48,6 +49,7 @@
 
 1. Code signing for the Windows and macOS builds (needs certificates).
 2. Run through docs/windows-testing.md on real Windows and fix what turns up.
+3. Teleport: per-session MFA (`require_session_mfa`), SSO and security-key logins.
 
 ## Known limitations
 

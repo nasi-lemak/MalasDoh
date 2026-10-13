@@ -19,6 +19,8 @@ pub enum SecretKey {
     ProxyPassword(ProfileId),
     /// The sudo password on a connection's server.
     SudoPassword(ProfileId),
+    /// The password for a Teleport cluster's user.
+    TeleportPassword(uuid::Uuid),
 }
 
 impl SecretKey {
@@ -28,6 +30,7 @@ impl SecretKey {
             SecretKey::Passphrase(path) => format!("passphrase:{path}"),
             SecretKey::ProxyPassword(id) => format!("proxy-password:{id}"),
             SecretKey::SudoPassword(id) => format!("sudo-password:{id}"),
+            SecretKey::TeleportPassword(id) => format!("teleport-password:{id}"),
         }
     }
 }

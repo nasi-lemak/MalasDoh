@@ -30,6 +30,10 @@ pub enum Proxy {
     /// Run locally; `%h`, `%p` and `%r` become the server's host, port and
     /// user, as in OpenSSH's ProxyCommand.
     Command { command: String },
+    /// A Teleport proxy that serves SSH on its web port (TLS routing): TLS
+    /// with the `teleport-proxy-ssh` protocol, its certificate checked
+    /// against the cluster's own CA (PEM in `ca_file`, from the login).
+    TeleportTls { host: String, port: u16, ca_file: String },
 }
 
 impl Proxy {
@@ -51,6 +55,7 @@ impl Proxy {
             Proxy::Socks5 { host, port, .. } => format!("SOCKS5 {host}:{port}"),
             Proxy::Http { host, port, .. } => format!("HTTP proxy {host}:{port}"),
             Proxy::Command { command } => format!("command `{command}`"),
+            Proxy::TeleportTls { host, port, .. } => format!("Teleport {host}:{port}"),
         }
     }
 }
@@ -70,6 +75,10 @@ pub async fn connect(
 ) -> Result<Box<dyn Stream>> {
     match proxy {
         Proxy::None => Ok(Box::new(tcp(host, port).await?)),
+        Proxy::TeleportTls { host, port, ca_file } => {
+            let ca = crate::paths::expand_tilde(ca_file);
+            Ok(Box::new(crate::teleport::ssh_over_tls(host, *port, &ca).await?))
+        }
         Proxy::Socks5 { host: ph, port: pp, user } => {
             let s = tcp(ph, *pp).await.context("reaching the SOCKS proxy")?;
             let auth = (!user.is_empty()).then(|| (user.as_str(), password.unwrap_or("")));

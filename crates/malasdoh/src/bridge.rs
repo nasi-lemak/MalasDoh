@@ -50,6 +50,8 @@ pub enum EventKind {
     Compare(crate::compare::CompareMsg),
     /// For the SSH keys window; the session id is not used.
     Keys(crate::keys_ui::KeysMsg),
+    /// For the Teleport window; the session id is not used.
+    Teleport(crate::teleport_ui::TeleportMsg),
 }
 
 #[derive(Clone)]

@@ -74,6 +74,8 @@ fn is_lasting_name(name: &str) -> bool {
 }
 
 pub enum SessionMsg {
+    /// Connecting needs a Teleport login for this cluster first.
+    TeleportLogin(malasdoh_core::teleport::ClusterId),
     /// Lasting terminals on the server: name, and whether something is attached.
     LastingList(Vec<(String, bool)>),
     RootFs(Result<RemoteFs, String>),
@@ -391,6 +393,9 @@ impl Session {
                         e.downcast_ref::<HostKeyError>(),
                         Some(HostKeyError::Changed { file, .. }) if file == shared2.known_hosts.app_file()
                     );
+                    if let Some(l) = e.downcast_ref::<malasdoh_core::teleport::LoginNeeded>() {
+                        shared2.events.session(id, SessionMsg::TeleportLogin(l.cluster));
+                    }
                     SessionMsg::Failed { error: format!("{e:#}"), forgettable_key }
                 }
             };
@@ -697,6 +702,8 @@ impl Session {
                 }
             }
             SessionMsg::LastingList(list) => self.lasting_list = Some(list),
+            // The app takes these before they get here.
+            SessionMsg::TeleportLogin(_) => {}
             SessionMsg::ShellExited { term, status } => {
                 if let Some(t) = self.terms.iter_mut().find(|t| t.id == term) {
                     t.tx = None;
@@ -1345,7 +1352,7 @@ impl Session {
                 Err(e) => self.notify(format!("{e:#}"), true),
             },
             A::Symlink { target, link } => match commands::symlink(&target, &link) {
-                Ok(cmd) => self.run_op(cmd, "create the link", format!("Created {link} → {target}"), false, shared),
+                Ok(cmd) => self.run_op(cmd, "create the link", format!("Created {link} -> {target}"), false, shared),
                 Err(e) => self.notify(format!("{e:#}"), true),
             },
             A::Extract(path) => match commands::extract(&path) {

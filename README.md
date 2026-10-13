@@ -38,9 +38,11 @@ remote-editing loop, where they are weakest:
   ordinary connections (terminal, files, editor, saving checks), without
   `tsh` or a browser. The key is made on this computer and Teleport signs it
   for as long as the cluster allows (often 12 hours); the password can be
-  kept in the system keychain, the code is asked each time. "Find servers"
-  lists the servers you may use (it needs its own code: Teleport takes each
-  code once) and adds them in a "Teleport · cluster" group. Servers are
+  kept in the system keychain, the code is asked each time. Once you are
+  logged in, every server you may use is listed straight away, with the
+  logins allowed on each (asked of Teleport's auth service with your login's
+  certificate, as `tsh ls` does, so no second code), and the ones you tick
+  are added in a "Teleport · cluster" group. Servers are
   reached through the proxy, on its SSH port or over its web port when the
   cluster serves everything on one port, and trusted through the cluster's
   host CA, so there are no fingerprint questions. When the login runs out,

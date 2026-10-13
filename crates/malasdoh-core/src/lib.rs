@@ -24,6 +24,7 @@ pub mod ssh;
 pub mod ssh_config;
 pub mod sync;
 pub mod teleport;
+pub mod teleport_api;
 pub mod text;
 pub mod transfer;
 pub mod validate;

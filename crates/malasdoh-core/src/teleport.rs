@@ -470,6 +470,9 @@ pub struct Login {
     pub host_cas: Vec<String>,
     /// The cluster's TLS host CA certificates, PEM.
     pub tls_cas: String,
+    /// The user's TLS certificate, PEM, for Teleport's own API (listing
+    /// servers). Older clusters may not send one.
+    pub tls_cert: Option<String>,
 }
 
 fn b64_text(s: &str) -> Result<String> {
@@ -477,7 +480,7 @@ fn b64_text(s: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
-async fn sign(cluster: &Cluster, password: &str, code: &str, public_key: &str) -> Result<Login> {
+async fn sign(cluster: &Cluster, password: &str, code: &str, public_key: &str, tls_public: &str) -> Result<Login> {
     let t = cluster.target()?;
     let user = cluster.user.trim();
     // Starting the login tells Teleport which second factor to expect.
@@ -495,6 +498,7 @@ async fn sign(cluster: &Cluster, password: &str, code: &str, public_key: &str) -
         "password": password,
         "totp_code": code.trim(),
         "ssh_pub_key": B64.encode(public_key.trim().as_bytes()),
+        "tls_pub_key": B64.encode(tls_public.as_bytes()),
         "ttl": TTL_NANOS,
     });
     let v = json(request(&t, "POST", "/webapi/mfa/login/finish", Some(&finish), &[]).await?)?;
@@ -513,7 +517,8 @@ async fn sign(cluster: &Cluster, password: &str, code: &str, public_key: &str) -
             }
         }
     }
-    Ok(Login { cert, host_cas, tls_cas })
+    let tls_cert = v.get("tls_cert").and_then(|c| c.as_str()).filter(|c| !c.is_empty()).map(b64_text).transpose()?;
+    Ok(Login { cert, host_cas, tls_cas, tls_cert })
 }
 
 /// Log in: make a new key, have Teleport sign it, and store both where
@@ -523,7 +528,8 @@ pub async fn log_in(cluster: &mut Cluster, teleport_dir: &Path, password: &str, 
     use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).context("making a key")?;
     let public = key.public_key().to_openssh().context("encoding the key")?;
-    let login = sign(cluster, password, code, &public).await?;
+    let (tls_key, tls_public) = crate::teleport_api::new_tls_key()?;
+    let login = sign(cluster, password, code, &public, &tls_public).await?;
     let path = cluster.key_path(teleport_dir);
     if let Some(dir) = path.parent() {
         crate::paths::create_private_dir(dir)?;
@@ -533,6 +539,18 @@ pub async fn log_in(cluster: &mut Cluster, teleport_dir: &Path, password: &str, 
     crate::paths::write_private_atomic(&path, pem.as_bytes())?;
     crate::paths::write_private_atomic(&cert_path(&path), format!("{}\n", login.cert).as_bytes())?;
     crate::paths::write_private_atomic(&tls_ca_path(&path), login.tls_cas.as_bytes())?;
+    let (tls_key_file, tls_cert_file) =
+        (crate::teleport_api::tls_key_path(&path), crate::teleport_api::tls_cert_path(&path));
+    match &login.tls_cert {
+        Some(c) => {
+            crate::paths::write_private_atomic(&tls_key_file, tls_key.as_bytes())?;
+            crate::paths::write_private_atomic(&tls_cert_file, format!("{}\n", c.trim()).as_bytes())?;
+        }
+        None => {
+            let _ = std::fs::remove_file(&tls_key_file);
+            let _ = std::fs::remove_file(&tls_cert_file);
+        }
+    }
     cluster.host_cas = login.host_cas;
     cert_state(&path).context("Teleport's certificate could not be read")
 }
@@ -542,6 +560,8 @@ pub fn log_out(cluster: &Cluster, teleport_dir: &Path) {
     let path = cluster.key_path(teleport_dir);
     let _ = std::fs::remove_file(cert_path(&path));
     let _ = std::fs::remove_file(tls_ca_path(&path));
+    let _ = std::fs::remove_file(crate::teleport_api::tls_key_path(&path));
+    let _ = std::fs::remove_file(crate::teleport_api::tls_cert_path(&path));
     let _ = std::fs::remove_file(&path);
 }
 

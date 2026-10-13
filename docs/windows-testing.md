@@ -89,7 +89,8 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   name and version.
 - [ ] 6.2 Password and authenticator code → **Log in**: it says how long the
   login lasts and which server logins you have.
-- [ ] 6.3 Wait for the next code, then **Find servers** → tick some → **Add**.
+- [ ] 6.3 The servers you can use are listed straight after logging in (no
+  second code) → tick some → **Add**.
   They appear under "Teleport · <cluster>" in the list; double-click one:
   terminal and files work, with no fingerprint question.
 - [ ] 6.4 **Log out**, then connect again: the login form opens; after

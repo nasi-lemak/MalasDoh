@@ -115,9 +115,30 @@ async fn log_in_list_and_connect() {
     let state = teleport::log_in(&mut cluster, &tdir, password, &code).await.unwrap();
     assert!(state.is_valid());
 
-    let code = fresh_code(secret, &mut used).await;
-    let nodes = teleport::list_nodes(&cluster, password, &code).await.unwrap();
+    // Listing with the login itself: no second code.
+    let nodes = malasdoh_core::teleport_api::list_nodes_with_login(&cluster, &tdir).await;
+    let nodes = nodes.unwrap_or_else(|e| panic!("{e:#}"));
     assert!(!nodes.is_empty());
+    assert!(nodes.iter().all(|n| !n.id.is_empty() && !n.hostname.is_empty()), "{nodes:?}");
+    assert!(nodes.iter().any(|n| !n.logins.is_empty()), "each server's logins come too: {nodes:?}");
+    // The same servers as the web API lists (which needs its own code).
+    let code = fresh_code(secret, &mut used).await;
+    let web = teleport::list_nodes(&cluster, password, &code).await.unwrap();
+    let ids = |v: &[teleport::Node]| {
+        let mut i: Vec<(String, String, Vec<String>)> = v
+            .iter()
+            .map(|n| {
+                (n.id.clone(), n.hostname.clone(), {
+                    let mut l = n.logins.clone();
+                    l.sort();
+                    l
+                })
+            })
+            .collect();
+        i.sort();
+        i
+    };
+    assert_eq!(ids(&nodes), ids(&web));
     let node = &nodes[0];
     let login = node.logins.iter().find(|l| state.logins.contains(l)).cloned().unwrap_or(state.logins[0].clone());
 

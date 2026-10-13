@@ -11,10 +11,26 @@ use crate::bridge::{EventKind, MULTI_RUN};
 use crate::session::Shared;
 
 pub enum TeleportMsg {
-    Checked { address: String, pin: Option<String>, result: Result<ClusterInfo, String>, untrusted: Option<String> },
-    LoggedIn { cluster: Box<Cluster>, result: Result<CertState, String> },
-    Found { cluster: ClusterId, result: Result<Vec<Node>, String> },
-    Password { cluster: ClusterId, password: Option<String> },
+    Checked {
+        address: String,
+        pin: Option<String>,
+        result: Result<ClusterInfo, String>,
+        untrusted: Option<String>,
+    },
+    LoggedIn {
+        cluster: Box<Cluster>,
+        result: Result<CertState, String>,
+    },
+    /// `with_login`: listed with the login's certificate (no code needed).
+    Found {
+        cluster: ClusterId,
+        result: Result<Vec<Node>, String>,
+        with_login: bool,
+    },
+    Password {
+        cluster: ClusterId,
+        password: Option<String>,
+    },
 }
 
 /// What the app has to do (it owns the connections and sessions).
@@ -50,6 +66,12 @@ pub struct TeleportWindow {
     remember: bool,
     code: String,
     find_code: String,
+    /// List this cluster's servers as soon as its login is in place.
+    list_soon: Option<ClusterId>,
+    /// Clusters whose servers were listed (or tried) since the window opened.
+    listed: BTreeSet<ClusterId>,
+    /// Listing with the login failed here: offer the web API with a code.
+    needs_code: BTreeSet<ClusterId>,
     busy: bool,
     message: Option<(String, bool)>,
     found: Option<(ClusterId, Vec<(Node, bool)>)>,
@@ -108,6 +130,9 @@ impl TeleportWindow {
                             format!("Logged in for {}. Server logins: {}.", remaining(&state), state.logins.join(", ")),
                             false,
                         ));
+                        // A new login may well list where the old one could not.
+                        self.needs_code.remove(&cluster.id);
+                        self.list_soon = Some(cluster.id);
                         actions.push(TeleportAction::Save(cluster));
                     }
                     Err(e) => {
@@ -116,10 +141,19 @@ impl TeleportWindow {
                     }
                 }
             }
-            TeleportMsg::Found { cluster, result } => {
+            TeleportMsg::Found { cluster, result, with_login } => {
                 self.busy = false;
                 self.find_code.clear();
                 match result {
+                    Err(e) if with_login => {
+                        self.needs_code.insert(cluster);
+                        self.message = Some((
+                            format!(
+                                "Could not list the servers with your login: {e}. You can list them with a code instead."
+                            ),
+                            true,
+                        ));
+                    }
                     Ok(nodes) => {
                         let known: BTreeSet<&str> = store
                             .get(cluster)
@@ -132,7 +166,15 @@ impl TeleportWindow {
                                 (n, new)
                             })
                             .collect::<Vec<_>>();
-                        self.message = Some((format!("{} server(s) found.", rows.len()), false));
+                        let new = rows.iter().filter(|(_, n)| *n).count();
+                        self.message = Some((
+                            match (rows.len(), new) {
+                                (0, _) => "No servers you can log in to.".to_string(),
+                                (n, 0) => format!("{n} server(s); all are in your connection list already."),
+                                (n, new) => format!("{n} server(s), {new} not in your connection list yet (ticked)."),
+                            },
+                            false,
+                        ));
                         self.found = Some((cluster, rows));
                     }
                     Err(e) => self.message = Some((e, true)),
@@ -207,6 +249,7 @@ impl TeleportWindow {
         });
         if !open {
             self.open = false;
+            self.listed.clear();
             self.password.clear();
             self.code.clear();
             self.find_code.clear();
@@ -390,27 +433,67 @@ impl TeleportWindow {
         });
         ui.separator();
         ui.label(RichText::new("Servers").strong());
-        ui.label(
-            RichText::new(
-                "Finding servers signs in to the cluster's web API, which takes its own code (each code works once).",
-            )
-            .weak(),
-        );
-        ui.horizontal(|ui| {
-            ui.label("Code");
-            ui.add(egui::TextEdit::singleline(&mut self.find_code).hint_text("a new code").desired_width(120.0));
-            if ui.add_enabled(!self.busy && !self.password.is_empty(), egui::Button::new("Find servers")).clicked() {
-                self.busy = true;
-                self.message = None;
-                let cluster = c.clone();
-                let (password, code, events) = (self.password.clone(), self.find_code.clone(), shared.events.clone());
-                shared.rt.spawn(async move {
-                    let result = teleport::list_nodes(&cluster, &password, &code).await.map_err(|e| format!("{e:#}"));
-                    events.send(MULTI_RUN, EventKind::Teleport(TeleportMsg::Found { cluster: cluster.id, result }));
-                });
-            }
-        });
+        // Listed with the login as soon as there is one: after logging in, or
+        // when the window opens on a cluster already logged in to.
+        let auto = logged_in
+            && !self.busy
+            && !self.needs_code.contains(&c.id)
+            && (self.list_soon == Some(c.id) || !self.listed.contains(&c.id));
+        let mut refresh = false;
+        if logged_in {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Every server you can log in to, found with your login.").weak());
+                refresh = ui.add_enabled(!self.busy, egui::Button::new("Refresh")).clicked();
+            });
+        } else {
+            ui.label(RichText::new("Log in to see the servers you can reach.").weak());
+        }
+        if auto || refresh {
+            self.list_soon = None;
+            self.listed.insert(c.id);
+            self.needs_code.remove(&c.id);
+            self.busy = true;
+            let (cluster, tdir, events) = (c.clone(), tdir.clone(), shared.events.clone());
+            shared.rt.spawn(async move {
+                let result = malasdoh_core::teleport_api::list_nodes_with_login(&cluster, &tdir)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                events.send(
+                    MULTI_RUN,
+                    EventKind::Teleport(TeleportMsg::Found { cluster: cluster.id, result, with_login: true }),
+                );
+            });
+        }
+        if self.needs_code.contains(&c.id) {
+            ui.label(
+                RichText::new(
+                    "Or list them through the cluster's web API, which takes its own code (each works once):",
+                )
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                ui.label("Code");
+                ui.add(egui::TextEdit::singleline(&mut self.find_code).hint_text("a new code").desired_width(120.0));
+                if ui.add_enabled(!self.busy && !self.password.is_empty(), egui::Button::new("Find servers")).clicked()
+                {
+                    self.busy = true;
+                    self.message = None;
+                    let cluster = c.clone();
+                    let (password, code, events) =
+                        (self.password.clone(), self.find_code.clone(), shared.events.clone());
+                    shared.rt.spawn(async move {
+                        let result =
+                            teleport::list_nodes(&cluster, &password, &code).await.map_err(|e| format!("{e:#}"));
+                        events.send(
+                            MULTI_RUN,
+                            EventKind::Teleport(TeleportMsg::Found { cluster: cluster.id, result, with_login: false }),
+                        );
+                    });
+                }
+            });
+        }
         let mut added = false;
+        let known: BTreeSet<&str> = c.hosts.iter().map(String::as_str).collect();
         if let Some((cid, rows)) = self.found.as_mut().filter(|(cid, _)| *cid == c.id) {
             let cid = *cid;
             let logins: BTreeSet<String> = rows.iter().flat_map(|(n, _)| n.logins.iter().cloned()).collect();
@@ -424,11 +507,14 @@ impl TeleportWindow {
             egui::ScrollArea::vertical().id_salt("tp-nodes").max_height(220.0).show(ui, |ui| {
                 for (n, on) in rows.iter_mut() {
                     let labels: Vec<String> = n.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
-                    let text = if labels.is_empty() {
+                    let mut text = if labels.is_empty() {
                         n.hostname.clone()
                     } else {
                         format!("{}   {}", n.hostname, labels.join(" "))
                     };
+                    if known.contains(teleport::host_pattern(&n.id, n.port()).as_str()) {
+                        text.push_str("   (in your list)");
+                    }
                     ui.checkbox(on, text).on_hover_text(format!("logins: {}", n.logins.join(", ")));
                 }
             });
@@ -468,6 +554,9 @@ impl TeleportWindow {
             {
                 actions.push(TeleportAction::LogOut(c.id));
                 self.message = Some(("Logged out.".into(), false));
+                if self.found.as_ref().is_some_and(|(id, _)| *id == c.id) {
+                    self.found = None;
+                }
             }
             if ui.button("Remove cluster").on_hover_text("Its connections stay, but cannot log in").clicked() {
                 actions.push(TeleportAction::Remove(c.id));

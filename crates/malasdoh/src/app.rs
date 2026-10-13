@@ -247,7 +247,9 @@ impl App {
             .expect("tokio runtime");
         let (events, rx) = Events::new(cc.egui_ctx.clone());
         let settings = Settings::load(&paths.settings_file());
-        cc.egui_ctx.set_visuals(if settings.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
+        // The theme itself, not just its colours: egui otherwise follows the
+        // system theme, so on a light Windows desktop "Dark mode" was ignored.
+        cc.egui_ctx.set_theme(if settings.dark_mode { egui::Theme::Dark } else { egui::Theme::Light });
         let font_error = apply_fonts(&cc.egui_ctx, &settings.mono_font_file).err();
         let mut toast = font_error.map(|e| (format!("Could not use the terminal font: {e}"), true, Instant::now()));
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_else(|e| {
@@ -1762,7 +1764,7 @@ impl App {
         );
         self.show_settings = open;
         if self.settings != before {
-            ctx.set_visuals(if self.settings.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
+            ctx.set_theme(if self.settings.dark_mode { egui::Theme::Dark } else { egui::Theme::Light });
             if self.settings.mono_font_file != before.mono_font_file
                 && let Err(e) = apply_fonts(ctx, &self.settings.mono_font_file)
             {

@@ -45,6 +45,20 @@ pub struct LocalBrowser {
     show_hidden: bool,
 }
 
+/// On Windows, `canonicalize` gives `\\?\C:\...` (a "verbatim" path) and
+/// `\\?\UNC\server\share`. Show and keep the ordinary forms people type.
+fn without_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        // Only drive paths: other verbatim paths have no ordinary form.
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => p,
+    }
+}
+
 fn home() -> PathBuf {
     malasdoh_core::paths::expand_tilde("~")
 }
@@ -72,7 +86,7 @@ impl LocalBrowser {
     pub fn navigate(&mut self, to: PathBuf) {
         match std::fs::read_dir(&to) {
             Ok(_) => {
-                self.path = to.canonicalize().unwrap_or(to);
+                self.path = to.canonicalize().map(without_verbatim).unwrap_or(to);
                 self.input = self.path.display().to_string();
                 self.selected.clear();
                 self.refresh();
@@ -271,5 +285,19 @@ impl LocalBrowser {
             actions.push(LocalAction::Download { paths: p.paths.clone(), dir: self.path.clone() });
         }
         actions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_windows_paths_read_normally() {
+        let p = |s: &str| without_verbatim(PathBuf::from(s)).to_string_lossy().into_owned();
+        assert_eq!(p(r"\\?\Z:\tmp\files"), r"Z:\tmp\files");
+        assert_eq!(p(r"\\?\UNC\nas\share\dir"), r"\\nas\share\dir");
+        assert_eq!(p(r"\\?\Volume{abc}\x"), r"\\?\Volume{abc}\x");
+        assert_eq!(p("/home/me"), "/home/me");
     }
 }

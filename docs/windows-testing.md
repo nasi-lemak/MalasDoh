@@ -108,6 +108,17 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   and received. Close the connection: after a moment it says not running.
 - [ ] 7.4 If your configuration has `DNS =`, a connection to an internal
   name (not an IP) works.
+- [ ] 7.5 Right after the import in 7.1, the window tests the configuration
+  by itself: **OK** for the server address, the handshake and (with `DNS =`)
+  traffic through the tunnel. Type a server behind it, e.g. `10.0.0.5:22`,
+  next to **Test** and press it: that line says reachable too.
+- [ ] 7.6 Paste your configuration again with the `Endpoint` port changed to
+  a wrong one and import it as "broken": its test says **Failed** at
+  Handshake, with a reason. Remove it afterwards.
+- [ ] 7.7 Right-click a group in the sidebar → **Use WireGuard for all** →
+  your configuration: the message says how many connections changed; edit
+  one to see its Proxy. **Stop using WireGuard for all** puts them back to
+  direct.
 
 ## 8. Safety nets
 

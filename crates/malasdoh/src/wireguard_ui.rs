@@ -1,9 +1,12 @@
 //! Connection → WireGuard…: import a WireGuard configuration so connections
 //! can go through MalasDoh's own tunnel (no WireGuard install, no admin).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use egui::RichText;
 use malasdoh_core::sftp::human_size;
-use malasdoh_core::wireguard::{self, WgConfig, WgEntry, WgStore};
+use malasdoh_core::wireguard::{self, TestStep, WgConfig, WgEntry, WgStore};
 
 /// What the app does for the window (it owns the store and the keychain).
 pub enum WgAction {
@@ -12,7 +15,12 @@ pub enum WgAction {
     Add(WgEntry, String, String),
     Rename(uuid::Uuid, String),
     Remove(uuid::Uuid),
+    /// Test this configuration, and optionally a server through it.
+    Test(uuid::Uuid, Option<(String, u16)>),
 }
+
+/// Where a running test puts its steps when it ends.
+pub type TestSlot = Arc<Mutex<Option<Vec<TestStep>>>>;
 
 #[derive(Default)]
 pub struct WireGuardWindow {
@@ -23,6 +31,52 @@ pub struct WireGuardWindow {
     message: Option<String>,
     renaming: Option<(uuid::Uuid, String)>,
     confirm_remove: Option<uuid::Uuid>,
+    /// The "server:port" typed next to each configuration's Test button.
+    targets: HashMap<uuid::Uuid, String>,
+    tests: HashMap<uuid::Uuid, TestSlot>,
+}
+
+/// "host:port" into its parts; an empty text means no server to try.
+fn target_of(text: &str) -> Result<Option<(String, u16)>, String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let (host, port) = match t.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && !h.contains(':') => (h, p),
+        _ => return Err("give the server as host:port, e.g. 10.0.0.5:22".into()),
+    };
+    match port.parse::<u16>() {
+        Ok(p) if p > 0 => Ok(Some((host.trim_matches(['[', ']']).to_string(), p))),
+        _ => Err(format!("\"{port}\" is not a port number")),
+    }
+}
+
+fn test_ui(ui: &mut egui::Ui, slot: &TestSlot) {
+    let steps = slot.lock().unwrap().clone();
+    let Some(steps) = steps else {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new("Testing… (up to about 20 s)").small());
+        });
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        return;
+    };
+    let good = egui::Color32::from_rgb(0x5c, 0xb8, 0x5c);
+    for s in &steps {
+        let (mark, color) = match s.ok {
+            Some(true) => ("OK", good),
+            Some(false) => ("Failed", ui.visuals().error_fg_color),
+            None => ("Skipped", ui.visuals().weak_text_color()),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(mark).small().strong().color(color));
+            ui.label(RichText::new(format!("{}: {}", s.what, s.detail)).small());
+        });
+    }
+    if steps.iter().all(|s| s.ok != Some(false)) {
+        ui.label(RichText::new("The tunnel works.").small().color(good));
+    }
 }
 
 /// One line about a stored configuration: its address and server(s).
@@ -44,6 +98,11 @@ impl WireGuardWindow {
     /// What happened to an import, from the app once it is stored.
     pub fn imported(&mut self, msg: String) {
         self.message = Some(msg);
+    }
+
+    /// A test the app started for a configuration.
+    pub fn testing(&mut self, id: uuid::Uuid, slot: TestSlot) {
+        self.tests.insert(id, slot);
     }
 
     /// `used`: how many connections use each configuration.
@@ -132,6 +191,33 @@ impl WireGuardWindow {
                         ui.label(RichText::new("not running (starts with the first connection that uses it)").small().weak());
                     }
                 }
+                ui.horizontal(|ui| {
+                    let busy = self.tests.get(&e.id).is_some_and(|s| s.lock().unwrap().is_none());
+                    let target = self.targets.entry(e.id).or_default();
+                    let parsed = target_of(target);
+                    if ui
+                        .add_enabled(!busy && parsed.is_ok(), egui::Button::new("Test"))
+                        .on_hover_text(
+                            "Starts a separate tunnel for a moment and checks the server's address, the handshake, \
+                             and traffic through it. Connections already using this tunnel are not affected.",
+                        )
+                        .clicked()
+                        && let Ok(t) = &parsed
+                    {
+                        out.push(WgAction::Test(e.id, t.clone()));
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(target)
+                            .hint_text("and a server through it, e.g. 10.0.0.5:22 (optional)")
+                            .desired_width(300.0),
+                    );
+                    if let Err(m) = parsed {
+                        ui.colored_label(ui.visuals().error_fg_color, RichText::new(m).small());
+                    }
+                });
+                if let Some(slot) = self.tests.get(&e.id) {
+                    test_ui(ui, slot);
+                }
                 ui.add_space(4.0);
             }
             ui.separator();
@@ -202,6 +288,8 @@ impl WireGuardWindow {
             self.text.clear();
             self.message = None;
             self.error = None;
+            // Finished results go; a test still running reports next time.
+            self.tests.retain(|_, s| s.lock().unwrap().is_none());
         }
         out
     }

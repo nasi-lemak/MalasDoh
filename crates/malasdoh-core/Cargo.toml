@@ -41,7 +41,7 @@ bytes = "1"
 # Built-in WireGuard: the protocol, and a small TCP/IP stack inside the tunnel.
 boringtun = { version = "=0.7.1", default-features = false }
 socket2 = "0.6"
-smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-cubic", "socket-dns", "proto-dns"] }
+smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-cubic", "socket-udp", "socket-dns", "proto-dns"] }
 
 [dev-dependencies]
 tempfile.workspace = true

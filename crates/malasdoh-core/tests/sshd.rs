@@ -1443,6 +1443,10 @@ async fn compression_speed() {
     }
 }
 
+/// The WireGuard tests share the server, its DNS address and the tunnel
+/// registry, so they run one at a time.
+static WIREGUARD_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A name server for the test tunnel: every A query gets `answer`.
 async fn tiny_dns(bind: &str, answer: [u8; 4]) -> tokio::task::JoinHandle<()> {
     let sock = tokio::net::UdpSocket::bind(bind).await.expect("bind DNS");
@@ -1469,6 +1473,7 @@ async fn tiny_dns(bind: &str, answer: [u8; 4]) -> tokio::task::JoinHandle<()> {
 /// otherwise.
 #[tokio::test]
 async fn wireguard_tunnel_end_to_end() {
+    let _serial = WIREGUARD_TESTS.lock().await;
     use malasdoh_core::transfer::{self, Checker, TransferOptions};
     use malasdoh_core::wireguard::{self, WgConfig};
     let Ok(conf_path) = std::env::var("MALASDOH_WIREGUARD") else {
@@ -1547,6 +1552,72 @@ async fn wireguard_tunnel_end_to_end() {
     p.proxy = malasdoh_core::proxy::Proxy::WireGuard { tunnel: id2, name: "wrong".into() };
     let e = ssh::connect(vec![p], &ctx).await.err().expect("no handshake");
     assert!(format!("{e:#}").contains("no handshake"), "{e:#}");
+}
+
+/// The WireGuard window's Test against the server in MALASDOH_WIREGUARD:
+/// every step passes with a good configuration, and each kind of mistake
+/// stops at the right step.
+#[tokio::test]
+async fn wireguard_connection_test() {
+    let _serial = WIREGUARD_TESTS.lock().await;
+    use malasdoh_core::wireguard::{self, WgConfig};
+    let Ok(conf_path) = std::env::var("MALASDOH_WIREGUARD") else {
+        eprintln!("skipped: set MALASDOH_WIREGUARD to a client .conf for a server at 10.9.9.1");
+        return;
+    };
+    let text = std::fs::read_to_string(&conf_path).unwrap();
+    let _dns = tiny_dns("10.9.9.1:53", [10, 9, 9, 1]).await;
+    let listener = tokio::net::TcpListener::bind("10.9.9.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let show = |steps: &[wireguard::TestStep]| {
+        steps.iter().map(|s| format!("{:?} {}: {}", s.ok, s.what, s.detail)).collect::<Vec<_>>().join("\n")
+    };
+
+    // As the app keeps it: the key apart from the text.
+    let key = WgConfig::private_key_text(&text).unwrap();
+    let good = WgConfig::from_stored(&WgConfig::strip_private_key(&text), Some(&key)).unwrap();
+    let steps = wireguard::test(&good, Some(("10.9.9.1", port))).await;
+    let all = show(&steps);
+    assert_eq!(steps.len(), 4, "{all}");
+    assert!(steps.iter().all(|s| s.ok == Some(true)), "{all}");
+    assert!(wireguard::running().is_empty(), "the test does not leave a tunnel running");
+
+    // A closed port on a reachable address still counts as reachable.
+    drop(listener);
+    let steps = wireguard::test(&good, Some(("10.9.9.1", port))).await;
+    let last = steps.last().unwrap();
+    assert_eq!(last.ok, Some(true), "{}", show(&steps));
+    assert!(last.detail.contains("nothing accepts"), "{}", show(&steps));
+
+    // An address the server does not pass traffic on to.
+    let steps = wireguard::test(&good, Some(("10.9.9.77", 22))).await;
+    assert_eq!(steps.last().unwrap().ok, Some(false), "{}", show(&steps));
+    assert_eq!(steps.iter().filter(|s| s.ok == Some(true)).count(), 3, "{}", show(&steps));
+
+    // The wrong server key: no handshake, and the message says why it may be.
+    let mut wrong = good.clone();
+    wrong.peers[0].public_key = [7u8; 32];
+    let steps = wireguard::test(&wrong, None).await;
+    let last = steps.last().unwrap();
+    assert_eq!(last.what, "Handshake", "{}", show(&steps));
+    assert_eq!(last.ok, Some(false));
+    assert!(last.detail.contains("key does not match"), "{}", last.detail);
+
+    // Nothing listening on the endpoint's port.
+    let mut closed = good.clone();
+    closed.peers[0].endpoint = "127.0.0.1:1".into();
+    let steps = wireguard::test(&closed, None).await;
+    let last = steps.last().unwrap();
+    assert_eq!(last.ok, Some(false), "{}", show(&steps));
+    assert!(last.detail.contains("nothing listens"), "{}", last.detail);
+
+    // A name that does not exist.
+    let mut unknown = good.clone();
+    unknown.peers[0].endpoint = "no-such-host.invalid:51820".into();
+    let steps = wireguard::test(&unknown, None).await;
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].what, "Server address");
+    assert_eq!(steps[0].ok, Some(false));
 }
 
 /// Diagnostics, not run by default: raw TCP through the tunnel to a sink

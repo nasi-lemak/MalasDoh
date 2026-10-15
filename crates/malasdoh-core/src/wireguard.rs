@@ -25,7 +25,7 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use bytes::Bytes;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::{dns, tcp};
+use smoltcp::socket::{dns, tcp, udp};
 use smoltcp::wire::{DnsQueryType, HardwareAddress, IpAddress, IpCidr};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::UdpSocket;
@@ -196,6 +196,15 @@ impl WgConfig {
         })
     }
 
+    /// A stored configuration with its key: in the text itself (computers
+    /// without a keychain), or `key` from the keychain.
+    pub fn from_stored(text: &str, key: Option<&str>) -> Result<Self> {
+        if Self::private_key_text(text).is_some() {
+            return Self::parse(text);
+        }
+        Self::parse_with_key(text, key.context("its private key is missing; import the configuration again")?)
+    }
+
     pub fn parse_with_key(text: &str, private_key: &str) -> Result<Self> {
         let mut full = String::new();
         let mut put = false;
@@ -328,11 +337,37 @@ pub struct TunnelStatus {
     pub handshake: bool,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    /// Each peer, in configuration order.
+    pub peers: Vec<PeerStatus>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PeerStatus {
+    pub endpoint: String,
+    pub handshake: bool,
+    /// The system reported the endpoint refused a datagram (ICMP "port
+    /// unreachable"): nothing listens there.
+    pub refused: bool,
 }
 
 enum Cmd {
-    Connect { ip: IpAddr, port: u16, reply: oneshot::Sender<Result<tokio::io::DuplexStream>> },
-    Resolve { name: String, reply: oneshot::Sender<Result<Vec<IpAddr>>> },
+    Connect {
+        ip: IpAddr,
+        port: u16,
+        reply: oneshot::Sender<Result<tokio::io::DuplexStream>>,
+    },
+    Resolve {
+        name: String,
+        reply: oneshot::Sender<Result<Vec<IpAddr>>>,
+    },
+    /// Start a handshake with every peer now (one otherwise waits for traffic).
+    Handshake,
+    /// Send one UDP datagram through the tunnel and wait for any answer.
+    Probe {
+        to: (IpAddr, u16),
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<()>>,
+    },
 }
 
 type Registry = Mutex<HashMap<(uuid::Uuid, u64), Weak<Tunnel>>>;
@@ -396,6 +431,175 @@ impl Tunnel {
         let ips = rx.await.map_err(|_| anyhow::anyhow!("the tunnel stopped"))??;
         ips.into_iter().next().with_context(|| format!("{name} has no address"))
     }
+}
+
+impl Tunnel {
+    fn send(&self, c: Cmd) -> Result<()> {
+        self.cmd.try_send(c).map_err(|_| anyhow::anyhow!("the tunnel stopped"))?;
+        self.notify.notify_one();
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Testing a configuration
+
+/// One step of [`test`]: `ok` is `None` when it was not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestStep {
+    pub what: String,
+    pub ok: Option<bool>,
+    pub detail: String,
+}
+
+fn step(what: &str, ok: Option<bool>, detail: impl Into<String>) -> TestStep {
+    TestStep { what: what.into(), ok, detail: detail.into() }
+}
+
+/// A DNS question for the root's name servers: any server answers it,
+/// even one that refuses to recurse.
+fn dns_probe() -> Vec<u8> {
+    vec![0x4d, 0x44, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1]
+}
+
+/// Check a configuration step by step, with a tunnel of its own (running
+/// connections are not touched): the server's address, a handshake with
+/// each peer, traffic both ways inside the tunnel (the tunnel's DNS
+/// server), and optionally a TCP connection to `target`. Stops at the
+/// first step that fails.
+pub async fn test(config: &WgConfig, target: Option<(&str, u16)>) -> Vec<TestStep> {
+    let mut out = Vec::new();
+    // 1. The servers' addresses.
+    for p in &config.peers {
+        match tokio::net::lookup_host(p.endpoint.as_str()).await.map(|mut a| a.next()) {
+            Ok(Some(a)) if a.to_string() == p.endpoint => {
+                out.push(step("Server address", Some(true), p.endpoint.clone()))
+            }
+            Ok(Some(a)) => out.push(step("Server address", Some(true), format!("{} is {a}", p.endpoint))),
+            _ => {
+                out.push(step(
+                    "Server address",
+                    Some(false),
+                    format!(
+                        "{} could not be looked up: check the Endpoint line, and this computer's network",
+                        p.endpoint
+                    ),
+                ));
+                return out;
+            }
+        }
+    }
+    let t = match start(config.clone()).await {
+        Ok(t) => t,
+        Err(e) => {
+            out.push(step("Handshake", Some(false), format!("{e:#}")));
+            return out;
+        }
+    };
+    // 2. A handshake with every peer.
+    let started = std::time::Instant::now();
+    let _ = t.send(Cmd::Handshake);
+    let deadline = Duration::from_secs(6);
+    let status = loop {
+        let st = t.status.lock().unwrap().clone();
+        let done = !st.peers.is_empty() && st.peers.iter().all(|p| p.handshake || p.refused);
+        if done || started.elapsed() > deadline {
+            break st;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let mut all = true;
+    for (p, st) in config.peers.iter().zip(&status.peers) {
+        if st.handshake {
+            out.push(step(
+                "Handshake",
+                Some(true),
+                format!("{} answered in {} ms", p.endpoint, started.elapsed().as_millis()),
+            ));
+        } else if st.refused {
+            all = false;
+            out.push(step(
+                "Handshake",
+                Some(false),
+                format!(
+                    "{}: its computer says nothing listens on that UDP port. The port in Endpoint is wrong, or \
+                     WireGuard is not running there.",
+                    p.endpoint
+                ),
+            ));
+        } else {
+            all = false;
+            out.push(step(
+                "Handshake",
+                Some(false),
+                format!(
+                    "{}: no answer in {} s. Most likely UDP to it is blocked (some networks let only web traffic \
+                     out), the server is down, or a key does not match (this side's key is not one the server \
+                     knows, or PublicKey is not the server's). WireGuard stays silent to packets it does not \
+                     accept, so these look the same from here.",
+                    p.endpoint,
+                    deadline.as_secs()
+                ),
+            ));
+        }
+    }
+    if !all {
+        return out;
+    }
+    // 3. Traffic both ways inside the tunnel: the tunnel's DNS server.
+    match config.dns.first() {
+        Some(dns) => {
+            let (reply, rx) = oneshot::channel();
+            let sent = t.send(Cmd::Probe { to: (*dns, 53), payload: dns_probe(), reply });
+            let t0 = std::time::Instant::now();
+            match (sent, rx.await) {
+                (Ok(()), Ok(Ok(()))) => out.push(step(
+                    "Traffic through the tunnel",
+                    Some(true),
+                    format!("the DNS server {dns} answered through the tunnel in {} ms", t0.elapsed().as_millis()),
+                )),
+                _ => {
+                    out.push(step(
+                        "Traffic through the tunnel",
+                        Some(false),
+                        format!(
+                            "the handshake works, but the DNS server {dns} did not answer through the tunnel. The \
+                             server may not pass traffic on (its AllowedIPs for this side, or IP forwarding), or \
+                             the DNS address is wrong."
+                        ),
+                    ));
+                    return out;
+                }
+            }
+        }
+        None if target.is_none() => out.push(step(
+            "Traffic through the tunnel",
+            None,
+            "not checked: the configuration has no DNS server; give a server and port to try",
+        )),
+        None => {}
+    }
+    // 4. A server through it.
+    if let Some((host, port)) = target {
+        let t = Arc::new(t);
+        let r = tokio::time::timeout(Duration::from_secs(10), t.connect(host, port)).await;
+        out.push(match r {
+            Ok(Ok(_)) => step(&format!("{host}:{port}"), Some(true), "reachable through the tunnel"),
+            Ok(Err(e)) if format!("{e:#}").contains("refused") => step(
+                &format!("{host}:{port}"),
+                Some(true),
+                "reachable through the tunnel, but nothing accepts connections on that port",
+            ),
+            Ok(Err(e)) => step(&format!("{host}:{port}"), Some(false), format!("{e:#}")),
+            Err(_) => step(
+                &format!("{host}:{port}"),
+                Some(false),
+                "no answer through the tunnel in 10 s: the address may be wrong, or the WireGuard server does not \
+                 pass traffic on to it",
+            ),
+        });
+    }
+    out
 }
 
 /// A connection through the tunnel; it keeps the tunnel running.
@@ -540,6 +744,8 @@ async fn start(config: WgConfig) -> Result<Tunnel> {
     let secret = StaticSecret::from(config.private_key);
     let mut peers = Vec::new();
     let mut receivers = Vec::new();
+    let refused_flags: Arc<Vec<std::sync::atomic::AtomicBool>> =
+        Arc::new(config.peers.iter().map(|_| Default::default()).collect());
     let (dgram_tx, dgram_rx) = mpsc::channel::<(usize, Vec<u8>)>(1024);
     for (i, p) in config.peers.iter().enumerate() {
         let endpoint = tokio::net::lookup_host(p.endpoint.as_str())
@@ -562,7 +768,7 @@ async fn start(config: WgConfig) -> Result<Tunnel> {
         // the end: Windows reports a refused earlier datagram (ICMP) as
         // "connection reset" on the next receive, e.g. while the server
         // restarts.
-        let (udp2, tx) = (udp.clone(), dgram_tx.clone());
+        let (udp2, tx, refused) = (udp.clone(), dgram_tx.clone(), refused_flags.clone());
         let receiver = tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
             loop {
@@ -573,7 +779,15 @@ async fn start(config: WgConfig) -> Result<Tunnel> {
                         }
                     }
                     Err(_) if tx.is_closed() => break,
-                    Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+                    Err(e) => {
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset
+                        ) {
+                            refused[i].store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await
+                    }
                 }
             }
         });
@@ -583,7 +797,8 @@ async fn start(config: WgConfig) -> Result<Tunnel> {
     let (cmd, cmd_rx) = mpsc::channel(64);
     let notify = Arc::new(Notify::new());
     let status = Arc::new(Mutex::new(TunnelStatus::default()));
-    let task = Task::new(config, peers, status.clone(), notify.clone());
+    let mut task = Task::new(config, peers, status.clone(), notify.clone());
+    task.refused = refused_flags;
     tokio::spawn(async move {
         task.run(cmd_rx, dgram_rx).await;
         // The tunnel is over: stop listening for its datagrams too.
@@ -608,6 +823,8 @@ struct Task {
     started: std::time::Instant,
     next_port: u16,
     scratch: Vec<u8>,
+    refused: Arc<Vec<std::sync::atomic::AtomicBool>>,
+    probes: Vec<(SocketHandle, oneshot::Sender<Result<()>>, std::time::Instant)>,
 }
 
 impl Task {
@@ -653,6 +870,8 @@ impl Task {
             started,
             next_port,
             scratch: vec![0u8; 65536 + 256],
+            refused: Default::default(),
+            probes: Vec::new(),
         }
     }
 
@@ -703,6 +922,7 @@ impl Task {
                 }
             }
             self.lookups_service();
+            self.probes_service();
         }
         // Tell the far side these connections are over.
         for c in &self.conns {
@@ -715,6 +935,27 @@ impl Task {
 
     fn command(&mut self, c: Cmd) {
         match c {
+            Cmd::Handshake => {
+                for p in &mut self.peers {
+                    if let TunnResult::WriteToNetwork(d) = p.tunn.format_handshake_initiation(&mut self.scratch, false)
+                    {
+                        let _ = p.udp.try_send(d);
+                    }
+                }
+            }
+            Cmd::Probe { to, payload, reply } => {
+                let mut s = udp::Socket::new(
+                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]),
+                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]),
+                );
+                self.next_port = if self.next_port >= 60999 { 40000 } else { self.next_port + 1 };
+                if s.bind(self.next_port).is_err() || s.send_slice(&payload, (smol_ip(to.0), to.1)).is_err() {
+                    let _ = reply.send(Err(anyhow::anyhow!("could not send through the tunnel")));
+                    return;
+                }
+                let h = self.sockets.add(s);
+                self.probes.push((h, reply, std::time::Instant::now()));
+            }
             Cmd::Connect { ip, port, reply } => {
                 if self.config.peer_for(ip).is_none() {
                     let _ = reply.send(Err(anyhow::anyhow!(
@@ -782,6 +1023,21 @@ impl Task {
                     }
                 }
                 self.lookups.push(Lookup { handles, found: Vec::new(), reply, since: std::time::Instant::now() });
+            }
+        }
+    }
+
+    fn probes_service(&mut self) {
+        let mut i = 0;
+        while i < self.probes.len() {
+            let (h, _, since) = &self.probes[i];
+            let got = self.sockets.get_mut::<udp::Socket>(*h).recv().is_ok();
+            if got || since.elapsed() > Duration::from_secs(5) {
+                let (h, reply, _) = self.probes.remove(i);
+                self.sockets.remove(h);
+                let _ = reply.send(if got { Ok(()) } else { Err(anyhow::anyhow!("no answer")) });
+            } else {
+                i += 1;
             }
         }
     }
@@ -1002,6 +1258,16 @@ impl Task {
         }
         st.tx_bytes = tx;
         st.rx_bytes = rx;
+        st.peers = self
+            .peers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| PeerStatus {
+                endpoint: p.endpoint.to_string(),
+                handshake: p.tunn.time_since_last_handshake().is_some(),
+                refused: self.refused.get(i).is_some_and(|r| r.load(std::sync::atomic::Ordering::Relaxed)),
+            })
+            .collect();
     }
 }
 

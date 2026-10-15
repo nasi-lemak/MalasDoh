@@ -161,7 +161,14 @@ remote-editing loop, where they are weakest:
   Names are looked up with the tunnel's `DNS =` servers, so internal names
   work. Several peers are routed by their AllowedIPs. Tested against the
   official wireguard-go server: about 35 MB/s on a fast link, and 1–1.5 MB/s
-  over one with 50 ms of latency and 2% packet loss.
+  over one with 50 ms of latency and 2% packet loss. **Test** (also run by
+  itself right after Import) checks the server's address, the handshake and
+  traffic through the tunnel, and optionally a `host:port` behind it, and
+  says which step failed and the likely reason: nothing listening on the UDP
+  port, no answer (UDP blocked, server down, or a key mismatch), or a
+  server that does not pass traffic on. Right-click a group → **Use
+  WireGuard for all** sets every connection in it at once (those that start
+  at a jump host or log in with Teleport are left alone, and it says so).
 - **Compression** per connection (`ssh -C`), for text and logs over slow
   links.
 - **Folder compare and sync**: local to server, server to local, or both ways
@@ -309,6 +316,9 @@ and no host key questions. Otherwise it is skipped.
 `10.9.9.1` (e.g. `wireguard-go` on a `wg0` interface): a server name looked
 up through the tunnel's DNS, a command and a checked SFTP transfer through
 the tunnel, two connections sharing it, the tunnel ending with the last one,
-and a clear error for a wrong server key.
+and a clear error for a wrong server key. `wireguard_connection_test` runs
+the window's Test against the same server: all steps pass, and a wrong key,
+a closed port, an unknown name and an address the server does not route to
+each stop at the right step.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is planned next.

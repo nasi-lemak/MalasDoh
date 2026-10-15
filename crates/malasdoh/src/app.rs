@@ -700,6 +700,8 @@ impl App {
         let mut connect = None;
         let mut edit = None;
         let mut duplicate = None;
+        let mut group_proxy = None;
+        let tunnels: Vec<(uuid::Uuid, String)> = self.wg_store.tunnels.iter().map(|t| (t.id, t.name.clone())).collect();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for group in self.profiles.groups() {
                 let mut members: Vec<&Profile> = self
@@ -718,7 +720,7 @@ impl App {
                 }
                 members.sort_by_key(|p| p.display_name().to_lowercase());
                 let title = if group.is_empty() { "Ungrouped".to_string() } else { group.clone() };
-                egui::CollapsingHeader::new(title).default_open(true).show(ui, |ui| {
+                let shown = egui::CollapsingHeader::new(title).default_open(true).show(ui, |ui| {
                     for p in members {
                         let r = ui.selectable_label(false, format!("🖥 {}", p.display_name())).on_hover_text(format!(
                             "{}\n{}{}",
@@ -755,8 +757,33 @@ impl App {
                         });
                     }
                 });
+                shown.header_response.context_menu(|ui| {
+                    if tunnels.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("Use WireGuard for all"))
+                            .on_disabled_hover_text("Import a configuration first: Connection → WireGuard…");
+                    } else {
+                        ui.menu_button("Use WireGuard for all", |ui| {
+                            for (id, name) in &tunnels {
+                                if ui.button(name).clicked() {
+                                    group_proxy = Some((
+                                        group.clone(),
+                                        malasdoh_core::proxy::Proxy::WireGuard { tunnel: *id, name: name.clone() },
+                                    ));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    if ui.button("Stop using WireGuard for all").clicked() {
+                        group_proxy = Some((group.clone(), malasdoh_core::proxy::Proxy::None));
+                        ui.close();
+                    }
+                });
             }
         });
+        if let Some((group, proxy)) = group_proxy {
+            self.set_group_proxy(&group, proxy);
+        }
         ui.label(RichText::new("Double-click to connect").weak().small());
         if let Some(id) = connect {
             self.connect(id);
@@ -2035,7 +2062,7 @@ impl eframe::App for App {
                 .count()
         };
         let actions = self.wg_win.ui(&ctx, &self.wg_store, &used);
-        self.wireguard_actions(actions);
+        self.wireguard_actions(&ctx, actions);
         if let Some((id, key)) = self.keys_win.ui(&ctx, &self.sessions, &self.shared)
             && let Some(mut p) = self.profiles.get(id).cloned()
         {

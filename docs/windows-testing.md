@@ -119,6 +119,10 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   your configuration: the message says how many connections changed; edit
   one to see its Proxy. **Stop using WireGuard for all** puts them back to
   direct.
+- [ ] 7.8 **Edit…** on your configuration: the PrivateKey line says
+  "(saved, not shown)", never the key. Add a typo to an AllowedIPs line and
+  press **Save**: it says "Not saved" with the line number. Fix it, Save: it
+  tests again, and connections using it still connect.
 
 ## 8. Safety nets
 

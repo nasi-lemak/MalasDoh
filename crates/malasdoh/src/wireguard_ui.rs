@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::RichText;
 use malasdoh_core::sftp::human_size;
-use malasdoh_core::wireguard::{self, TestStep, WgConfig, WgEntry, WgStore};
+use malasdoh_core::wireguard::{self, Edited, KEY_FROM_FILE, KEY_NOT_SHOWN, TestStep, WgConfig, WgEntry, WgStore};
 
 /// What the app does for the window (it owns the store and the keychain).
 pub enum WgAction {
@@ -14,6 +14,8 @@ pub enum WgAction {
     /// text is kept for computers without a keychain.
     Add(WgEntry, String, String),
     Rename(uuid::Uuid, String),
+    /// Store the edited text (checked), and a new key if it has one.
+    Edit(uuid::Uuid, Edited),
     Remove(uuid::Uuid),
     /// Test this configuration, and optionally a server through it.
     Test(uuid::Uuid, Option<(String, u16)>),
@@ -31,9 +33,20 @@ pub struct WireGuardWindow {
     message: Option<String>,
     renaming: Option<(uuid::Uuid, String)>,
     confirm_remove: Option<uuid::Uuid>,
+    editing: Option<Editing>,
     /// The "server:port" typed next to each configuration's Test button.
     targets: HashMap<uuid::Uuid, String>,
     tests: HashMap<uuid::Uuid, TestSlot>,
+}
+
+/// A stored configuration being edited.
+struct Editing {
+    id: uuid::Uuid,
+    text: String,
+    /// The key of a .conf file loaded into the editor (shown as
+    /// [`KEY_FROM_FILE`]).
+    file_key: Option<String>,
+    error: Option<String>,
 }
 
 /// "host:port" into its parts; an empty text means no server to try.
@@ -95,14 +108,84 @@ fn summary(e: &WgEntry) -> String {
 }
 
 impl WireGuardWindow {
-    /// What happened to an import, from the app once it is stored.
-    pub fn imported(&mut self, msg: String) {
+    /// What happened to an import or an edit, from the app once it is stored.
+    pub fn tell(&mut self, msg: String) {
         self.message = Some(msg);
     }
 
     /// A test the app started for a configuration.
     pub fn testing(&mut self, id: uuid::Uuid, slot: TestSlot) {
         self.tests.insert(id, slot);
+    }
+
+    /// The editor under a configuration being edited; `running`: its tunnel
+    /// is in use now.
+    fn editor_ui(&mut self, ui: &mut egui::Ui, running: bool) -> Option<WgAction> {
+        let ed = self.editing.as_mut()?;
+        let mut action = None;
+        let mut close = false;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("wg-edit", ed.id)).max_height(220.0).show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut ed.text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_rows(8)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+            ui.label(
+                RichText::new(format!(
+                    "The private key is not shown: leave \"PrivateKey = {KEY_NOT_SHOWN}\" as it is to keep it, or \
+                     paste a new key in its place."
+                ))
+                .small()
+                .weak(),
+            );
+            if running {
+                ui.label(
+                    RichText::new("Connections open through it keep the old settings until they reconnect.")
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                );
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    match wireguard::check_edit(&ed.text, ed.file_key.as_deref()) {
+                        Ok(edited) => {
+                            action = Some(WgAction::Edit(ed.id, edited));
+                            close = true;
+                        }
+                        Err(e) => ed.error = Some(format!("Not saved: {e:#}")),
+                    }
+                }
+                if ui.button("Replace from a .conf file…").clicked()
+                    && let Some(f) = rfd::FileDialog::new()
+                        .add_filter("WireGuard", &["conf"])
+                        .set_title("WireGuard configuration")
+                        .pick_file()
+                {
+                    match std::fs::read_to_string(&f) {
+                        Ok(t) => {
+                            ed.file_key = WgConfig::private_key_text(&t);
+                            let shown = if ed.file_key.is_some() { KEY_FROM_FILE } else { KEY_NOT_SHOWN };
+                            ed.text = WgConfig::for_editing(&t, shown);
+                            ed.error = None;
+                        }
+                        Err(e) => ed.error = Some(format!("{}: {e}", f.display())),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+            if let Some(e) = &ed.error {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            }
+        });
+        if close {
+            self.editing = None;
+        }
+        action
     }
 
     /// `used`: how many connections use each configuration.
@@ -143,6 +226,16 @@ impl WireGuardWindow {
                             if ui.small_button("Rename").clicked() {
                                 self.renaming = Some((e.id, e.name.clone()));
                             }
+                            let editing = self.editing.as_ref().is_some_and(|x| x.id == e.id);
+                            if ui.add_enabled(!editing, egui::Button::new("Edit…").small()).clicked() {
+                                self.editing = Some(Editing {
+                                    id: e.id,
+                                    text: WgConfig::for_editing(&e.config, KEY_NOT_SHOWN),
+                                    file_key: None,
+                                    error: None,
+                                });
+                                self.message = None;
+                            }
                         }
                     }
                     let n = used(e.id);
@@ -161,6 +254,12 @@ impl WireGuardWindow {
                     }
                 });
                 ui.label(RichText::new(summary(e)).small());
+                if self.editing.as_ref().is_some_and(|x| x.id == e.id) {
+                    let used_now = running.iter().any(|(id, _)| *id == e.id);
+                    if let Some(a) = self.editor_ui(ui, used_now) {
+                        out.push(a);
+                    }
+                }
                 if e.key_in_file {
                     ui.label(
                         RichText::new("Private key kept in MalasDoh's settings file (no keychain on this computer).")
@@ -288,6 +387,7 @@ impl WireGuardWindow {
             self.text.clear();
             self.message = None;
             self.error = None;
+            self.editing = None;
             // Finished results go; a test still running reports next time.
             self.tests.retain(|_, s| s.lock().unwrap().is_none());
         }

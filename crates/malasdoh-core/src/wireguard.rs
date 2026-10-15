@@ -188,6 +188,17 @@ impl WgConfig {
             .join("\n")
     }
 
+    /// A stored configuration as it is shown for editing: its PrivateKey
+    /// line (if any) replaced by one saying `placeholder`, so the key is
+    /// never on screen.
+    pub fn for_editing(text: &str, placeholder: &str) -> String {
+        let stripped = Self::strip_private_key(text);
+        match Self::with_private_key(&stripped, placeholder) {
+            Ok(t) => t,
+            Err(_) => stripped,
+        }
+    }
+
     /// The private key's text as written in `text`, if it has one.
     pub fn private_key_text(text: &str) -> Option<String> {
         text.lines().find_map(|l| {
@@ -206,6 +217,12 @@ impl WgConfig {
     }
 
     pub fn parse_with_key(text: &str, private_key: &str) -> Result<Self> {
+        Self::parse(&Self::with_private_key(text, private_key)?)
+    }
+
+    /// `text` (without a PrivateKey line) with `private_key` put back in
+    /// its [Interface] section.
+    pub fn with_private_key(text: &str, private_key: &str) -> Result<String> {
         let mut full = String::new();
         let mut put = false;
         for l in text.lines() {
@@ -219,7 +236,7 @@ impl WgConfig {
         if !put {
             bail!("the configuration has no [Interface] section");
         }
-        Self::parse(&full)
+        Ok(full)
     }
 
     /// The peer whose AllowedIPs best match `ip` (longest prefix).
@@ -255,6 +272,42 @@ fn contains((net, len): (IpAddr, u8), ip: IpAddr) -> bool {
 
 // ---------------------------------------------------------------------------
 // Stored configurations
+
+/// The PrivateKey line's value while a stored configuration is edited.
+pub const KEY_NOT_SHOWN: &str = "(saved, not shown)";
+/// The same, for a .conf file loaded into the editor: its key, not shown.
+pub const KEY_FROM_FILE: &str = "(from the file, not shown)";
+
+/// An edited configuration, checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edited {
+    /// The text to store, without a PrivateKey line.
+    pub config: String,
+    /// A new private key; `None` keeps the saved one.
+    pub new_key: Option<String>,
+}
+
+/// Checks an edited configuration (see [`WgConfig::for_editing`]).
+/// A PrivateKey line left as [`KEY_NOT_SHOWN`] or [`KEY_FROM_FILE`], or
+/// taken out, means `hidden` (the key of a file loaded into the editor)
+/// or, without one, the saved key; any other value is a new key.
+pub fn check_edit(text: &str, hidden: Option<&str>) -> Result<Edited> {
+    let new_key = match WgConfig::private_key_text(text) {
+        Some(v) if v != KEY_NOT_SHOWN && v != KEY_FROM_FILE => Some(v),
+        _ => hidden.map(str::to_string),
+    };
+    let config = WgConfig::strip_private_key(text);
+    // A stand-in key when the saved one is kept: the rest is what is checked.
+    let check_key = new_key.clone().unwrap_or_else(|| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string());
+    WgConfig::parse_with_key(&config, &check_key).map_err(|e| {
+        if new_key.is_some() && format!("{e:#}").to_lowercase().contains("privatekey") {
+            e.context("the new PrivateKey is not a WireGuard key (leave the line as it was to keep the saved one)")
+        } else {
+            e
+        }
+    })?;
+    Ok(Edited { config, new_key })
+}
 
 /// An imported configuration. `config` normally has no PrivateKey line:
 /// the key is in the keychain as [`crate::secrets::SecretKey::WireGuardKey`].
@@ -1360,6 +1413,49 @@ AllowedIPs = 192.168.10.128/25
         assert!(!stripped.contains(&key));
         assert!(WgConfig::parse(&stripped).is_err());
         assert_eq!(WgConfig::parse_with_key(&stripped, &key).unwrap(), WgConfig::parse(CONF).unwrap());
+    }
+
+    #[test]
+    fn editing_never_shows_the_key() {
+        let key = WgConfig::private_key_text(CONF).unwrap();
+        let stored = WgConfig::strip_private_key(CONF);
+        // Stored with or without the key, the editor shows neither.
+        for text in [stored.as_str(), CONF] {
+            let shown = WgConfig::for_editing(text, KEY_NOT_SHOWN);
+            assert!(!shown.contains(&key), "{shown}");
+            assert!(shown.starts_with("[Interface]\nPrivateKey = (saved, not shown)\n"), "{shown}");
+        }
+        let shown = WgConfig::for_editing(&stored, KEY_NOT_SHOWN);
+
+        // Left alone: the saved key stays, the rest is stored as edited.
+        let edit = shown.replace("AllowedIPs = 192.168.10.128/25", "AllowedIPs = 192.168.10.128/25, 31.7.87.10/32");
+        let e = check_edit(&edit, None).unwrap();
+        assert_eq!(e.new_key, None);
+        assert!(e.config.contains("31.7.87.10/32"));
+        assert!(!e.config.to_lowercase().contains("privatekey"));
+        let c = WgConfig::parse_with_key(&e.config, &key).unwrap();
+        assert_eq!(c.peer_for("31.7.87.10".parse().unwrap()), Some(1));
+
+        // Taking the line out keeps it too.
+        let e = check_edit(&WgConfig::strip_private_key(&shown), None).unwrap();
+        assert_eq!(e.new_key, None);
+
+        // A new key replaces it; a bad one is refused, saying so.
+        let other = "cHJpdmF0ZWtleXByaXZhdGVrZXlwcml2YXRla2V5MDA=";
+        let e = check_edit(&shown.replace(KEY_NOT_SHOWN, other), None).unwrap();
+        assert_eq!(e.new_key.as_deref(), Some(other));
+        let err = format!("{:#}", check_edit(&shown.replace(KEY_NOT_SHOWN, "nonsense"), None).unwrap_err());
+        assert!(err.contains("not a WireGuard key"), "{err}");
+
+        // A file loaded into the editor brings its key, unseen.
+        let loaded = WgConfig::for_editing(CONF, KEY_FROM_FILE);
+        assert!(!loaded.contains(&key));
+        let e = check_edit(&loaded, Some(&key)).unwrap();
+        assert_eq!(e.new_key.as_deref(), Some(key.as_str()));
+
+        // Mistakes elsewhere are refused before anything is saved.
+        assert!(check_edit(&shown.replace("Endpoint = 203.0.113.9:51820\n", ""), None).is_err());
+        assert!(check_edit(&shown.replace("[Interface]", "[Interfac]"), None).is_err());
     }
 
     #[test]

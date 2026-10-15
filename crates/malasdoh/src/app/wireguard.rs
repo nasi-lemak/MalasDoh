@@ -4,7 +4,7 @@
 use malasdoh_core::proxy::Proxy;
 use malasdoh_core::secrets::SecretKey;
 
-use malasdoh_core::wireguard::{self, TestStep, WgConfig};
+use malasdoh_core::wireguard::{self, Edited, TestStep, WgConfig};
 
 use super::App;
 use crate::wireguard_ui::{TestSlot, WgAction};
@@ -40,7 +40,7 @@ impl App {
                             )
                         }
                     };
-                    self.wg_win.imported(msg);
+                    self.wg_win.tell(msg);
                     let id = entry.id;
                     self.wg_store.tunnels.push(entry);
                     // A bad configuration shows up before any connection uses it.
@@ -64,6 +64,7 @@ impl App {
                         self.save_profiles();
                     }
                 }
+                WgAction::Edit(id, edited) => self.wireguard_edit(ctx, id, edited),
                 WgAction::Test(id, target) => {
                     self.start_wg_test(ctx, id, target);
                     continue;
@@ -156,5 +157,49 @@ impl App {
             msg.push_str(" Open ones change when they reconnect.");
         }
         self.notify(msg, false);
+    }
+}
+
+impl App {
+    /// Stores an edited configuration under the same id, so the
+    /// connections using it keep using it, and tests it.
+    fn wireguard_edit(&mut self, ctx: &egui::Context, id: uuid::Uuid, edited: Edited) {
+        let Some(entry) = self.wg_store.tunnels.iter_mut().find(|t| t.id == id) else { return };
+        let mut note = String::new();
+        let stored = match edited.new_key {
+            // The keychain still has it; or the old text did.
+            None if !entry.key_in_file => Ok(edited.config),
+            None => match WgConfig::private_key_text(&entry.config) {
+                Some(k) => WgConfig::with_private_key(&edited.config, &k),
+                None => Err(anyhow::anyhow!("its saved private key is missing; paste it on the PrivateKey line")),
+            },
+            Some(k) => match self.shared.secrets.set(&SecretKey::WireGuardKey(id), &k) {
+                Ok(()) => {
+                    note = " The new private key is in the system keychain.".into();
+                    entry.key_in_file = false;
+                    Ok(edited.config)
+                }
+                Err(e) => {
+                    // An old key there must not outlive this one.
+                    self.shared.secrets.delete(&SecretKey::WireGuardKey(id));
+                    note = format!(" No keychain ({e}): the new private key is kept in MalasDoh's settings file.");
+                    entry.key_in_file = true;
+                    WgConfig::with_private_key(&edited.config, &k)
+                }
+            },
+        };
+        match stored {
+            Ok(text) => {
+                entry.config = text;
+                let name = entry.name.clone();
+                let open = wireguard::running().iter().any(|(t, _)| *t == id);
+                self.wg_win.tell(format!(
+                    "Saved \"{name}\".{note}{}",
+                    if open { " Connections open through it keep the old settings until they reconnect." } else { "" }
+                ));
+                self.start_wg_test(ctx, id, None);
+            }
+            Err(e) => self.wg_win.tell(format!("Not saved: {e:#}")),
+        }
     }
 }

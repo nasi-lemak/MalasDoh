@@ -169,6 +169,10 @@ remote-editing loop, where they are weakest:
   server that does not pass traffic on. Right-click a group → **Use
   WireGuard for all** sets every connection in it at once (those that start
   at a jump host or log in with Teleport are left alone, and it says so).
+  **Edit…** changes a configuration in place (say, one more AllowedIPs
+  entry, or a new .conf from your admin), so the connections using it keep
+  using it: the private key is never shown, the text is checked before it
+  replaces a working one, and it is tested again after saving.
 - **Compression** per connection (`ssh -C`), for text and logs over slow
   links.
 - **Folder compare and sync**: local to server, server to local, or both ways

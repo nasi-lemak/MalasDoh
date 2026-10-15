@@ -83,6 +83,8 @@ pub struct ConnectContext<P> {
     pub default_keys: Vec<PathBuf>,
     /// The agent socket to forward instead of `SSH_AUTH_SOCK` (Unix; tests).
     pub agent_socket: Option<PathBuf>,
+    /// WireGuard configurations (without private keys), by tunnel id.
+    pub wireguard: crate::wireguard::Configs,
 }
 
 impl<P> ConnectContext<P> {
@@ -90,7 +92,7 @@ impl<P> ConnectContext<P> {
         let default_keys = user_ssh_dir()
             .map(|d| ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|n| d.join(n)).collect())
             .unwrap_or_default();
-        Self { known_hosts, secrets, prompter, default_keys, agent_socket: None }
+        Self { known_hosts, secrets, prompter, default_keys, agent_socket: None, wireguard: Default::default() }
     }
 }
 
@@ -393,6 +395,26 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
 /// Reach the first hop through its proxy, asking for (and remembering, if
 /// told) the proxy password.
 async fn through_proxy<P: Prompter>(hop: &Profile, ctx: &ConnectContext<P>) -> Result<Box<dyn crate::proxy::Stream>> {
+    if let crate::proxy::Proxy::WireGuard { tunnel, name } = &hop.proxy {
+        let conf = ctx.wireguard.read().unwrap().get(tunnel).cloned().with_context(|| {
+            format!("the WireGuard tunnel \"{name}\" is not set up on this computer (Connection menu, WireGuard…)")
+        })?;
+        // The key is in the keychain, or (computers without one) still in
+        // the stored configuration.
+        let config = if crate::wireguard::WgConfig::private_key_text(&conf).is_some() {
+            crate::wireguard::WgConfig::parse(&conf)
+        } else {
+            let key = secret_get(&ctx.secrets, SecretKey::WireGuardKey(*tunnel)).await.with_context(|| {
+                format!("the private key of the WireGuard tunnel \"{name}\" is missing; import its configuration again")
+            })?;
+            crate::wireguard::WgConfig::parse_with_key(&conf, &key)
+        }
+        .with_context(|| format!("the WireGuard configuration \"{name}\""))?;
+        let t = crate::wireguard::tunnel(*tunnel, &config).await?;
+        ctx.prompter.status(&format!("Connecting to {} through WireGuard {name}…", hop.destination()));
+        let s = t.connect(&hop.host, hop.port).await.with_context(|| format!("through WireGuard {name}"))?;
+        return Ok(Box::new(s));
+    }
     let Some(user) = hop.proxy.auth_user() else {
         return crate::proxy::connect(&hop.proxy, &hop.host, hop.port, &hop.user, None).await;
     };

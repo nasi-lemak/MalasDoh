@@ -30,6 +30,10 @@ pub enum Proxy {
     /// Run locally; `%h`, `%p` and `%r` become the server's host, port and
     /// user, as in OpenSSH's ProxyCommand.
     Command { command: String },
+    /// MalasDoh's own WireGuard tunnel (see [`crate::wireguard`]); the
+    /// configuration is kept apart and its private key in the keychain.
+    #[serde(rename = "wireguard")]
+    WireGuard { tunnel: uuid::Uuid, name: String },
     /// A Teleport proxy that serves SSH on its web port (TLS routing): TLS
     /// with the `teleport-proxy-ssh` protocol, its certificate checked
     /// against the cluster's own CA (PEM in `ca_file`, from the login).
@@ -56,6 +60,7 @@ impl Proxy {
             Proxy::Http { host, port, .. } => format!("HTTP proxy {host}:{port}"),
             Proxy::Command { command } => format!("command `{command}`"),
             Proxy::TeleportTls { host, port, .. } => format!("Teleport {host}:{port}"),
+            Proxy::WireGuard { name, .. } => format!("WireGuard {name}"),
         }
     }
 }
@@ -90,6 +95,8 @@ pub async fn connect(
             Ok(Box::new(http_connect(s, host, port, auth).await?))
         }
         Proxy::Command { command } => Ok(Box::new(spawn_command(command, host, port, ssh_user)?)),
+        // Needs the configuration and key: opened by the caller (ssh.rs).
+        Proxy::WireGuard { name, .. } => bail!("the WireGuard tunnel {name} is not available here"),
     }
 }
 

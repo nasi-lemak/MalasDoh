@@ -213,7 +213,9 @@ impl MultiEdit {
 
     fn connect_ctx(shared: &Shared) -> ConnectContext<UiPrompter> {
         let prompter = Arc::new(UiPrompter { events: shared.events.clone(), session: MULTI_RUN });
-        ConnectContext::new(shared.known_hosts.clone(), shared.secrets.clone(), prompter)
+        let mut ctx = ConnectContext::new(shared.known_hosts.clone(), shared.secrets.clone(), prompter);
+        ctx.wireguard = shared.wireguard.clone();
+        ctx
     }
 
     /// Connect and get ready to read and write files as the chosen user.

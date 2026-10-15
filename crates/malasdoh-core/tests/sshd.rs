@@ -1442,3 +1442,138 @@ async fn compression_speed() {
         eprintln!("10 MB of log text at 1 MB/s, compression {compression}: {:.1?}", t.elapsed());
     }
 }
+
+/// A name server for the test tunnel: every A query gets `answer`.
+async fn tiny_dns(bind: &str, answer: [u8; 4]) -> tokio::task::JoinHandle<()> {
+    let sock = tokio::net::UdpSocket::bind(bind).await.expect("bind DNS");
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while let Ok((n, from)) = sock.recv_from(&mut buf).await {
+            if n < 12 {
+                continue;
+            }
+            let q = &buf[..n];
+            // Header: same id, response, recursion available, 1 answer.
+            let mut r = vec![q[0], q[1], 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
+            r.extend_from_slice(&q[12..]); // the question as asked
+            r.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+            r.extend_from_slice(&answer);
+            let _ = sock.send_to(&r, from).await;
+        }
+    })
+}
+
+/// Through MalasDoh's own WireGuard tunnel, to a real WireGuard server.
+/// Needs one at `10.9.9.1` (e.g. wireguard-go on wg0) whose client
+/// configuration is in the file `MALASDOH_WIREGUARD` names; skipped
+/// otherwise.
+#[tokio::test]
+async fn wireguard_tunnel_end_to_end() {
+    use malasdoh_core::transfer::{self, Checker, TransferOptions};
+    use malasdoh_core::wireguard::{self, WgConfig};
+    let Ok(conf_path) = std::env::var("MALASDOH_WIREGUARD") else {
+        eprintln!("skipped: set MALASDOH_WIREGUARD to a client .conf for a server at 10.9.9.1");
+        return;
+    };
+    let text = std::fs::read_to_string(&conf_path).unwrap();
+    let Some(sshd) = start_sshd_with(|_| "ListenAddress 10.9.9.1".into()) else { return };
+    let env = Env::with(sshd).unwrap();
+    let _dns = tiny_dns("10.9.9.1:53", [10, 9, 9, 1]).await;
+
+    // The configuration as the app keeps it: key in the keychain.
+    let id = uuid::Uuid::new_v4();
+    let key = WgConfig::private_key_text(&text).unwrap();
+    env.secrets.set(&SecretKey::WireGuardKey(id), &key).unwrap();
+    let ctx = env.ctx(TestPrompter::accepting());
+    ctx.wireguard.write().unwrap().insert(id, WgConfig::strip_private_key(&text));
+    let mut p = env.profile();
+    // A name only the tunnel's DNS server knows.
+    p.host = "sshbox.wg.test".into();
+    p.proxy = malasdoh_core::proxy::Proxy::WireGuard { tunnel: id, name: "test".into() };
+
+    let conn = Arc::new(ssh::connect(vec![p.clone()], &ctx).await.unwrap_or_else(|e| panic!("{e:#}")));
+    let out = conn.exec("echo through-wireguard; echo $SSH_CONNECTION", None).await.unwrap();
+    let out = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.starts_with("through-wireguard"), "{out}");
+    assert!(out.contains("10.9.9.2"), "the server sees the tunnel address: {out}");
+    assert_eq!(wireguard::running().len(), 1);
+    assert!(wireguard::running()[0].1.handshake);
+
+    // A second connection shares the tunnel.
+    let conn2 = Arc::new(ssh::connect(vec![p.clone()], &ctx).await.unwrap());
+    assert_eq!(wireguard::running().len(), 1, "one tunnel for both");
+
+    // A real transfer through it, checked by checksum on the server.
+    let fs = conn.open_sftp().await.unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let f = local.path().join("blob.bin");
+    std::fs::write(&f, noise(24 << 20, 5)).unwrap();
+    let opts = TransferOptions::default();
+    let mut job = transfer::plan_upload(std::slice::from_ref(&f), &env.scratch(), &opts).unwrap();
+    let t = std::time::Instant::now();
+    transfer::run(&fs, &mut job, &opts, &Progress::default(), opts.limit(), Some(&Checker::new(conn.clone(), None)))
+        .await
+        .unwrap();
+    assert!(job.is_finished() && job.verified() == 1, "{:?} {:?}", job.failures(), job.unverified);
+    eprintln!("24 MiB through the tunnel in {:.1?}", t.elapsed());
+    let out = conn2.exec("echo second", None).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "second");
+
+    // When both are gone, so is the tunnel.
+    drop(fs);
+    conn.disconnect().await;
+    conn2.disconnect().await;
+    drop((conn, conn2));
+    for _ in 0..50 {
+        if wireguard::running().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(wireguard::running().is_empty(), "the tunnel ends with its last connection");
+
+    // A wrong server key: no handshake, and a message that says so.
+    let wrong = text
+        .lines()
+        .map(
+            |l| if l.starts_with("PublicKey") { "PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=" } else { l },
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    let id2 = uuid::Uuid::new_v4();
+    env.secrets.set(&SecretKey::WireGuardKey(id2), &key).unwrap();
+    ctx.wireguard.write().unwrap().insert(id2, WgConfig::strip_private_key(&wrong));
+    p.host = "10.9.9.1".into();
+    p.proxy = malasdoh_core::proxy::Proxy::WireGuard { tunnel: id2, name: "wrong".into() };
+    let e = ssh::connect(vec![p], &ctx).await.err().expect("no handshake");
+    assert!(format!("{e:#}").contains("no handshake"), "{e:#}");
+}
+
+/// Diagnostics, not run by default: raw TCP through the tunnel to a sink
+/// at 10.9.9.1:9000, reporting every pause in progress over 1 s.
+#[tokio::test]
+#[ignore]
+async fn wireguard_tcp_probe() {
+    use malasdoh_core::wireguard::{self, WgConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(conf_path) = std::env::var("MALASDOH_WIREGUARD") else { return };
+    let cfg = WgConfig::parse(&std::fs::read_to_string(conf_path).unwrap()).unwrap();
+    let t = wireguard::tunnel(uuid::Uuid::new_v4(), &cfg).await.unwrap();
+    let mut s = t.connect("10.9.9.1", 9000).await.unwrap();
+    let chunk = vec![7u8; 64 * 1024];
+    let total = 24usize << 20;
+    let (start, mut last, mut sent) = (std::time::Instant::now(), std::time::Instant::now(), 0usize);
+    while sent < total {
+        s.write_all(&chunk).await.unwrap();
+        sent += chunk.len();
+        let gap = last.elapsed();
+        if gap > std::time::Duration::from_secs(1) {
+            eprintln!("pause of {gap:.1?} at {} MiB", sent >> 20);
+        }
+        last = std::time::Instant::now();
+    }
+    s.shutdown().await.unwrap();
+    let mut back = String::new();
+    s.read_to_string(&mut back).await.unwrap();
+    eprintln!("sent {} MiB in {:.1?}; sink got {}", total >> 20, start.elapsed(), back.trim());
+}

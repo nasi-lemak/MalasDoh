@@ -28,6 +28,7 @@ pub mod teleport_api;
 pub mod text;
 pub mod transfer;
 pub mod validate;
+pub mod wireguard;
 
 pub use paths::AppPaths;
 pub use profile::{AuthMethod, Profile, ProfileId, ProfileStore};

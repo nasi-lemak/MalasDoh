@@ -3,6 +3,7 @@
 
 mod backup;
 mod teleport;
+mod wireguard;
 
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
@@ -61,6 +62,8 @@ pub struct App {
     skip_text: String,
     teleport: malasdoh_core::teleport::TeleportStore,
     teleport_win: crate::teleport_ui::TeleportWindow,
+    wg_store: malasdoh_core::wireguard::WgStore,
+    wg_win: crate::wireguard_ui::WireGuardWindow,
     export_dlg: Option<backup::ExportDialog>,
     import_dlg: Option<backup::ImportDialog>,
     /// "Type into several terminals": the sessions that get what is typed.
@@ -259,6 +262,7 @@ impl App {
         let snippets_path = paths.config_dir.join("snippets.toml");
         let paths_journal = paths.journal_file();
         let settings_skip = settings.transfer.skip.join(", ");
+        let wg_store = malasdoh_core::wireguard::WgStore::load(paths.wireguard_file());
         let paths_teleport = paths.teleport_file();
         // Copies made for external editors are kept a week, then tidied away.
         let cache = paths.edit_cache_dir();
@@ -273,6 +277,7 @@ impl App {
             known_hosts: KnownHosts::standard(paths.known_hosts_file(), vec![paths.teleport_dir().join("known_hosts")]),
             paths,
             transfer: Arc::new(std::sync::RwLock::new(settings.transfer.clone())),
+            wireguard: Arc::new(std::sync::RwLock::new(wg_store.configs())),
         };
         let mut app = Self {
             shared,
@@ -307,6 +312,8 @@ impl App {
             skip_text: settings_skip,
             teleport: malasdoh_core::teleport::TeleportStore::load(paths_teleport),
             teleport_win: Default::default(),
+            wg_store,
+            wg_win: Default::default(),
             broadcast: None,
             export_dlg: None,
             import_dlg: None,
@@ -560,6 +567,14 @@ impl App {
                 if ui.button("Teleport…").on_hover_text("Log in to a Teleport cluster and use its servers").clicked()
                 {
                     self.teleport_win.open = true;
+                    ui.close();
+                }
+                if ui
+                    .button("WireGuard…")
+                    .on_hover_text("Reach servers through a WireGuard tunnel of MalasDoh's own (no install, no admin)")
+                    .clicked()
+                {
+                    self.wg_win.open = true;
                     ui.close();
                 }
                 ui.separator();
@@ -1297,6 +1312,7 @@ impl App {
     }
 
     fn form_ui(&mut self, ctx: &egui::Context) {
+        let tunnels: Vec<(uuid::Uuid, String)> = self.wg_store.tunnels.iter().map(|t| (t.id, t.name.clone())).collect();
         let Some(form) = &mut self.form else { return };
         let mut result: Option<bool> = None;
         let others: Vec<(ProfileId, String)> = self
@@ -1417,7 +1433,7 @@ impl App {
                 ui.checkbox(&mut p.remote_backup, "Also keep a .bak copy next to edited files on the server");
                 ui.end_row();
                 ui.label("Proxy");
-                proxy_editor(ui, &mut p.proxy);
+                proxy_editor(ui, &mut p.proxy, &tunnels);
                 ui.end_row();
                 ui.label("Keepalive");
                 ui.horizontal(|ui| {
@@ -1857,8 +1873,9 @@ impl App {
     }
 }
 
-/// Direct, SOCKS5, HTTP CONNECT, or a command (OpenSSH's ProxyCommand).
-fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
+/// Direct, SOCKS5, HTTP CONNECT, a command (OpenSSH's ProxyCommand), or one
+/// of MalasDoh's WireGuard tunnels.
+fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy, tunnels: &[(uuid::Uuid, String)]) {
     use malasdoh_core::proxy::Proxy;
     ui.vertical(|ui| {
         let kind = match proxy {
@@ -1867,6 +1884,7 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
             Proxy::Http { .. } => "HTTP CONNECT",
             Proxy::Command { .. } => "Command",
             Proxy::TeleportTls { .. } => "Teleport",
+            Proxy::WireGuard { .. } => "WireGuard",
         };
         egui::ComboBox::from_id_salt("proxy-kind").selected_text(kind).show_ui(ui, |ui| {
             if ui.selectable_label(kind == "Direct", "Direct").clicked() {
@@ -1880,6 +1898,12 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
             }
             if ui.selectable_label(kind == "Command", "Command (ProxyCommand)").clicked() && kind != "Command" {
                 *proxy = Proxy::Command { command: "nc -X connect -x proxy:3128 %h %p".into() };
+            }
+            if ui.selectable_label(kind == "WireGuard", "WireGuard").clicked()
+                && kind != "WireGuard"
+                && let Some((id, name)) = tunnels.first()
+            {
+                *proxy = Proxy::WireGuard { tunnel: *id, name: name.clone() };
             }
         });
         match proxy {
@@ -1900,6 +1924,30 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy) {
             Proxy::TeleportTls { host, port, .. } => {
                 ui.label(format!("Teleport proxy at {host}:{port} (set up from the Connection menu, Teleport…)"));
             }
+            Proxy::WireGuard { tunnel, name } => {
+                let shown = tunnels.iter().find(|(id, _)| id == tunnel).map(|(_, n)| n.clone());
+                egui::ComboBox::from_id_salt("wg-tunnel")
+                    .selected_text(shown.clone().unwrap_or_else(|| format!("{name} (missing)")))
+                    .show_ui(ui, |ui| {
+                        for (id, n) in tunnels {
+                            if ui.selectable_label(id == tunnel, n).clicked() {
+                                *tunnel = *id;
+                                *name = n.clone();
+                            }
+                        }
+                    });
+                if shown.is_none() {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "That configuration is not on this computer: import it (Connection menu, WireGuard…).",
+                    );
+                }
+            }
+        }
+        if tunnels.is_empty() && matches!(proxy, Proxy::None) {
+            ui.label(
+                RichText::new("For WireGuard, import a configuration first (Connection menu, WireGuard…).").weak().small(),
+            );
         }
         if !proxy.is_none() {
             ui.label(RichText::new("Used when this is the first hop (a jump host's own proxy is used otherwise).").weak().small());
@@ -1978,6 +2026,16 @@ impl eframe::App for App {
         self.compares.ui(&ctx, &self.sessions, &self.shared);
         let actions = self.teleport_win.ui(&ctx, &self.teleport, &self.shared);
         self.teleport_actions(actions);
+        let profiles = &self.profiles;
+        let used = |id: uuid::Uuid| {
+            profiles
+                .profiles
+                .iter()
+                .filter(|p| matches!(&p.proxy, malasdoh_core::proxy::Proxy::WireGuard { tunnel, .. } if *tunnel == id))
+                .count()
+        };
+        let actions = self.wg_win.ui(&ctx, &self.wg_store, &used);
+        self.wireguard_actions(actions);
         if let Some((id, key)) = self.keys_win.ui(&ctx, &self.sessions, &self.shared)
             && let Some(mut p) = self.profiles.get(id).cloned()
         {

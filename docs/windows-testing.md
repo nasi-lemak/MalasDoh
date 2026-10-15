@@ -96,15 +96,28 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
 - [ ] 6.4 **Log out**, then connect again: the login form opens; after
   logging in, the connection carries on by itself.
 
-## 7. Safety nets
+## 7. WireGuard (if you use it)
 
-- [ ] 7.1 Edit a file without saving, then end MalasDoh in **Task Manager**.
+- [ ] 7.1 **Connection → WireGuard…** → **Open a .conf file…** (the one you
+  would give the WireGuard app) → **Import**. It should say the private key
+  is in the system keychain (Credential Manager), not in MalasDoh's files.
+- [ ] 7.2 Edit a connection to a server behind WireGuard: **Proxy →
+  WireGuard**, pick the configuration, save, connect. No admin prompt, and
+  the WireGuard app does not need to be running (or installed).
+- [ ] 7.3 Back in the WireGuard window it says **Running**, with bytes sent
+  and received. Close the connection: after a moment it says not running.
+- [ ] 7.4 If your configuration has `DNS =`, a connection to an internal
+  name (not an IP) works.
+
+## 8. Safety nets
+
+- [ ] 8.1 Edit a file without saving, then end MalasDoh in **Task Manager**.
   Start it, connect again: it offers the unsaved edits back.
-- [ ] 7.2 **Port forward**: add a local forward (e.g. 8080 → localhost:80 on
+- [ ] 8.2 **Port forward**: add a local forward (e.g. 8080 → localhost:80 on
   the server) and open `http://localhost:8080` in your browser. Windows
   Firewall should not ask (it only listens on 127.0.0.1).
-- [ ] 7.3 Quit with a session open; start again: "Reopen last session" works.
-- [ ] 7.4 **Connection → Export connections…** to a file with a passphrase,
+- [ ] 8.3 Quit with a session open; start again: "Reopen last session" works.
+- [ ] 8.4 **Connection → Export connections…** to a file with a passphrase,
   then **Import connections…** it back: nothing is duplicated.
 
 ## Reporting

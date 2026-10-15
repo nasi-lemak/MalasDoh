@@ -66,6 +66,12 @@ impl AppPaths {
         self.data_dir.join("teleport")
     }
 
+    /// WireGuard configurations, without their private keys (those are in
+    /// the system keychain).
+    pub fn wireguard_file(&self) -> PathBuf {
+        self.config_dir.join("wireguard.toml")
+    }
+
     pub fn teleport_file(&self) -> PathBuf {
         self.config_dir.join("teleport.toml")
     }

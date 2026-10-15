@@ -44,6 +44,8 @@ pub struct Shared {
     pub secrets: Arc<dyn SecretStore>,
     pub known_hosts: KnownHosts,
     pub paths: AppPaths,
+    /// WireGuard configurations (no keys), kept current by the app.
+    pub wireguard: malasdoh_core::wireguard::Configs,
     /// Settings → Transfers, kept current by the app.
     pub transfer: Arc<std::sync::RwLock<malasdoh_core::transfer::TransferOptions>>,
 }
@@ -387,7 +389,8 @@ impl Session {
         let current_dir = self.browser.path.clone();
         shared.rt.spawn(async move {
             let prompter = Arc::new(UiPrompter { events: shared2.events.clone(), session: id });
-            let ctx = ConnectContext::new(shared2.known_hosts.clone(), shared2.secrets.clone(), prompter);
+            let mut ctx = ConnectContext::new(shared2.known_hosts.clone(), shared2.secrets.clone(), prompter);
+            ctx.wireguard = shared2.wireguard.clone();
             let msg = match ssh::connect(chain, &ctx).await {
                 Ok(conn) => {
                     let conn = Arc::new(conn);

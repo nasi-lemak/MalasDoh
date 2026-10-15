@@ -24,6 +24,7 @@
 - Editor: auto-indent, Tab/Shift+Tab, find and replace, go to line, changed-lines gutter
 - PostgreSQL: config check with rollback (`postgres -C`, `pg_hba_file_rules`), restart-needed notes, warnings for removed settings
 - Lasting terminals (tmux/screen) that survive disconnects and app restarts
+- WireGuard built in (userspace tunnel: boringtun + smoltcp), per-connection proxy, keychain-stored keys, tunnel DNS
 - Transfer queue: parallel files, pause/resume, continue interrupted files, temp-name writes, kept times, SHA-256 checks on the server, skip patterns; compression per connection
 - Teleport: password + authenticator login without tsh, server list, proxy jump (separate SSH port or TLS routing), CA trust, login-expired prompt
 - Terminal: themes, font file, copy-on-select, right/middle-click paste,

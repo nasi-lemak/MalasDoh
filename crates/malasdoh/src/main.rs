@@ -28,6 +28,7 @@ mod teleport_ui;
 mod terminal;
 mod textops;
 mod themes;
+mod wireguard_ui;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()

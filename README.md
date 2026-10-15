@@ -151,6 +151,17 @@ remote-editing loop, where they are weakest:
   SHA-256 is compared, computed on the server with `sha256sum` (or `shasum`),
   so nothing is downloaded again. Folder transfers can leave out names or
   patterns (`node_modules, *.tmp`).
+- **WireGuard, built in** (Connection → WireGuard…), like wireproxy: import
+  the `.conf` you would give WireGuard and set a connection's Proxy to it.
+  MalasDoh runs the tunnel itself, so nothing is installed and no admin rights
+  are needed, and only connections set to use it go through it. Its private
+  key goes to the system keychain (on a computer without one, it stays in the
+  owner-only settings file, and the window says so). Connections using the
+  same configuration share one tunnel, which ends with the last of them.
+  Names are looked up with the tunnel's `DNS =` servers, so internal names
+  work. Several peers are routed by their AllowedIPs. Tested against the
+  official wireguard-go server: about 35 MB/s on a fast link, and 1–1.5 MB/s
+  over one with 50 ms of latency and 2% packet loss.
 - **Compression** per connection (`ssh -C`), for text and logs over slow
   links.
 - **Folder compare and sync**: local to server, server to local, or both ways
@@ -292,5 +303,12 @@ user with an authenticator; the secret is the base32 one from its QR code):
 trusting a self-signed proxy, a refused wrong code, login and login again,
 the server list, and a connection through the proxy with a command and SFTP
 and no host key questions. Otherwise it is skipped.
+
+`wireguard_tunnel_end_to_end` (in `tests/sshd.rs`) runs when
+`MALASDOH_WIREGUARD` names a client `.conf` for a WireGuard server at
+`10.9.9.1` (e.g. `wireguard-go` on a `wg0` interface): a server name looked
+up through the tunnel's DNS, a command and a checked SFTP transfer through
+the tunnel, two connections sharing it, the tunnel ending with the last one,
+and a clear error for a wrong server key.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is planned next.

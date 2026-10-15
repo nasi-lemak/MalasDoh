@@ -21,6 +21,8 @@ pub enum SecretKey {
     SudoPassword(ProfileId),
     /// The password for a Teleport cluster's user.
     TeleportPassword(uuid::Uuid),
+    /// A WireGuard tunnel's private key.
+    WireGuardKey(uuid::Uuid),
 }
 
 impl SecretKey {
@@ -31,6 +33,7 @@ impl SecretKey {
             SecretKey::ProxyPassword(id) => format!("proxy-password:{id}"),
             SecretKey::SudoPassword(id) => format!("sudo-password:{id}"),
             SecretKey::TeleportPassword(id) => format!("teleport-password:{id}"),
+            SecretKey::WireGuardKey(id) => format!("wireguard-key:{id}"),
         }
     }
 }

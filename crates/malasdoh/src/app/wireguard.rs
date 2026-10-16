@@ -23,9 +23,8 @@ impl App {
                 WgAction::Add(mut entry, key, full) => {
                     let msg = match self.shared.secrets.set(&SecretKey::WireGuardKey(entry.id), &key) {
                         Ok(()) => format!(
-                            "Imported \"{}\". Its private key is in the system keychain, not in MalasDoh's files. \
-                             Now edit a connection and set its Proxy to WireGuard, \"{}\".",
-                            entry.name, entry.name
+                            "Imported \"{}\". Its private key is in the system keychain, not in MalasDoh's files.",
+                            entry.name
                         ),
                         Err(e) => {
                             // No keychain (some Linux setups): keep the key with
@@ -34,13 +33,13 @@ impl App {
                             entry.key_in_file = true;
                             format!(
                                 "Imported \"{}\". This computer has no keychain ({e}), so its private key is kept in \
-                                 MalasDoh's settings file, readable only by you. Now edit a connection and set its \
-                                 Proxy to WireGuard, \"{}\".",
-                                entry.name, entry.name
+                                 MalasDoh's settings file, readable only by you.",
+                                entry.name
                             )
                         }
                     };
                     self.wg_win.tell(msg);
+                    self.wg_win.imported(entry.id, entry.name.clone());
                     let id = entry.id;
                     self.wg_store.tunnels.push(entry);
                     // A bad configuration shows up before any connection uses it.

@@ -1554,6 +1554,80 @@ async fn wireguard_tunnel_end_to_end() {
     assert!(format!("{e:#}").contains("no handshake"), "{e:#}");
 }
 
+/// Two different tunnels in use at the same time: MALASDOH_WIREGUARD (a
+/// server at 10.9.9.1) and MALASDOH_WIREGUARD2 (another at 10.9.10.1),
+/// with one SSH server listening on both.
+#[tokio::test]
+async fn wireguard_two_tunnels_at_once() {
+    use malasdoh_core::transfer::{self, Checker, TransferOptions};
+    use malasdoh_core::wireguard::{self, WgConfig};
+    let _serial = WIREGUARD_TESTS.lock().await;
+    let (Ok(a), Ok(b)) = (std::env::var("MALASDOH_WIREGUARD"), std::env::var("MALASDOH_WIREGUARD2")) else {
+        eprintln!("skipped: set MALASDOH_WIREGUARD and MALASDOH_WIREGUARD2 (servers at 10.9.9.1 and 10.9.10.1)");
+        return;
+    };
+    let Some(sshd) = start_sshd_with(|_| "ListenAddress 10.9.9.1\nListenAddress 10.9.10.1".into()) else { return };
+    let env = Env::with(sshd).unwrap();
+    let ctx = env.ctx(TestPrompter::accepting());
+    let mut profiles = Vec::new();
+    for (conf, host, name) in [(a, "10.9.9.1", "one"), (b, "10.9.10.1", "two")] {
+        let text = std::fs::read_to_string(conf).unwrap();
+        let id = uuid::Uuid::new_v4();
+        env.secrets.set(&SecretKey::WireGuardKey(id), &WgConfig::private_key_text(&text).unwrap()).unwrap();
+        ctx.wireguard.write().unwrap().insert(id, WgConfig::strip_private_key(&text));
+        let mut p = env.profile();
+        p.host = host.into();
+        p.proxy = malasdoh_core::proxy::Proxy::WireGuard { tunnel: id, name: name.into() };
+        profiles.push(p);
+    }
+
+    let (c1, c2) =
+        tokio::join!(ssh::connect(vec![profiles[0].clone()], &ctx), ssh::connect(vec![profiles[1].clone()], &ctx));
+    let (c1, c2) = (Arc::new(c1.unwrap_or_else(|e| panic!("{e:#}"))), Arc::new(c2.unwrap_or_else(|e| panic!("{e:#}"))));
+    assert_eq!(wireguard::running().len(), 2, "one tunnel each");
+    let (o1, o2) = tokio::join!(c1.exec("echo $SSH_CONNECTION", None), c2.exec("echo $SSH_CONNECTION", None));
+    let (o1, o2) = (
+        String::from_utf8_lossy(&o1.unwrap().stdout).to_string(),
+        String::from_utf8_lossy(&o2.unwrap().stdout).to_string(),
+    );
+    assert!(o1.starts_with("10.9.9.2 ") && o1.contains(" 10.9.9.1 "), "{o1}");
+    assert!(o2.starts_with("10.9.10.2 ") && o2.contains(" 10.9.10.1 "), "{o2}");
+
+    // A checked transfer through each, both at once.
+    let local = tempfile::tempdir().unwrap();
+    let run = |conn: Arc<ssh::Connection>, n: u64| {
+        let f = local.path().join(format!("blob{n}.bin"));
+        std::fs::write(&f, noise(8 << 20, n)).unwrap();
+        let dest = format!("{}/t{n}", env.scratch());
+        std::fs::create_dir_all(&dest).unwrap();
+        async move {
+            let fs = conn.open_sftp().await.unwrap();
+            let opts = TransferOptions::default();
+            let mut job = transfer::plan_upload(std::slice::from_ref(&f), &dest, &opts).unwrap();
+            let checker = Checker::new(conn.clone(), None);
+            transfer::run(&fs, &mut job, &opts, &Progress::default(), opts.limit(), Some(&checker)).await.unwrap();
+            assert!(job.is_finished() && job.verified() == 1, "{:?} {:?}", job.failures(), job.unverified);
+        }
+    };
+    tokio::join!(run(c1.clone(), 1), run(c2.clone(), 2));
+
+    // Each ends with its own connection.
+    c1.disconnect().await;
+    drop(c1);
+    for _ in 0..50 {
+        if wireguard::running().len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(wireguard::running().len(), 1);
+    let out = c2.exec("echo still", None).await.unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "still", "the other tunnel carries on");
+    // Closed properly: the server's end of a tunnelled connection would
+    // otherwise wait for a timeout, as nothing tells it the test is gone.
+    c2.disconnect().await;
+}
+
 /// The WireGuard window's Test against the server in MALASDOH_WIREGUARD:
 /// every step passes with a good configuration, and each kind of mistake
 /// stops at the right step.
@@ -1593,6 +1667,21 @@ async fn wireguard_connection_test() {
     let steps = wireguard::test(&good, Some(("10.9.9.77", 22))).await;
     assert_eq!(steps.last().unwrap().ok, Some(false), "{}", show(&steps));
     assert_eq!(steps.iter().filter(|s| s.ok == Some(true)).count(), 3, "{}", show(&steps));
+
+    // The WireGuard server's own public address, sent into the tunnel: no
+    // answer, and the message says to use its tunnel address.
+    let mut own = good.clone();
+    own.peers[0].allowed_ips.push(("127.0.0.1".parse().unwrap(), 32));
+    let steps = wireguard::test(&own, Some(("127.0.0.1", 22))).await;
+    let last = steps.last().unwrap();
+    assert_eq!(last.ok, Some(false), "{}", show(&steps));
+    assert!(last.detail.contains("own public address") && last.detail.contains("often 10.9.9.1"), "{}", last.detail);
+    let ctx_err = {
+        let t = wireguard::tunnel(uuid::Uuid::new_v4(), &own).await.unwrap();
+        let e = t.connect("127.0.0.1", 22).await.err().expect("no answer");
+        format!("{e:#}")
+    };
+    assert!(ctx_err.contains("own public address"), "{ctx_err}");
 
     // The wrong server key: no handshake, and the message says why it may be.
     let mut wrong = good.clone();

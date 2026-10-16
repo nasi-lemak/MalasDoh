@@ -154,7 +154,8 @@ remote-editing loop, where they are weakest:
 - **WireGuard, built in** (Connection → WireGuard…), like wireproxy: import
   the `.conf` you would give WireGuard and set a connection's Proxy to it.
   MalasDoh runs the tunnel itself, so nothing is installed and no admin rights
-  are needed, and only connections set to use it go through it. Its private
+  are needed, and only connections set to use it go through it. Several
+  configurations can be in use at once, one per connection. Its private
   key goes to the system keychain (on a computer without one, it stays in the
   owner-only settings file, and the window says so). Connections using the
   same configuration share one tunnel, which ends with the last of them.
@@ -166,7 +167,9 @@ remote-editing loop, where they are weakest:
   traffic through the tunnel, and optionally a `host:port` behind it, and
   says which step failed and the likely reason: nothing listening on the UDP
   port, no answer (UDP blocked, server down, or a key mismatch), or a
-  server that does not pass traffic on. Right-click a group → **Use
+  server that does not pass traffic on, or (when you connect to the
+  WireGuard server's own public address through it) that the server is
+  reached at its tunnel address instead. Right-click a group → **Use
   WireGuard for all** sets every connection in it at once (those that start
   at a jump host or log in with Teleport are left alone, and it says so).
   **Edit…** changes a configuration in place (say, one more AllowedIPs
@@ -322,7 +325,11 @@ up through the tunnel's DNS, a command and a checked SFTP transfer through
 the tunnel, two connections sharing it, the tunnel ending with the last one,
 and a clear error for a wrong server key. `wireguard_connection_test` runs
 the window's Test against the same server: all steps pass, and a wrong key,
-a closed port, an unknown name and an address the server does not route to
-each stop at the right step.
+a closed port, an unknown name, an address the server does not route to and
+the server's own public address (with the hint to use its tunnel address)
+each stop at the right step. `wireguard_two_tunnels_at_once` also needs
+`MALASDOH_WIREGUARD2`, a client `.conf` for a second server at `10.9.10.1`:
+a connection and a checked transfer through each tunnel at the same time,
+and one tunnel ending while the other carries on.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is planned next.

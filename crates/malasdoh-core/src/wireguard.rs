@@ -256,6 +256,30 @@ impl WgConfig {
     }
 }
 
+/// For a server that does not answer at the WireGuard server's own public
+/// address: through the tunnel it is usually reached at another one.
+fn own_endpoint_hint(c: &WgConfig) -> String {
+    format!(
+        "It is the WireGuard server's own public address (its Endpoint); inside the tunnel the server usually has \
+         another one{}. Connect to that instead.",
+        tunnel_side_guess(c).map(|g| format!(", often {g}")).unwrap_or_default()
+    )
+}
+
+/// Where the WireGuard server usually is inside the tunnel: the first
+/// address of this side's network (x.y.z.1 when this side has a /32).
+fn tunnel_side_guess(c: &WgConfig) -> Option<IpAddr> {
+    c.addresses.iter().find_map(|(a, len)| match a {
+        IpAddr::V4(v4) => {
+            let len = if *len > 30 { 24 } else { u32::from(*len) };
+            let net = u32::from(*v4) & (u32::MAX << (32 - len));
+            let guess = std::net::Ipv4Addr::from(net + 1);
+            (guess != *v4).then_some(IpAddr::V4(guess))
+        }
+        IpAddr::V6(_) => None,
+    })
+}
+
 fn contains((net, len): (IpAddr, u8), ip: IpAddr) -> bool {
     match (net, ip) {
         (IpAddr::V4(n), IpAddr::V4(i)) => {
@@ -522,9 +546,14 @@ fn dns_probe() -> Vec<u8> {
 /// first step that fails.
 pub async fn test(config: &WgConfig, target: Option<(&str, u16)>) -> Vec<TestStep> {
     let mut out = Vec::new();
+    let mut endpoints = Vec::new();
     // 1. The servers' addresses.
     for p in &config.peers {
-        match tokio::net::lookup_host(p.endpoint.as_str()).await.map(|mut a| a.next()) {
+        let found = tokio::net::lookup_host(p.endpoint.as_str()).await.map(|mut a| a.next());
+        if let Ok(Some(a)) = &found {
+            endpoints.push(a.ip());
+        }
+        match found {
             Ok(Some(a)) if a.to_string() == p.endpoint => {
                 out.push(step("Server address", Some(true), p.endpoint.clone()))
             }
@@ -644,6 +673,11 @@ pub async fn test(config: &WgConfig, target: Option<(&str, u16)>) -> Vec<TestSte
                 "reachable through the tunnel, but nothing accepts connections on that port",
             ),
             Ok(Err(e)) => step(&format!("{host}:{port}"), Some(false), format!("{e:#}")),
+            Err(_) if host.parse::<IpAddr>().is_ok_and(|ip| endpoints.contains(&ip)) => step(
+                &format!("{host}:{port}"),
+                Some(false),
+                format!("no answer through the tunnel in 10 s. {}", own_endpoint_hint(config)),
+            ),
             Err(_) => step(
                 &format!("{host}:{port}"),
                 Some(false),
@@ -1167,7 +1201,10 @@ impl Task {
                     _ if since.elapsed() > CONNECT_TIMEOUT => {
                         let (reply, ..) = c.opening.take().unwrap();
                         let handshake = self.status.lock().unwrap().handshake;
-                        let why = if handshake {
+                        let own = self.peers.iter().any(|p| p.endpoint.ip() == ip);
+                        let why = if handshake && own {
+                            format!("{ip} did not answer through the tunnel. {}", own_endpoint_hint(&self.config))
+                        } else if handshake {
                             format!("{ip} did not answer through the tunnel")
                         } else {
                             "the WireGuard server did not answer (no handshake): check its Endpoint, that UDP can get \
@@ -1456,6 +1493,16 @@ AllowedIPs = 192.168.10.128/25
         // Mistakes elsewhere are refused before anything is saved.
         assert!(check_edit(&shown.replace("Endpoint = 203.0.113.9:51820\n", ""), None).is_err());
         assert!(check_edit(&shown.replace("[Interface]", "[Interfac]"), None).is_err());
+    }
+
+    #[test]
+    fn guesses_the_servers_tunnel_address() {
+        let c = WgConfig::parse(CONF).unwrap();
+        assert_eq!(tunnel_side_guess(&c), Some("10.0.0.1".parse().unwrap()), "a /32 guesses .1 of its /24");
+        let c = WgConfig::parse(&CONF.replace("10.0.0.2/32", "10.8.4.7/22")).unwrap();
+        assert_eq!(tunnel_side_guess(&c), Some("10.8.4.1".parse().unwrap()));
+        let c = WgConfig::parse(&CONF.replace("10.0.0.2/32", "10.0.0.1/24")).unwrap();
+        assert_eq!(tunnel_side_guess(&c), None, "not this side's own address");
     }
 
     #[test]

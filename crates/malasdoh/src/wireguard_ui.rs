@@ -34,6 +34,8 @@ pub struct WireGuardWindow {
     renaming: Option<(uuid::Uuid, String)>,
     confirm_remove: Option<uuid::Uuid>,
     editing: Option<Editing>,
+    /// The configuration just imported: what to do next depends on its test.
+    next_step: Option<(uuid::Uuid, String)>,
     /// The "server:port" typed next to each configuration's Test button.
     targets: HashMap<uuid::Uuid, String>,
     tests: HashMap<uuid::Uuid, TestSlot>,
@@ -111,6 +113,12 @@ impl WireGuardWindow {
     /// What happened to an import or an edit, from the app once it is stored.
     pub fn tell(&mut self, msg: String) {
         self.message = Some(msg);
+        self.next_step = None;
+    }
+
+    /// A configuration was just imported (and is being tested).
+    pub fn imported(&mut self, id: uuid::Uuid, name: String) {
+        self.next_step = Some((id, name));
     }
 
     /// A test the app started for a configuration.
@@ -245,6 +253,10 @@ impl WireGuardWindow {
                         if ui.small_button("Remove").clicked() {
                             out.push(WgAction::Remove(e.id));
                             self.confirm_remove = None;
+                            self.tests.remove(&e.id);
+                            if self.next_step.as_ref().is_some_and(|(id, _)| *id == e.id) {
+                                self.next_step = None;
+                            }
                         }
                         if ui.small_button("Keep").clicked() {
                             self.confirm_remove = None;
@@ -370,6 +382,29 @@ impl WireGuardWindow {
             if let Some(m) = &self.message {
                 ui.label(m);
             }
+            if let Some((id, name)) = &self.next_step {
+                let result = self.tests.get(id).map(|s| s.lock().unwrap().clone());
+                match result {
+                    Some(Some(steps)) if steps.iter().any(|s| s.ok == Some(false)) => {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!(
+                                "Its test failed (see above under \"{name}\"). Fix it with Edit… (or ask whoever \
+                                 gave you the file) before using it."
+                            ),
+                        );
+                    }
+                    Some(Some(_)) => {
+                        ui.label(format!(
+                            "It works. Now edit a connection and set its Proxy to WireGuard, \"{name}\", or \
+                             right-click a group for Use WireGuard for all."
+                        ));
+                    }
+                    _ => {
+                        ui.label(RichText::new("Testing it…").weak());
+                    }
+                }
+            }
             ui.label(
                 RichText::new(
                     "Only the connections set to use it go through it; the rest of this computer is not affected. \
@@ -388,6 +423,7 @@ impl WireGuardWindow {
             self.message = None;
             self.error = None;
             self.editing = None;
+            self.next_step = None;
             // Finished results go; a test still running reports next time.
             self.tests.retain(|_, s| s.lock().unwrap().is_none());
         }

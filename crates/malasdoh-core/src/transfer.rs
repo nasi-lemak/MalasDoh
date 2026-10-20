@@ -51,11 +51,14 @@ pub struct TransferOptions {
     /// Left out of folder transfers: names like `node_modules`, `*.tmp`, or
     /// paths with `/`. What you select yourself is always copied.
     pub skip: Vec<String>,
+    /// Keep a copy of each file on the server an upload replaces, with
+    /// the editor's backups.
+    pub backup: bool,
 }
 
 impl Default for TransferOptions {
     fn default() -> Self {
-        Self { parallel: 4, verify: true, skip: Vec::new() }
+        Self { parallel: 4, verify: true, skip: Vec::new(), backup: true }
     }
 }
 

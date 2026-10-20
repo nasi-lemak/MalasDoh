@@ -80,6 +80,18 @@ pub struct PlanItem {
     pub reason: &'static str,
     /// The user can untick items before running the plan.
     pub enabled: bool,
+    /// For a copy over a file that is already there: that file's size.
+    pub replaces: Option<u64>,
+}
+
+impl PlanItem {
+    /// The size of what an upload or download copies.
+    pub fn action_size(&self) -> u64 {
+        match self.action {
+            Action::Upload { size } | Action::Download { size } => size,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -228,7 +240,9 @@ pub async fn plan(
     let mut remote = BTreeMap::new();
     scan_local(local_root, "", &opts.exclude, &mut local, &mut plan.skipped)?;
     scan_remote(fs, remote_root, "", &opts.exclude, &mut remote, &mut plan.skipped).await?;
-    let item = |rel: &str, action, reason| PlanItem { rel: rel.to_string(), action, reason, enabled: true };
+    let item =
+        |rel: &str, action, reason| PlanItem { rel: rel.to_string(), action, reason, enabled: true, replaces: None };
+    let over = |it: PlanItem, size: u64| PlanItem { replaces: Some(size), ..it };
     let candidates: Vec<String> = if opts.compare_contents {
         local
             .iter()
@@ -260,8 +274,8 @@ pub async fn plan(
             Some(r) if same(l, r) && !opts.compare_contents => plan.unchanged += 1,
             Some(r) if same(l, r) && !differ.contains(rel) => plan.unchanged += 1,
             Some(r) if same(l, r) => plan.items.push(match opts.direction {
-                Direction::Download => item(rel, Action::Download { size: r.size }, "contents differ"),
-                Direction::Upload => item(rel, Action::Upload { size: l.size }, "contents differ"),
+                Direction::Download => over(item(rel, Action::Download { size: r.size }, "contents differ"), l.size),
+                Direction::Upload => over(item(rel, Action::Upload { size: l.size }, "contents differ"), r.size),
                 Direction::Both => {
                     plan.skipped.push(format!("{rel} (contents differ, same time on both sides)"));
                     continue;
@@ -270,22 +284,28 @@ pub async fn plan(
             Some(r) => {
                 let local_newer = l.mtime > r.mtime;
                 match opts.direction {
-                    Direction::Upload => plan.items.push(item(
-                        rel,
-                        Action::Upload { size: l.size },
-                        if local_newer { "newer here" } else { "different here" },
+                    Direction::Upload => plan.items.push(over(
+                        item(
+                            rel,
+                            Action::Upload { size: l.size },
+                            if local_newer { "newer here" } else { "different here" },
+                        ),
+                        r.size,
                     )),
-                    Direction::Download => plan.items.push(item(
-                        rel,
-                        Action::Download { size: r.size },
-                        if local_newer { "different on the server" } else { "newer on the server" },
+                    Direction::Download => plan.items.push(over(
+                        item(
+                            rel,
+                            Action::Download { size: r.size },
+                            if local_newer { "different on the server" } else { "newer on the server" },
+                        ),
+                        l.size,
                     )),
                     Direction::Both if local_newer => {
-                        plan.items.push(item(rel, Action::Upload { size: l.size }, "newer here"))
+                        plan.items.push(over(item(rel, Action::Upload { size: l.size }, "newer here"), r.size))
                     }
-                    Direction::Both if r.mtime > l.mtime => {
-                        plan.items.push(item(rel, Action::Download { size: r.size }, "newer on the server"))
-                    }
+                    Direction::Both if r.mtime > l.mtime => plan
+                        .items
+                        .push(over(item(rel, Action::Download { size: r.size }, "newer on the server"), l.size)),
                     // Same time, different size: no safe winner.
                     Direction::Both => plan.skipped.push(format!("{rel} (differs, same time on both sides)")),
                 }
@@ -303,7 +323,8 @@ pub async fn plan(
                 item(rel, Action::Download { size: r.size }, "only on the server")
             });
         } else if deletes {
-            plan.items.push(item(rel, Action::DeleteRemote { dir: r.dir }, "not here"));
+            let it = item(rel, Action::DeleteRemote { dir: r.dir }, "not here");
+            plan.items.push(if r.dir { it } else { over(it, r.size) });
         }
     }
     // A deleted folder takes its contents with it: list only the top one.
@@ -328,12 +349,20 @@ pub struct SyncReport {
     pub verified: usize,
     /// Why copies were not compared, if they were not.
     pub unverified: Option<String>,
+    /// Server files backed up before being replaced or deleted: the path
+    /// relative to the roots, the backup, and whether an upload replaced it.
+    pub backups: Vec<(String, PathBuf, bool)>,
+    /// Replaced or deleted without a backup, being too big.
+    pub too_big: Vec<String>,
 }
 
 /// Carry out the enabled items: folders first, then copies (several at
 /// once, through [`transfer::run`], so times are kept and copies are
 /// checked), then deletions (deepest first). A failing item is recorded and
-/// the rest continue.
+/// the rest continue. With `backups` (a host's backup folder), server files
+/// are backed up before they are replaced or deleted; one that cannot be
+/// is left alone.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     fs: &RemoteFs,
     local_root: &Path,
@@ -342,10 +371,30 @@ pub async fn execute(
     progress: &Progress,
     topts: &TransferOptions,
     checker: Option<&Checker>,
+    backups: Option<&Path>,
 ) -> Result<SyncReport> {
     let mut report = SyncReport::default();
     let local_path = |rel: &str| -> PathBuf { rel.split('/').fold(local_root.to_path_buf(), |p, c| p.join(c)) };
-    let enabled: Vec<&PlanItem> = plan.items.iter().filter(|i| i.enabled).collect();
+    let mut blocked = std::collections::HashSet::new();
+    if let Some(host_dir) = backups {
+        for it in plan.items.iter().filter(|i| i.enabled) {
+            let (Some(size), upload) = (it.replaces, matches!(it.action, Action::Upload { .. })) else { continue };
+            if !upload && !matches!(it.action, Action::DeleteRemote { dir: false }) {
+                continue;
+            }
+            progress.check_cancel()?;
+            progress.set_current(&format!("Backing up {}…", it.rel));
+            match crate::replace::back_up_one(fs, &join(remote_root, &it.rel), size, host_dir).await {
+                crate::replace::BackedUp::Saved(p) => report.backups.push((it.rel.clone(), p, upload)),
+                crate::replace::BackedUp::TooBig => report.too_big.push(it.rel.clone()),
+                crate::replace::BackedUp::Failed(e) => {
+                    report.failed.push((it.rel.clone(), format!("left as it is: could not back it up first ({e})")));
+                    blocked.insert(it.rel.clone());
+                }
+            }
+        }
+    }
+    let enabled: Vec<&PlanItem> = plan.items.iter().filter(|i| i.enabled && !blocked.contains(&i.rel)).collect();
     fn record(report: &mut SyncReport, rel: &str, r: Result<()>) -> Result<()> {
         match r {
             Ok(()) => report.done += 1,

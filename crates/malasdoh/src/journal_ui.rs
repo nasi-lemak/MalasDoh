@@ -78,7 +78,7 @@ impl JournalWindow {
         let shown: Vec<usize> = (0..self.entries.len())
             .filter(|&i| {
                 let e = &self.entries[i];
-                (!self.problems_only || e.outcome != journal::Outcome::Saved) && e.matches(&self.filter)
+                (!self.problems_only || e.outcome.is_problem()) && e.matches(&self.filter)
             })
             .collect();
         ui.label(

@@ -17,6 +17,7 @@ pub mod paths;
 pub mod pgconf;
 pub mod profile;
 pub mod proxy;
+pub mod replace;
 pub mod secrets;
 pub mod sftp;
 pub mod shellfs;

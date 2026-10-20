@@ -116,6 +116,10 @@ fn transfers_ui(ui: &mut egui::Ui, t: &mut malasdoh_core::transfer::TransferOpti
         "Computed on the server with sha256sum (or shasum), so nothing is downloaded again. \
          Skipped with a note when the server has neither.",
     );
+    ui.checkbox(&mut t.backup, "Back up files on the server before an upload replaces them").on_hover_text(
+        "Kept with the editor's backups (up to 20 MB per file): see Backups… on the file. Replaced text files \
+         also go into the change journal, with what changed.",
+    );
     ui.add_space(6.0);
     ui.label("Leave out of folder transfers (names or patterns, separated by commas):");
     if ui
@@ -760,7 +764,7 @@ impl App {
                 shown.header_response.context_menu(|ui| {
                     if tunnels.is_empty() {
                         ui.add_enabled(false, egui::Button::new("Use WireGuard for all"))
-                            .on_disabled_hover_text("Import a configuration first: Connection → WireGuard…");
+                            .on_disabled_hover_text("Import a configuration first: Connection > WireGuard…");
                     } else {
                         ui.menu_button("Use WireGuard for all", |ui| {
                             for (id, name) in &tunnels {

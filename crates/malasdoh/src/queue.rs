@@ -15,6 +15,8 @@ use malasdoh_core::transfer::{Ended, Job, Way};
 pub enum State {
     /// Working out what to copy.
     Planning,
+    /// Waiting for the user to choose which files it replaces.
+    Reviewing,
     Running,
     /// Stopping after a pause or cancel was asked for.
     Stopping,
@@ -178,6 +180,21 @@ impl Queue {
         t.job = Some(job);
     }
 
+    /// Waiting in "Replace files?".
+    pub fn reviewing(&mut self, id: u64) {
+        if let Some(t) = self.get_mut(id) {
+            t.state = State::Reviewing;
+        }
+    }
+
+    /// Cancelled before anything was copied.
+    pub fn dropped(&mut self, id: u64) {
+        if let Some(t) = self.get_mut(id) {
+            t.state = State::Cancelled;
+            t.result = Some(Ok("Cancelled: nothing was copied".into()));
+        }
+    }
+
     pub fn planned(&mut self, id: u64, job: Result<Job, String>) {
         let Some(t) = self.get_mut(id) else { return };
         match job {
@@ -222,6 +239,9 @@ impl Queue {
     }
 }
 
+/// How "Replace files?" notes a file left out for being identical.
+pub const SAME: &str = "(same content, not copied again)";
+
 fn summary(job: &Job) -> String {
     let done = job.done();
     let total = job.files.len();
@@ -231,6 +251,10 @@ fn summary(job: &Job) -> String {
     };
     let bytes: u64 =
         job.files.iter().filter(|f| f.status == malasdoh_core::transfer::Status::Done).map(|f| f.size).sum();
+    let same = job.skipped.iter().filter(|s| s.ends_with(SAME)).count();
+    if total == 0 && same > 0 && same == job.skipped.len() {
+        return format!("Nothing to copy: {same} file(s) already the same");
+    }
     let mut s = if done == total {
         format!("{verb} {total} file(s), {}", human_size(bytes))
     } else {
@@ -242,8 +266,11 @@ fn summary(job: &Job) -> String {
     } else if verified > 0 {
         s.push_str(&format!(" · {verified} checked by checksum"));
     }
-    if !job.skipped.is_empty() {
-        s.push_str(&format!(" · {} left out", job.skipped.len()));
+    if same > 0 {
+        s.push_str(&format!(" · {same} already the same"));
+    }
+    if job.skipped.len() > same {
+        s.push_str(&format!(" · {} left out", job.skipped.len() - same));
     }
     s
 }
@@ -258,6 +285,10 @@ fn row(ui: &mut egui::Ui, t: &mut Transfer, out: &mut Vec<Control>) {
         State::Planning => {
             ui.spinner();
             ui.add(egui::Label::new(format!("{} — listing files…", t.label)).truncate());
+        }
+        State::Reviewing => {
+            ui.colored_label(warn, "waiting");
+            ui.add(egui::Label::new(format!("{} — choose what it replaces (Replace files?)", t.label)).truncate());
         }
         State::Running | State::Stopping => {
             let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };

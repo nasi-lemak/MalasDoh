@@ -18,6 +18,7 @@ mod multiedit;
 mod multirun;
 mod patch_ui;
 mod queue;
+mod replace_ui;
 mod restore;
 mod session;
 mod settings;

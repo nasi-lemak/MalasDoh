@@ -793,13 +793,18 @@ fn gutter_ui(ui: &egui::Ui, (rect, resp): (egui::Rect, egui::Response), marks: &
 }
 
 pub fn diff_ui(ui: &mut egui::Ui, d: &Diff, id: egui::Id) {
+    diff_ui_max(ui, d, id, 500.0)
+}
+
+/// [`diff_ui`] scrolling within `max_height`.
+pub fn diff_ui_max(ui: &mut egui::Ui, d: &Diff, id: egui::Id, max_height: f32) {
     if d.is_empty() {
         ui.label("No differences.");
         return;
     }
     let add_bg = Color32::from_rgba_unmultiplied(60, 160, 60, 60);
     let del_bg = Color32::from_rgba_unmultiplied(200, 60, 60, 60);
-    egui::ScrollArea::vertical().id_salt(id).max_height(500.0).auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt(id).max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
         for (i, h) in d.hunks.iter().enumerate() {
             if i > 0 {
                 ui.separator();

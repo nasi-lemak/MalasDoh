@@ -151,6 +151,16 @@ remote-editing loop, where they are weakest:
   SHA-256 is compared, computed on the server with `sha256sum` (or `shasum`),
   so nothing is downloaded again. Folder transfers can leave out names or
   patterns (`node_modules, *.tmp`).
+- **Replacing files is reviewed first**: when an upload or download would
+  replace files (inside folders too), "Replace files?" lists them with their
+  sizes and times, marks the ones with the same contents (compared by
+  SHA-256, on the server for its copies) so they are not copied again, and
+  shows the changes of a text file side by side. Untick any file to keep it
+  as it is. Before an upload replaces a file on the server, its copy is
+  backed up with the editor's backups (up to 20 MB each; Backups… on the
+  file shows them), and text files go into the change journal with what
+  changed. Folder sync does the same: Show changes on a row that overwrites
+  a file, and backups of server files before they are replaced or deleted.
 - **WireGuard, built in** (Connection → WireGuard…), like wireproxy: import
   the `.conf` you would give WireGuard and set a connection's Proxy to it.
   MalasDoh runs the tunnel itself, so nothing is installed and no admin rights

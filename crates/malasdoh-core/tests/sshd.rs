@@ -543,7 +543,8 @@ async fn folder_sync_plans_then_mirrors() {
     // Planning changes nothing.
     assert_eq!(std::fs::read_to_string(format!("{remote}/index.html")).unwrap(), "v1");
 
-    let report = sync::execute(&fs, l, &remote, &plan, &Progress::default(), &topts, Some(&checker)).await.unwrap();
+    let report =
+        sync::execute(&fs, l, &remote, &plan, &Progress::default(), &topts, Some(&checker), None).await.unwrap();
     assert_eq!(report.verified, 2, "copies are checked by checksum: {:?}", report.unverified);
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(std::fs::read_to_string(format!("{remote}/index.html")).unwrap(), "v2");
@@ -560,9 +561,174 @@ async fn folder_sync_plans_then_mirrors() {
     let down = SyncOptions { direction: Direction::Download, ..Default::default() };
     let mut plan = sync::plan(&fs, back.path(), &remote, &down, None).await.unwrap();
     plan.items.iter_mut().filter(|i| i.rel == "same.txt").for_each(|i| i.enabled = false);
-    sync::execute(&fs, back.path(), &remote, &plan, &Progress::default(), &topts, None).await.unwrap();
+    sync::execute(&fs, back.path(), &remote, &plan, &Progress::default(), &topts, None, None).await.unwrap();
     assert_eq!(std::fs::read_to_string(back.path().join("css/app.css")).unwrap(), "body{}");
     assert!(!back.path().join("same.txt").exists(), "unticked item was skipped");
+}
+
+/// Before a transfer replaces files: which ones, whether they differ (by
+/// checksum on the server), both versions as text, backups of the server's
+/// copies, and the change journal's entry, both ways and for folder sync.
+#[tokio::test]
+async fn replacing_files_is_reviewed_and_backed_up() {
+    use malasdoh_core::replace;
+    use malasdoh_core::sync::{self, Action, Direction, SyncOptions};
+    use malasdoh_core::transfer::{self, Checker, TransferOptions, Way};
+    let Some(env) = Env::new() else { return };
+    let conn = env.connect().await;
+    let fs = conn.open_sftp().await.unwrap();
+    let checker = Checker::new(conn.clone(), None);
+    let work = env.scratch();
+    let opts = TransferOptions::default();
+
+    let local = tempfile::tempdir().unwrap();
+    let tree = local.path().join("etc");
+    std::fs::create_dir_all(tree.join("conf.d")).unwrap();
+    std::fs::write(tree.join("app.conf"), "port = 8080\nworkers = 4\n").unwrap();
+    std::fs::write(tree.join("same.conf"), "unchanged\n").unwrap();
+    std::fs::write(tree.join("twin.bin"), b"\0AAA").unwrap();
+    std::fs::write(tree.join("crlf.conf"), "a = 1\r\nb = 2\r\n").unwrap();
+    std::fs::write(tree.join("conf.d/extra.conf"), "new file\n").unwrap();
+    let remote = format!("{work}/etc");
+    std::fs::create_dir_all(format!("{remote}/conf.d")).unwrap();
+    std::fs::write(format!("{remote}/app.conf"), "port = 80\nworkers = 4\n").unwrap();
+    std::fs::write(format!("{remote}/same.conf"), "unchanged\n").unwrap();
+    std::fs::write(format!("{remote}/twin.bin"), b"\0AAB").unwrap();
+    std::fs::write(format!("{remote}/crlf.conf"), "a = 1\nb = 2\n").unwrap();
+
+    // Upload: what it replaces, and whether each differs.
+    let job = transfer::plan_upload(std::slice::from_ref(&tree), &work, &opts).unwrap();
+    assert_eq!(job.files.len(), 5);
+    let mut found = replace::find(&fs, &job, &work, Some(&checker)).await;
+    found.sort_by(|a, b| a.rel.cmp(&b.rel));
+    let got: Vec<(&str, Option<bool>)> = found.iter().map(|r| (r.rel.as_str(), r.same)).collect();
+    assert_eq!(
+        got,
+        [
+            ("etc/app.conf", Some(false)),
+            ("etc/crlf.conf", Some(false)),
+            ("etc/same.conf", Some(true)),
+            ("etc/twin.bin", Some(false))
+        ],
+        "a new file is not listed; same size but different bytes is found by checksum"
+    );
+    assert!(found.iter().all(|r| r.can_show()));
+
+    // Both versions, the server's first.
+    let app = found.iter().find(|r| r.rel == "etc/app.conf").unwrap();
+    let t = replace::texts(&fs, Way::Up, &job.files[app.index]).await.unwrap();
+    assert_eq!((t.old.as_str(), t.new.as_str()), ("port = 80\nworkers = 4\n", "port = 8080\nworkers = 4\n"));
+    assert_eq!(t.note, None);
+    let crlf = found.iter().find(|r| r.rel == "etc/crlf.conf").unwrap();
+    let t = replace::texts(&fs, Way::Up, &job.files[crlf.index]).await.unwrap();
+    assert_eq!(t.old, t.new, "the text is the same…");
+    assert!(t.note.as_deref().is_some_and(|n| n.contains("CRLF")), "…and the note says what differs: {:?}", t.note);
+    let twin = found.iter().find(|r| r.rel == "etc/twin.bin").unwrap();
+    let err = format!("{:#}", replace::texts(&fs, Way::Up, &job.files[twin.index]).await.unwrap_err());
+    assert!(err.contains("binary"), "{err}");
+
+    // Replace app.conf and crlf.conf, keep twin.bin; same.conf is not copied.
+    let backups = tempfile::tempdir().unwrap();
+    let keep: Vec<_> = found.iter().filter(|r| r.rel == "etc/app.conf" || r.rel == "etc/crlf.conf").cloned().collect();
+    let drop: Vec<(usize, String)> = found
+        .iter()
+        .filter(|r| r.rel == "etc/twin.bin" || r.rel == "etc/same.conf")
+        .map(|r| (r.index, "left".to_string()))
+        .collect();
+    let b = replace::back_up(&fs, &job, &keep, backups.path()).await;
+    assert!(b.failed.is_empty() && b.too_big.is_empty(), "{:?}", b.failed);
+    assert_eq!(b.saved.len(), 2);
+    let (app_i, app_backup) = b.saved.iter().find(|(i, _)| *i == app.index).cloned().unwrap();
+    assert_eq!(std::fs::read_to_string(&app_backup).unwrap(), "port = 80\nworkers = 4\n");
+    assert!(app_backup.starts_with(malasdoh_core::edit::backup_dir_for(backups.path(), &job.files[app_i].remote)));
+    assert_eq!(
+        malasdoh_core::edit::list_local_backups(backups.path(), &job.files[app_i].remote),
+        std::slice::from_ref(&app_backup)
+    );
+
+    let mut job = job;
+    let (app_remote, app_local) = (job.files[app_i].remote.clone(), job.files[app_i].local.clone());
+    replace::leave_out(&mut job, &drop);
+    assert_eq!(job.files.len(), 3);
+    assert_eq!(job.skipped.len(), 2);
+    transfer::run(&fs, &mut job, &opts, &Progress::default(), opts.limit(), Some(&checker)).await.unwrap();
+    assert!(job.is_finished(), "{:?}", job.failures());
+    assert_eq!(std::fs::read_to_string(format!("{remote}/app.conf")).unwrap(), "port = 8080\nworkers = 4\n");
+    assert_eq!(std::fs::read(format!("{remote}/twin.bin")).unwrap(), b"\0AAB", "unticked: kept");
+    assert_eq!(std::fs::read_to_string(format!("{remote}/conf.d/extra.conf")).unwrap(), "new file\n");
+
+    // The journal's entry: the change, marked as an upload, with its backup.
+    let base = malasdoh_core::journal::Entry {
+        time: 0,
+        connection: "test".into(),
+        user: "u".into(),
+        host: "h".into(),
+        port: 22,
+        path: app_remote,
+        outcome: malasdoh_core::journal::Outcome::Saved,
+        sudo: false,
+        added: 0,
+        removed: 0,
+        check: None,
+        local_backup: None,
+        remote_backup: None,
+        patch: String::new(),
+        truncated: false,
+    };
+    let e = replace::journal_entry(base, &app_backup, &app_local);
+    assert_eq!(e.outcome, malasdoh_core::journal::Outcome::Uploaded);
+    assert!(!e.outcome.is_problem());
+    assert_eq!((e.added, e.removed), (1, 1));
+    assert!(e.patch.contains("-port = 80\n+port = 8080"), "{}", e.patch);
+    assert_eq!(e.local_backup.as_deref(), Some(app_backup.as_path()));
+
+    // Download the other way: the copies here that it would replace.
+    let job = transfer::plan_download(&fs, std::slice::from_ref(&remote), local.path(), &opts).await.unwrap();
+    let mut found = replace::find(&fs, &job, &local.path().to_string_lossy(), Some(&checker)).await;
+    found.sort_by(|a, b| a.rel.cmp(&b.rel));
+    let got: Vec<(&str, Option<bool>)> = found.iter().map(|r| (r.rel.as_str(), r.same)).collect();
+    assert_eq!(
+        got,
+        [
+            ("etc/app.conf", Some(true)),
+            ("etc/conf.d/extra.conf", Some(true)),
+            ("etc/crlf.conf", Some(true)),
+            ("etc/same.conf", Some(true)),
+            ("etc/twin.bin", Some(false)),
+        ]
+    );
+
+    // Folder sync: the rows that replace a file know it, and the server's
+    // copies are backed up before being replaced or deleted.
+    std::fs::write(tree.join("app.conf"), "port = 9090\nworkers = 4\n").unwrap();
+    std::fs::write(format!("{remote}/stale.conf"), "remove me\n").unwrap();
+    let sopts = SyncOptions { direction: Direction::Upload, delete_extra: true, ..Default::default() };
+    let plan = sync::plan(&fs, &tree, &remote, &sopts, Some(&checker)).await.unwrap();
+    let item = |rel: &str| plan.items.iter().find(|i| i.rel == rel).cloned().unwrap();
+    assert_eq!(item("app.conf").replaces, Some(24), "the size of the copy it replaces");
+    assert!(matches!(item("app.conf").action, Action::Upload { .. }));
+    assert_eq!(item("stale.conf").replaces, Some(10));
+    let sync_backups = tempfile::tempdir().unwrap();
+    let report = sync::execute(
+        &fs,
+        &tree,
+        &remote,
+        &plan,
+        &Progress::default(),
+        &opts,
+        Some(&checker),
+        Some(sync_backups.path()),
+    )
+    .await
+    .unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let mut saved: Vec<(&str, bool)> = report.backups.iter().map(|(r, _, up)| (r.as_str(), *up)).collect();
+    saved.sort();
+    assert!(saved.contains(&("app.conf", true)) && saved.contains(&("stale.conf", false)), "{saved:?}");
+    let stale = report.backups.iter().find(|(r, ..)| r == "stale.conf").unwrap();
+    assert_eq!(std::fs::read_to_string(&stale.1).unwrap(), "remove me\n");
+    assert!(!Path::new(&format!("{remote}/stale.conf")).exists());
+    assert_eq!(std::fs::read_to_string(format!("{remote}/app.conf")).unwrap(), "port = 9090\nworkers = 4\n");
 }
 
 /// `ssh-keygen -s ca -I id [-h] -n principals key.pub`
@@ -1252,7 +1418,7 @@ async fn transfer_queue_parallel_pause_resume_verify() {
     std::fs::write(format!("{work}/proj/a/keep.conf"), "old contents\n").unwrap();
     std::fs::set_permissions(format!("{work}/proj/a/keep.conf"), std::fs::Permissions::from_mode(0o640)).unwrap();
 
-    let opts = TransferOptions { parallel: 4, verify: true, skip: vec!["node_modules".into(), "*.tmp".into()] };
+    let opts = TransferOptions { skip: vec!["node_modules".into(), "*.tmp".into()], ..Default::default() };
     let mut job = transfer::plan_upload(std::slice::from_ref(&tree), &work, &opts).unwrap();
     assert_eq!(job.skipped, ["proj/node_modules", "proj/notes.tmp"]);
     assert_eq!(job.files.len(), 43);

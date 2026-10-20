@@ -475,7 +475,9 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn write_local_backup(host_dir: &Path, remote_path: &str, original: &[u8]) -> Result<PathBuf> {
+/// Keeps `original` (the contents of `remote_path`) under `host_dir`,
+/// named after the file and the time.
+pub fn write_local_backup(host_dir: &Path, remote_path: &str, original: &[u8]) -> Result<PathBuf> {
     let dir = backup_dir_for(host_dir, remote_path);
     crate::paths::create_private_dir(&dir).with_context(|| format!("creating backup folder {}", dir.display()))?;
     let stem = format!("{}.{}", sanitize(file_name(remote_path)), timestamp());

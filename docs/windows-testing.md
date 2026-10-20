@@ -71,6 +71,17 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
 - [ ] 4.8 **Settings → Transfers**: put `node_modules, *.tmp` in the skip
   list and upload a folder containing those: they are left out, and the
   row's **Details** lists them.
+- [ ] 4.9 Upload a folder of config files over one already on the server, with
+  one file changed and one identical. **Replace files?** lists both: the
+  identical one says "same content", the changed one has **Show changes**
+  (lines removed in red, added in green). Untick another file: it stays as
+  it was on the server.
+- [ ] 4.10 After 4.9, right-click the replaced file → **Backups…**: the version
+  from before the upload is there. **Tools → Change journal** has the upload
+  with what changed.
+- [ ] 4.11 Edit a file in Notepad so it has Windows line endings, then upload
+  it over the server's copy: **Show changes** says the line endings change
+  (the text itself looks the same).
 
 ## 5. Root and many servers
 

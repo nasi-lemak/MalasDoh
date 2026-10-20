@@ -143,10 +143,21 @@ pub enum SessionMsg {
         id: u64,
         result: Result<String, String>,
     },
-    /// The files of a queued transfer are known.
+    /// The files of a queued transfer are known, and which of them are
+    /// already at the destination (`place` names it).
     JobPlanned {
         id: u64,
         job: Result<Job, String>,
+        replaced: Vec<malasdoh_core::replace::Replaced>,
+        place: String,
+    },
+    /// A reviewed upload backed up what it replaces and can start.
+    JobReady {
+        id: u64,
+        job: Job,
+        saved: Vec<(String, PathBuf, PathBuf)>,
+        too_big: usize,
+        failed: usize,
     },
     /// A run of a queued transfer ended.
     JobRan {
@@ -277,8 +288,11 @@ pub struct Session {
     pub local: Option<LocalBrowser>,
     /// Paths the user asked to copy to another server; the app picks it up.
     pub cross_copy: Option<Vec<String>>,
-    /// A transfer waiting for "replace existing?".
-    overwrite: Option<Overwrite>,
+    /// Transfers waiting for "Replace files?", first shown first.
+    reviews: Vec<crate::replace_ui::Review>,
+    /// Backups of server files that queued uploads replace, by queue row:
+    /// (remote path, local file, backup), for the change journal.
+    upload_backups: std::collections::HashMap<u64, Vec<(String, PathBuf, PathBuf)>>,
     /// A comparison to open; the app picks it up.
     pub compare: Option<CompareRequest>,
     /// A path whose change history to show; the app picks it up.
@@ -301,12 +315,6 @@ pub struct Session {
     /// Your own file access, kept while browsing as root.
     fs_user: Option<RemoteFs>,
     pub patch: crate::patch_ui::PatchWindow,
-}
-
-/// A transfer whose destination already has some of the same names.
-enum Overwrite {
-    Upload { files: Vec<PathBuf>, dir: String, existing: Vec<String> },
-    Download { paths: Vec<String>, dir: PathBuf, existing: Vec<String> },
 }
 
 impl Session {
@@ -343,7 +351,8 @@ impl Session {
             sync: SyncWindow::default(),
             local: None,
             cross_copy: None,
-            overwrite: None,
+            reviews: Vec::new(),
+            upload_backups: Default::default(),
             compare: None,
             history: None,
             edit_many: None,
@@ -621,6 +630,9 @@ impl Session {
             }
             SessionMsg::Forward(m) => self.forwards.handle(m),
             SessionMsg::Sync(m) => {
+                if let SyncMsg::Done(Ok(report), local, remote) = &m {
+                    self.journal_synced(report, local, remote, shared);
+                }
                 self.sync.handle(m);
                 self.refresh(shared);
             }
@@ -885,14 +897,55 @@ impl Session {
                 }
                 self.refresh(shared);
             }
-            SessionMsg::JobPlanned { id, job } => {
-                let ok = job.is_ok();
-                self.browser.transfers.planned(id, job);
-                if ok {
+            SessionMsg::JobPlanned { id, job, replaced, place } => match job {
+                // Everything it would replace is identical: nothing to ask.
+                Ok(mut job) if !replaced.is_empty() && replaced.iter().all(|r| r.same == Some(true)) => {
+                    let same = crate::queue::SAME.trim_matches(['(', ')']);
+                    let drop: Vec<(usize, String)> = replaced.iter().map(|r| (r.index, same.to_string())).collect();
+                    malasdoh_core::replace::leave_out(&mut job, &drop);
+                    self.browser.transfers.planned(id, Ok(job));
                     self.run_job(id, shared);
                 }
+                Ok(job) if !replaced.is_empty() => {
+                    let backup = job.way == transfer::Way::Up && shared.transfer.read().unwrap().backup;
+                    self.browser.transfers.reviewing(id);
+                    self.reviews.push(crate::replace_ui::Review::new(id, job, place, replaced, backup));
+                }
+                job => {
+                    let ok = job.is_ok();
+                    self.browser.transfers.planned(id, job);
+                    if ok {
+                        self.run_job(id, shared);
+                    }
+                }
+            },
+            SessionMsg::JobReady { id, job, saved, too_big, failed } => {
+                let n = saved.len();
+                if !saved.is_empty() {
+                    self.upload_backups.insert(id, saved);
+                }
+                self.browser.transfers.planned(id, Ok(job));
+                if failed > 0 {
+                    self.notify(
+                        format!(
+                            "{failed} file(s) were left as they are: their copy on the server could not be backed \
+                             up first (Details in the transfer list)."
+                        ),
+                        true,
+                    );
+                } else if too_big > 0 {
+                    self.notify(
+                        format!(
+                            "Backed up {n} file(s) before replacing them; {too_big} over {} replaced without a backup.",
+                            sftp::human_size(malasdoh_core::replace::BACKUP_MAX)
+                        ),
+                        false,
+                    );
+                }
+                self.run_job(id, shared);
             }
             SessionMsg::JobRan { id, job, ended } => {
+                self.journal_uploads(id, &job, &ended, shared);
                 let lost = self.state != ConnState::Connected || self.conn.as_ref().is_none_or(|c| c.is_closed());
                 self.browser.transfers.ran(id, job, ended, lost);
                 if let Some(l) = &mut self.local {
@@ -1256,23 +1309,16 @@ impl Session {
         });
     }
 
-    /// Download into a local folder, asking first if that would replace
-    /// anything there.
+    /// Download into a local folder; files it would replace are reviewed
+    /// first.
     pub fn download_to(&mut self, paths: Vec<String>, dir: PathBuf, shared: &Shared) {
-        let existing: Vec<String> = paths
-            .iter()
-            .map(|p| sftp::file_name(p).to_string())
-            .filter(|n| sftp::local_name(n).is_ok_and(|n| dir.join(n).symlink_metadata().is_ok()))
-            .collect();
-        if existing.is_empty() {
-            self.start_download(paths, dir, shared);
-        } else {
-            self.overwrite = Some(Overwrite::Download { paths, dir, existing });
-        }
+        self.start_download(paths, dir, shared);
     }
 
-    /// Queue an upload of `files` (files or folders) into `dir`.
+    /// Queue an upload of `files` (files or folders) into `dir`. Once the
+    /// files are known, those already on the server are reviewed first.
     fn start_upload(&mut self, files: Vec<PathBuf>, dir: String, shared: &Shared) {
+        let Some(fs) = self.fs.clone() else { return };
         if files.is_empty() {
             return;
         }
@@ -1283,9 +1329,22 @@ impl Session {
         let id = self.browser.transfers.add(format!("⬆ {what} to {dir}"), None);
         let opts = shared.transfer.read().unwrap().clone();
         let (events, sid) = (shared.events.clone(), self.id);
-        shared.rt.spawn_blocking(move || {
-            let job = transfer::plan_upload(&files, &dir, &opts).map_err(|e| format!("{e:#}"));
-            events.session(sid, SessionMsg::JobPlanned { id, job });
+        let checker = self.conn.clone().map(|c| transfer::Checker::new(c, self.checker_sudo()));
+        let place = format!("{dir} on {}", self.profile.display_name());
+        shared.rt.spawn(async move {
+            let planned = {
+                let dir = dir.clone();
+                tokio::task::spawn_blocking(move || transfer::plan_upload(&files, &dir, &opts)).await
+            };
+            let job = match planned {
+                Ok(j) => j.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.to_string()),
+            };
+            let replaced = match &job {
+                Ok(j) => malasdoh_core::replace::find(&fs, j, &dir, checker.as_ref()).await,
+                Err(_) => Vec::new(),
+            };
+            events.session(sid, SessionMsg::JobPlanned { id, job, replaced, place });
         });
     }
 
@@ -1302,9 +1361,15 @@ impl Session {
         let id = self.browser.transfers.add(format!("⬇ {what} to {}", dir.display()), None);
         let opts = shared.transfer.read().unwrap().clone();
         let (events, sid) = (shared.events.clone(), self.id);
+        let checker = self.conn.clone().map(|c| transfer::Checker::new(c, self.checker_sudo()));
+        let place = dir.display().to_string();
         shared.rt.spawn(async move {
             let job = transfer::plan_download(&fs, &paths, &dir, &opts).await.map_err(|e| format!("{e:#}"));
-            events.session(sid, SessionMsg::JobPlanned { id, job });
+            let replaced = match &job {
+                Ok(j) => malasdoh_core::replace::find(&fs, j, &dir.to_string_lossy(), checker.as_ref()).await,
+                Err(_) => Vec::new(),
+            };
+            events.session(sid, SessionMsg::JobPlanned { id, job, replaced, place });
         });
     }
 
@@ -1513,16 +1578,7 @@ impl Session {
             }
             A::Upload(files) => {
                 let dir = self.browser.path.clone();
-                let existing: Vec<String> = files
-                    .iter()
-                    .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .filter(|n| self.browser.entries.iter().any(|e| &e.name == n))
-                    .collect();
-                if existing.is_empty() {
-                    self.start_upload(files, dir, shared);
-                } else {
-                    self.overwrite = Some(Overwrite::Upload { files, dir, existing });
-                }
+                self.start_upload(files, dir, shared);
             }
             A::Mkdir(p) => self.fs_op(shared, format!("Created {p}"), move |fs| async move { fs.mkdir(&p).await }),
             A::NewFile(p) => {
@@ -2022,11 +2078,17 @@ impl Session {
 
     fn dialogs_ui(&mut self, ui: &mut egui::Ui, shared: &Shared, settings: &Settings) {
         let checker = self.conn.clone().map(|c| (c, self.checker_sudo()));
-        self.sync.ui(ui.ctx(), self.fs.as_ref(), checker, shared, self.id);
+        let backups = shared
+            .transfer
+            .read()
+            .unwrap()
+            .backup
+            .then(|| edit::host_backup_dir(&shared.paths.backups_dir(), &self.profile.host, self.profile.port));
+        self.sync.ui(ui.ctx(), self.fs.as_ref(), checker, backups, shared, self.id);
         if let Some((path, backup)) = self.backups_ui(ui.ctx()) {
             self.restore_backup(path, backup, shared);
         }
-        self.overwrite_ui(ui.ctx(), shared);
+        self.reviews_ui(ui.ctx(), shared);
         match self.patch.ui(ui.ctx(), self.id) {
             Some(crate::patch_ui::PatchAction::Check { text, base, strip, sudo }) => {
                 self.patch_check(text, base, strip, sudo, shared)
@@ -2050,66 +2112,140 @@ impl Session {
         }
     }
 
-    fn overwrite_ui(&mut self, ctx: &egui::Context, shared: &Shared) {
-        let Some(o) = &self.overwrite else { return };
-        let (existing, place) = match o {
-            Overwrite::Upload { existing, dir, .. } => (existing, format!("{dir} on {}", self.profile.name)),
-            Overwrite::Download { existing, dir, .. } => (existing, dir.display().to_string()),
-        };
-        #[derive(PartialEq)]
-        enum Choice {
-            Replace,
-            Skip,
-            Cancel,
+    /// "Replace files?" for the first transfer waiting for it.
+    fn reviews_ui(&mut self, ctx: &egui::Context, shared: &Shared) {
+        use crate::replace_ui::ReviewAction;
+        let Some(r) = self.reviews.first_mut() else { return };
+        let Some(action) = r.ui(ctx, egui::Id::new(("replace-files", self.id, r.id))) else { return };
+        match action {
+            ReviewAction::Load(i, slot) => {
+                let Some(fs) = self.fs.clone() else {
+                    *slot.lock().unwrap() = Some(Err("not connected".into()));
+                    return;
+                };
+                let (way, file) = (r.job.way, r.job.files[r.replaced[i].index].clone());
+                let ctx = ctx.clone();
+                shared.rt.spawn(async move {
+                    let got = malasdoh_core::replace::texts(&fs, way, &file)
+                        .await
+                        .map(|t| {
+                            let d = malasdoh_core::diff::diff(&t.old, &t.new, 3);
+                            (t, d)
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                    *slot.lock().unwrap() = Some(got);
+                    ctx.request_repaint();
+                });
+            }
+            ReviewAction::Cancel => {
+                let r = self.reviews.remove(0);
+                self.browser.transfers.dropped(r.id);
+            }
+            ReviewAction::Go => {
+                let r = self.reviews.remove(0);
+                let (keep, drop) = r.choice();
+                let (id, mut job) = (r.id, r.job);
+                let fs = self.fs.clone();
+                match fs {
+                    Some(fs) if r.backup && !keep.is_empty() => {
+                        let host_dir =
+                            edit::host_backup_dir(&shared.paths.backups_dir(), &self.profile.host, self.profile.port);
+                        let (events, sid) = (shared.events.clone(), self.id);
+                        shared.rt.spawn(async move {
+                            let b = malasdoh_core::replace::back_up(&fs, &job, &keep, &host_dir).await;
+                            let mut drop = drop;
+                            for (i, e) in &b.failed {
+                                drop.push((
+                                    *i,
+                                    format!(
+                                        "kept as it was: its copy on the server could not be backed up first ({e})"
+                                    ),
+                                ));
+                            }
+                            let saved = b
+                                .saved
+                                .iter()
+                                .map(|(i, p)| (job.files[*i].remote.clone(), job.files[*i].local.clone(), p.clone()))
+                                .collect();
+                            malasdoh_core::replace::leave_out(&mut job, &drop);
+                            let (too_big, failed) = (b.too_big.len(), b.failed.len());
+                            events.session(sid, SessionMsg::JobReady { id, job, saved, too_big, failed });
+                        });
+                    }
+                    _ => {
+                        malasdoh_core::replace::leave_out(&mut job, &drop);
+                        self.browser.transfers.planned(id, Ok(job));
+                        self.run_job(id, shared);
+                    }
+                }
+            }
         }
-        let mut choice = None;
-        egui::Modal::new(egui::Id::new(("overwrite", self.id))).show(ctx, |ui| {
-            ui.set_max_width(460.0);
-            ui.heading("Replace existing items?");
-            ui.label(format!("Already in {place}:"));
-            egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                for n in existing {
-                    ui.monospace(n);
-                }
-            });
-            ui.label(
-                RichText::new("Files with the same name are overwritten; folders are merged, replacing files inside.")
-                    .weak(),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui.button("Replace").clicked() {
-                    choice = Some(Choice::Replace);
-                }
-                if ui.button("Skip these").on_hover_text("Transfer only the items that are not there yet").clicked() {
-                    choice = Some(Choice::Skip);
-                }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    choice = Some(Choice::Cancel);
-                }
-            });
-        });
-        let Some(choice) = choice else { return };
-        let Some(o) = self.overwrite.take() else { return };
-        if choice == Choice::Cancel {
+    }
+
+    /// Server files a folder sync replaced (and backed up first) go into
+    /// the change journal, like uploads.
+    fn journal_synced(
+        &self,
+        report: &malasdoh_core::sync::SyncReport,
+        local: &std::path::Path,
+        remote: &str,
+        shared: &Shared,
+    ) {
+        let failed: std::collections::HashSet<&str> = report.failed.iter().map(|(r, _)| r.as_str()).collect();
+        let bases: Vec<_> = report
+            .backups
+            .iter()
+            .filter(|(rel, _, upload)| *upload && !failed.contains(rel.as_str()))
+            .map(|(rel, backup, _)| {
+                let path = sftp::join(remote, rel);
+                let local = rel.split('/').fold(local.to_path_buf(), |p, c| p.join(c));
+                (Self::journal_entry(&self.profile, &path, self.browser.root), local, backup.clone())
+            })
+            .collect();
+        if bases.is_empty() {
             return;
         }
-        let skip = choice == Choice::Skip;
-        match o {
-            Overwrite::Upload { mut files, dir, existing } => {
-                if skip {
-                    files
-                        .retain(|f| !f.file_name().is_some_and(|n| existing.iter().any(|e| *e == n.to_string_lossy())));
+        let journal = Journal::new(shared.paths.journal_file());
+        shared.rt.spawn_blocking(move || {
+            for (base, local, backup) in bases {
+                if let Err(e) = journal.append(&malasdoh_core::replace::journal_entry(base, &backup, &local)) {
+                    tracing::warn!("could not write the change journal: {e:#}");
                 }
-                self.start_upload(files, dir, shared);
             }
-            Overwrite::Download { mut paths, dir, existing } => {
-                if skip {
-                    paths.retain(|p| !existing.iter().any(|e| e == sftp::file_name(p)));
-                }
-                self.start_download(paths, dir, shared);
-            }
+        });
+    }
+
+    /// Replaced server files that were backed up go into the change
+    /// journal once their upload is done, with what changed for text.
+    fn journal_uploads(&mut self, id: u64, job: &Job, ended: &Result<Ended, String>, shared: &Shared) {
+        let Some(list) = self.upload_backups.remove(&id) else { return };
+        if matches!(ended, Ok(Ended::Cancelled)) {
+            return;
         }
+        let done: std::collections::HashSet<&str> =
+            job.files.iter().filter(|f| f.status == transfer::Status::Done).map(|f| f.remote.as_str()).collect();
+        let (now, later): (Vec<_>, Vec<_>) = list.into_iter().partition(|(remote, ..)| done.contains(remote.as_str()));
+        if !later.is_empty() {
+            self.upload_backups.insert(id, later);
+        }
+        if now.is_empty() {
+            return;
+        }
+        let journal = Journal::new(shared.paths.journal_file());
+        let bases: Vec<_> = now
+            .into_iter()
+            .map(|(remote, local, backup)| {
+                (Self::journal_entry(&self.profile, &remote, self.browser.root), local, backup)
+            })
+            .collect();
+        shared.rt.spawn_blocking(move || {
+            for (base, local, backup) in bases {
+                let entry = malasdoh_core::replace::journal_entry(base, &backup, &local);
+                if let Err(e) = journal.append(&entry) {
+                    tracing::warn!("could not write the change journal: {e:#}");
+                }
+            }
+        });
     }
 
     fn backups_ui(&mut self, ctx: &egui::Context) -> Option<(String, PathBuf)> {

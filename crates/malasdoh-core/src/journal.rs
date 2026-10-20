@@ -30,6 +30,8 @@ pub enum Outcome {
     /// Written, but reading it back did not match: the server's contents are
     /// unknown.
     VerifyFailed,
+    /// Replaced by an upload (the old version is in its backup).
+    Uploaded,
 }
 
 impl Outcome {
@@ -38,12 +40,18 @@ impl Outcome {
         matches!(self, Outcome::RollbackFailed | Outcome::VerifyFailed)
     }
 
+    /// Anything but a plain save or upload.
+    pub fn is_problem(self) -> bool {
+        !matches!(self, Outcome::Saved | Outcome::Uploaded)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Outcome::Saved => "saved",
             Outcome::RolledBack => "rolled back",
             Outcome::RollbackFailed => "check failed, ROLLBACK FAILED",
             Outcome::VerifyFailed => "written, read-back DID NOT MATCH",
+            Outcome::Uploaded => "replaced by an upload",
         }
     }
 }

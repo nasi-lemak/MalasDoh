@@ -554,6 +554,8 @@ impl Editor {
         let special = |e: &Event| {
             matches!(e, Event::Key { key: Key::Enter | Key::Tab, pressed: true, modifiers, .. }
                 if !modifiers.ctrl && !modifiers.alt && !modifiers.command && (!modifiers.shift || matches!(e, Event::Key { key: Key::Tab, .. })))
+                // A closing bracket lines up with its opener.
+                || matches!(e, Event::Text(t) if matches!(t.as_str(), "}" | "]" | ")"))
         };
         let mut handle = None;
         ui.input_mut(|i| {
@@ -570,13 +572,20 @@ impl Editor {
         if !self.deferred.is_empty() {
             ui.ctx().request_repaint();
         }
-        let Some(Event::Key { key, modifiers, .. }) = handle else { return };
+        let Some(event) = handle else { return };
         let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), te_id).and_then(|s| s.cursor.char_range())
         else {
             return;
         };
         let r = range.as_sorted_char_range();
         let sel = r.start.0..r.end.0;
+        if let Event::Text(t) = &event {
+            let c = t.chars().next().unwrap_or('}');
+            let at = textops::type_closer(&mut self.text, sel, c, self.indent);
+            self.pending_select = Some(at..at);
+            return;
+        }
+        let Event::Key { key, modifiers, .. } = event else { return };
         let new_sel = if key == Key::Enter {
             let c = textops::newline_with_indent(&mut self.text, sel, self.indent);
             c..c

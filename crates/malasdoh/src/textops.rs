@@ -75,21 +75,122 @@ fn line_at(s: &str, bi: usize) -> Range<usize> {
     start..end
 }
 
+/// Leading spaces and tabs of `line`.
+fn lead_of(line: &str) -> &str {
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+}
+
+fn opener_of(closer: char) -> Option<char> {
+    match closer {
+        '}' => Some('{'),
+        ']' => Some('['),
+        ')' => Some('('),
+        _ => None,
+    }
+}
+
+/// The indentation of the line holding the bracket that a `closer` typed
+/// at byte `at` would close: the nearest unmatched opener of its kind
+/// before it. Brackets inside quotes on the way are not counted.
+fn opener_indent(text: &str, at: usize, closer: char) -> Option<String> {
+    let open = opener_of(closer)?;
+    let mut depth = 0usize;
+    // Walk back line by line, so quotes can be paired within a line.
+    let mut end = at;
+    loop {
+        let start = text[..end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line = &text[start..end];
+        let mut in_quote = None;
+        let mut marks = Vec::new();
+        for (i, c) in line.char_indices() {
+            match (c, in_quote) {
+                ('"' | '\'', None) => in_quote = Some(c),
+                (q, Some(o)) if q == o => in_quote = None,
+                (c, None) if c == open || c == closer => marks.push((i, c)),
+                _ => {}
+            }
+        }
+        for &(_, c) in marks.iter().rev() {
+            if c == closer {
+                depth += 1;
+            } else if depth == 0 {
+                return Some(lead_of(&text[start..]).to_string());
+            } else {
+                depth -= 1;
+            }
+        }
+        if start == 0 {
+            return None;
+        }
+        end = start - 1;
+    }
+}
+
+/// One indent unit less than `lead` (for a closer with no opener found).
+fn dedented(lead: &str, unit: Indent) -> String {
+    match unit {
+        _ if lead.ends_with('\t') => lead[..lead.len() - 1].to_string(),
+        Indent::Spaces(n) => {
+            let spaces = lead.len() - lead.trim_end_matches(' ').len();
+            lead[..lead.len() - spaces.min(n)].to_string()
+        }
+        Indent::Tab => lead.to_string(),
+    }
+}
+
 /// Enter with indentation kept: replaces the selection `sel` (char range)
 /// with a newline plus the current line's leading whitespace, one level more
-/// after an opening `{`, `[`, `(` or a YAML-style `key:`. Returns the new
-/// cursor (char index).
+/// after an opening `{`, `[`, `(` or a YAML-style `key:`. When the rest of
+/// the line starts with a closing bracket, that goes on the next line at its
+/// opener's indentation (`{|}` becomes three lines, cursor in the middle).
+/// Returns the new cursor (char index).
 pub fn newline_with_indent(text: &mut String, sel: Range<usize>, indent: Indent) -> usize {
     let (a, b) = (char_to_byte(text, sel.start), char_to_byte(text, sel.end));
     let line = line_at(text, a);
     let before = &text[line.start..a];
-    let lead: String = before.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let lead = lead_of(before).to_string();
     let opener = before.trim_end();
+    let opens = opener.ends_with(['{', '[', '(']) || (opener.ends_with(':') && !opener.trim_start().starts_with('#'));
+    let rest = text[b..line.end.max(b)].trim_start_matches([' ', '\t']);
+    let closer = rest.chars().next().filter(|c| opener_of(*c).is_some());
     let mut ins = format!("\n{lead}");
-    if opener.ends_with(['{', '[', '(']) || (opener.ends_with(':') && !opener.trim_start().starts_with('#')) {
+    if opens {
         ins.push_str(&indent.unit());
     }
+    let cursor = a + ins.len();
+    if let Some(c) = closer {
+        // The closer moves down, lined up with its opener.
+        let close_lead = opener_indent(text, a, c).unwrap_or_else(|| dedented(&lead, indent));
+        if opens {
+            ins.push_str(&format!("\n{close_lead}"));
+        } else {
+            ins = format!("\n{close_lead}");
+        }
+        // Spaces between the cursor and the closer go.
+        let skip = text[b..].len() - text[b..].trim_start_matches([' ', '\t']).len();
+        text.replace_range(a..b + skip, &ins);
+        return byte_to_char(text, if opens { cursor } else { a + ins.len() });
+    }
     text.replace_range(a..b, &ins);
+    byte_to_char(text, cursor)
+}
+
+/// Typing a closing bracket `c` over the selection `sel`: on a line that is
+/// only indentation so far, the line is first lined up with the bracket's
+/// opener. Returns the new cursor (char index).
+pub fn type_closer(text: &mut String, sel: Range<usize>, c: char, indent: Indent) -> usize {
+    let (a, b) = (char_to_byte(text, sel.start), char_to_byte(text, sel.end));
+    let line = line_at(text, a);
+    let before = &text[line.start..a];
+    if !before.is_empty() && before.trim().is_empty() {
+        let lead = opener_indent(text, line.start, c).unwrap_or_else(|| dedented(before, indent));
+        let ins = format!("{lead}{c}");
+        text.replace_range(line.start..b, &ins);
+        return byte_to_char(text, line.start + ins.len());
+    }
+    let mut buf = [0u8; 4];
+    let ins = c.encode_utf8(&mut buf);
+    text.replace_range(a..b, ins);
     byte_to_char(text, a + ins.len())
 }
 
@@ -249,6 +350,62 @@ mod tests {
         let mut t = String::from("\ta = 1 XYZ");
         newline_with_indent(&mut t, 7..10, Indent::Tab);
         assert_eq!(t, "\ta = 1 \n\t");
+    }
+
+    #[test]
+    fn a_closing_bracket_lines_up_with_its_opener() {
+        // { Enter, a line, Enter, } : the brace goes back to the left.
+        let mut t = String::from("{");
+        let mut c = newline_with_indent(&mut t, 1..1, Indent::Spaces(4));
+        assert_eq!(t, "{\n    ");
+        t.insert_str(char_to_byte(&t, c), "a : \"\"");
+        c += 6;
+        c = newline_with_indent(&mut t, c..c, Indent::Spaces(4));
+        assert_eq!(t, "{\n    a : \"\"\n    ");
+        let c = type_closer(&mut t, c..c, '}', Indent::Spaces(4));
+        assert_eq!(t, "{\n    a : \"\"\n}");
+        assert_eq!(c, t.chars().count());
+
+        // Nested, with its opener's own indentation; tabs too.
+        let mut t = String::from("server {\n    location / {\n        root x;\n        ");
+        let end = t.chars().count();
+        type_closer(&mut t, end..end, '}', Indent::Spaces(4));
+        assert!(t.ends_with("root x;\n    }"), "{t:?}");
+        let mut t = String::from("[\n\t1,\n\t");
+        let end = t.chars().count();
+        type_closer(&mut t, end..end, ']', Indent::Tab);
+        assert_eq!(t, "[\n\t1,\n]");
+
+        // Brackets in strings and already closed pairs do not count.
+        let mut t = String::from("  a {\n    b = \"}\";\n    c { d }\n    ");
+        let end = t.chars().count();
+        type_closer(&mut t, end..end, '}', Indent::Spaces(2));
+        assert!(t.ends_with("c { d }\n  }"), "{t:?}");
+
+        // After other text on the line, it is just typed.
+        let mut t = String::from("    x = {");
+        let end = t.chars().count();
+        type_closer(&mut t, end..end, '}', Indent::Spaces(4));
+        assert_eq!(t, "    x = {}");
+
+        // No opener in sight: one level less.
+        let mut t = String::from("        ");
+        type_closer(&mut t, 8..8, ')', Indent::Spaces(4));
+        assert_eq!(t, "    )");
+    }
+
+    #[test]
+    fn enter_between_brackets_opens_them_up() {
+        let mut t = String::from("  x = {}");
+        let c = newline_with_indent(&mut t, 7..7, Indent::Spaces(2));
+        assert_eq!(t, "  x = {\n    \n  }");
+        assert_eq!(c, "  x = {\n    ".len());
+        // Before a closer that is not right after an opener.
+        let mut t = String::from("{\n    a: 1}");
+        let at = t.chars().count() - 1;
+        let c = newline_with_indent(&mut t, at..at, Indent::Spaces(4));
+        assert_eq!(t, "{\n    a: 1\n}");
+        assert_eq!(c, t.chars().count() - 1);
     }
 
     #[test]

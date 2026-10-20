@@ -216,7 +216,7 @@ remote-editing loop, where they are weakest:
 - **Editor**: syntax highlighting for nginx/Apache/sshd-style configs,
   INI/systemd/TOML, YAML, JSON, shell, `.env`, XML and Dockerfiles; line
   numbers with a gutter marking lines added, changed or removed since the file
-  was opened (hover a mark to see what was there), auto-indent, Tab/Shift+Tab on selections, find and replace (Ctrl+F,
+  was opened (hover a mark to see what was there), auto-indent (a closing `}`, `]` or `)` lines up with its opener, and Enter between a pair opens it up), Tab/Shift+Tab on selections, find and replace (Ctrl+F,
   Ctrl+H), go to line (Ctrl+G), Ctrl+S, and the save safety above. Or open the file in your
   own editor (VS Code, Notepad++, vim…): each save there is uploaded with the
   same checks.

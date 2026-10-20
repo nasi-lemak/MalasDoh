@@ -58,6 +58,10 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
 - [ ] 4.4 Double-click a text file, change a line: the gutter shows a blue
   mark; hover it to see the old line. **Save**: the diff appears, then it
   saves. A Windows-style (CRLF) file stays CRLF.
+- [ ] 4.4b In an empty `.json` file type `{`, Enter, `"a": 1`, Enter, `}`: the
+  `}` goes back to the left edge, under the `{`. Type `x = {}`, put the
+  cursor between the braces and press Enter: the braces open onto three
+  lines with the cursor indented in the middle.
 - [ ] 4.5 **Open in external editor** (right-click a file): it opens in Notepad
   (or the editor set in Settings, e.g. VS Code); saving there uploads after
   the review.

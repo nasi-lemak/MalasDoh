@@ -145,10 +145,11 @@ fn text(v: &Value<'_>) -> String {
     }
 }
 
-/// `proto.ListResourcesRequest` for nodes, with each one's allowed logins.
-fn list_request(start_key: &str) -> Vec<u8> {
+/// `proto.ListResourcesRequest` for `kind` ("node", "windows_desktop"),
+/// with each one's allowed logins.
+fn list_request(kind: &str, start_key: &str) -> Vec<u8> {
     let mut m = Vec::new();
-    field_bytes(&mut m, 1, b"node"); // ResourceType
+    field_bytes(&mut m, 1, kind.as_bytes()); // ResourceType
     field_bytes(&mut m, 2, b"default"); // Namespace
     field_varint(&mut m, 3, PAGE as u64); // Limit
     if !start_key.is_empty() {
@@ -156,6 +157,11 @@ fn list_request(start_key: &str) -> Vec<u8> {
     }
     field_varint(&mut m, 13, 1); // IncludeLogins
     m
+}
+
+/// The next page's key of a `proto.ListResourcesResponse`.
+fn next_key(b: &[u8]) -> Result<String> {
+    Ok(fields(b)?.into_iter().find(|(f, _)| *f == 2).map(|(_, v)| text(&v)).unwrap_or_default())
 }
 
 /// `proto.ListResourcesResponse`: the nodes and the next page's key.
@@ -193,25 +199,7 @@ fn parse_server(b: &[u8]) -> Result<Node> {
     let mut n = Node::default();
     for (f, v) in fields(b)? {
         match (f, v) {
-            (4, Value::Bytes(meta)) => {
-                for (f, v) in fields(meta)? {
-                    match (f, v) {
-                        (1, v) => n.id = text(&v),
-                        (5, Value::Bytes(entry)) => {
-                            let (mut k, mut val) = (String::new(), String::new());
-                            for (f, v) in fields(entry)? {
-                                match f {
-                                    1 => k = text(&v),
-                                    2 => val = text(&v),
-                                    _ => {}
-                                }
-                            }
-                            n.labels.push((k, val));
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            (4, Value::Bytes(meta)) => (n.id, n.labels) = metadata(meta)?,
             (5, Value::Bytes(spec)) => {
                 for (f, v) in fields(spec)? {
                     match f {
@@ -459,6 +447,130 @@ async fn auth_stream(
 /// The servers this login can reach, with the logins allowed on each.
 /// Needs a login made by this version (which also gets a TLS certificate).
 pub async fn list_nodes_with_login(cluster: &Cluster, teleport_dir: &Path) -> Result<Vec<Node>> {
+    let pages = list_with_login(cluster, teleport_dir, "node").await?;
+    let mut nodes = Vec::new();
+    for p in pages {
+        nodes.extend(parse_list(&p)?.0);
+    }
+    nodes.sort_by_key(|n| n.hostname.to_lowercase());
+    Ok(nodes)
+}
+
+/// A Windows desktop registered in the cluster.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Desktop {
+    pub name: String,
+    /// Its RDP address as the cluster knows it (`10.0.0.20:3389`).
+    pub addr: String,
+    /// The Active Directory domain; empty for a desktop outside one.
+    pub domain: String,
+    pub labels: Vec<(String, String)>,
+    /// The Windows users this login may use there.
+    pub logins: Vec<String>,
+}
+
+impl Desktop {
+    /// Host and port of its address (3389 when it has none).
+    pub fn host_port(&self) -> (String, u16) {
+        match self.addr.rsplit_once(':') {
+            Some((h, p)) if p.parse::<u16>().is_ok() && !h.ends_with(':') => {
+                (h.trim_matches(['[', ']']).to_string(), p.parse().unwrap())
+            }
+            _ => (self.addr.trim_matches(['[', ']']).to_string(), 3389),
+        }
+    }
+}
+
+/// The Windows desktops this login can see, with the Windows users allowed
+/// on each.
+pub async fn list_desktops_with_login(cluster: &Cluster, teleport_dir: &Path) -> Result<Vec<Desktop>> {
+    let mut out = Vec::new();
+    for p in list_with_login(cluster, teleport_dir, "windows_desktop").await? {
+        out.extend(parse_desktops(&p)?);
+    }
+    out.sort_by_key(|d| d.name.to_lowercase());
+    Ok(out)
+}
+
+/// The desktops of a ListResources reply: PaginatedResource WindowsDesktop
+/// = 5 (header = 1 with Metadata = 4; Spec = 2: Addr = 1, Domain = 2),
+/// Logins = 13.
+fn parse_desktops(b: &[u8]) -> Result<Vec<Desktop>> {
+    let mut out = Vec::new();
+    for (f, v) in fields(b)? {
+        let (1, Value::Bytes(res)) = (f, v) else { continue };
+        let mut d = None::<Desktop>;
+        let mut logins = Vec::new();
+        for (f, v) in fields(res)? {
+            match (f, v) {
+                (5, Value::Bytes(desk)) => {
+                    let mut x = Desktop::default();
+                    for (f, v) in fields(desk)? {
+                        match (f, v) {
+                            (1, Value::Bytes(header)) => {
+                                for (f, v) in fields(header)? {
+                                    if let (4, Value::Bytes(meta)) = (f, v) {
+                                        let (name, labels) = metadata(meta)?;
+                                        x.name = name;
+                                        x.labels = labels;
+                                    }
+                                }
+                            }
+                            (2, Value::Bytes(spec)) => {
+                                for (f, v) in fields(spec)? {
+                                    match f {
+                                        1 => x.addr = text(&v),
+                                        2 => x.domain = text(&v),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    d = Some(x);
+                }
+                (13, v) => logins.push(text(&v)),
+                _ => {}
+            }
+        }
+        if let Some(mut d) = d {
+            logins.sort();
+            d.logins = logins;
+            // Teleport's own labels say nothing a person needs here.
+            d.labels.retain(|(k, _)| !k.starts_with("teleport.dev/"));
+            d.labels.sort();
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
+/// `types.Metadata`: Name = 1, Labels = 5 (map entries: key 1, value 2).
+fn metadata(b: &[u8]) -> Result<(String, Vec<(String, String)>)> {
+    let (mut name, mut labels) = (String::new(), Vec::new());
+    for (f, v) in fields(b)? {
+        match (f, v) {
+            (1, v) => name = text(&v),
+            (5, Value::Bytes(entry)) => {
+                let (mut k, mut val) = (String::new(), String::new());
+                for (f, v) in fields(entry)? {
+                    match f {
+                        1 => k = text(&v),
+                        2 => val = text(&v),
+                        _ => {}
+                    }
+                }
+                labels.push((k, val));
+            }
+            _ => {}
+        }
+    }
+    Ok((name, labels))
+}
+
+/// Every page of a ListResources reply for `kind`, as received.
+pub async fn list_with_login(cluster: &Cluster, teleport_dir: &Path, kind: &str) -> Result<Vec<Bytes>> {
     let key = cluster.key_path(teleport_dir);
     if !cert_state(&key).is_some_and(|c| c.is_valid()) {
         bail!(crate::teleport::LoginNeeded { cluster: cluster.id, server: cluster.label() });
@@ -503,18 +615,18 @@ pub async fn list_nodes_with_login(cluster: &Cluster, teleport_dir: &Path) -> Re
             },
         };
         let mut auth = h2_connect(tls).await?;
-        let (mut nodes, mut start) = (Vec::new(), String::new());
+        let (mut pages, mut start) = (Vec::new(), String::new());
         for _ in 0..200 {
-            let resp = unary(&mut auth, AUTH_NAME, "/proto.AuthService/ListResources", &list_request(&start)).await?;
-            let (page, next) = parse_list(&resp)?;
-            nodes.extend(page);
+            let resp =
+                unary(&mut auth, AUTH_NAME, "/proto.AuthService/ListResources", &list_request(kind, &start)).await?;
+            let next = next_key(&resp)?;
+            pages.push(resp);
             if next.is_empty() {
                 break;
             }
             start = next;
         }
-        nodes.sort_by_key(|n| n.hostname.to_lowercase());
-        anyhow::Ok(nodes)
+        anyhow::Ok(pages)
     })
     .await
     .map_err(|_| anyhow::anyhow!("listing the servers timed out"))?
@@ -526,7 +638,7 @@ mod tests {
 
     #[test]
     fn list_request_and_response_round_trip() {
-        let req = list_request("abc");
+        let req = list_request("node", "abc");
         let got: Vec<(u32, String)> = fields(&req)
             .unwrap()
             .into_iter()
@@ -578,6 +690,51 @@ mod tests {
                 logins: vec!["deploy".into(), "root".into()],
             }]
         );
+    }
+
+    #[test]
+    fn desktops_from_a_list_reply() {
+        let entry = |k: &str, v: &str| {
+            let mut e = Vec::new();
+            field_bytes(&mut e, 1, k.as_bytes());
+            field_bytes(&mut e, 2, v.as_bytes());
+            e
+        };
+        let mut meta = Vec::new();
+        field_bytes(&mut meta, 1, b"win-app-1");
+        field_bytes(&mut meta, 5, &entry("teleport.dev/origin", "config-file"));
+        field_bytes(&mut meta, 5, &entry("os", "windows"));
+        let mut header = Vec::new();
+        field_bytes(&mut header, 1, b"windows_desktop");
+        field_bytes(&mut header, 4, &meta);
+        let mut spec = Vec::new();
+        field_bytes(&mut spec, 1, b"10.0.0.20:3389");
+        field_bytes(&mut spec, 2, b"corp.example");
+        let mut desk = Vec::new();
+        field_bytes(&mut desk, 1, &header);
+        field_bytes(&mut desk, 2, &spec);
+        let mut res = Vec::new();
+        field_bytes(&mut res, 13, b"rdpuser");
+        field_bytes(&mut res, 13, b"Administrator");
+        field_bytes(&mut res, 5, &desk);
+        let mut reply = Vec::new();
+        field_bytes(&mut reply, 1, &res);
+        let got = parse_desktops(&reply).unwrap();
+        assert_eq!(
+            got,
+            [Desktop {
+                name: "win-app-1".into(),
+                addr: "10.0.0.20:3389".into(),
+                domain: "corp.example".into(),
+                labels: vec![("os".into(), "windows".into())],
+                logins: vec!["Administrator".into(), "rdpuser".into()],
+            }]
+        );
+        assert_eq!(got[0].host_port(), ("10.0.0.20".to_string(), 3389));
+        let bare = Desktop { addr: "winbox".into(), ..Default::default() };
+        assert_eq!(bare.host_port(), ("winbox".to_string(), 3389));
+        let v6 = Desktop { addr: "[fd00::5]:3390".into(), ..Default::default() };
+        assert_eq!(v6.host_port(), ("fd00::5".to_string(), 3390));
     }
 
     #[test]

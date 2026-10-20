@@ -125,7 +125,7 @@ impl App {
             if proxy.is_none() && !wg {
                 continue;
             }
-            if p.jump.is_some() || p.teleport.is_some() {
+            if p.jump.is_some() || p.teleport.is_some() || p.rdp.as_ref().is_some_and(|r| r.via.is_some()) {
                 if !proxy.is_none() {
                     skipped.push(p.display_name());
                 }

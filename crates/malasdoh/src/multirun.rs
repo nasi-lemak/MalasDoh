@@ -357,7 +357,7 @@ pub fn host_picker(
             let members: Vec<&Profile> = profiles
                 .profiles
                 .iter()
-                .filter(|p| p.group.trim() == group)
+                .filter(|p| p.group.trim() == group && p.rdp.is_none())
                 .filter(|p| filter.is_empty() || p.display_name().to_lowercase().contains(&filter.to_lowercase()))
                 .collect();
             if members.is_empty() {

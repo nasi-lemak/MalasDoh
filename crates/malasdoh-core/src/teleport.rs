@@ -743,6 +743,42 @@ pub fn node_profile(
     p
 }
 
+/// A Windows desktop's Remote Desktop connection, as Windows user
+/// `login`. It goes through whichever of the cluster's servers in the list
+/// can reach it.
+pub fn desktop_profile(
+    cluster: &Cluster,
+    desktop: &crate::teleport_api::Desktop,
+    login: &str,
+    existing: Option<Profile>,
+) -> Profile {
+    let mut p = existing.unwrap_or_else(|| Profile {
+        group: group_name(cluster),
+        rdp: Some(crate::profile::RemoteDesktop::default()),
+        ..Default::default()
+    });
+    let (host, port) = desktop.host_port();
+    p.name = desktop.name.clone();
+    p.host = host;
+    p.port = port;
+    p.user = login.to_string();
+    p.teleport = Some(cluster.id);
+    p.jump = None;
+    p.proxy = Proxy::None;
+    if p.rdp.is_none() {
+        p.rdp = Some(crate::profile::RemoteDesktop::default());
+    }
+    let labels: Vec<String> = desktop.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if p.notes.is_empty() || p.notes.starts_with("Teleport") {
+        p.notes = format!(
+            "Teleport Windows desktop: {}{}",
+            cluster.label(),
+            if labels.is_empty() { String::new() } else { format!(" · {}", labels.join(", ")) }
+        );
+    }
+    p
+}
+
 fn group_name(cluster: &Cluster) -> String {
     format!("Teleport · {}", cluster.label())
 }

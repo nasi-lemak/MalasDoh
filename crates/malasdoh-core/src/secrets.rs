@@ -23,6 +23,9 @@ pub enum SecretKey {
     TeleportPassword(uuid::Uuid),
     /// A WireGuard tunnel's private key.
     WireGuardKey(uuid::Uuid),
+    /// The Windows password of a Remote Desktop connection, for programs
+    /// without a login dialog of their own (FreeRDP).
+    RdpPassword(ProfileId),
 }
 
 impl SecretKey {
@@ -34,6 +37,7 @@ impl SecretKey {
             SecretKey::SudoPassword(id) => format!("sudo-password:{id}"),
             SecretKey::TeleportPassword(id) => format!("teleport-password:{id}"),
             SecretKey::WireGuardKey(id) => format!("wireguard-key:{id}"),
+            SecretKey::RdpPassword(id) => format!("rdp-password:{id}"),
         }
     }
 }

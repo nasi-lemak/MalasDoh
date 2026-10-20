@@ -1720,6 +1720,85 @@ async fn wireguard_tunnel_end_to_end() {
     assert!(format!("{e:#}").contains("no handshake"), "{e:#}");
 }
 
+/// A stand-in Remote Desktop server: answers each RDP hello with an
+/// X.224 connection confirm.
+async fn fake_rdp(bind: &str) -> (u16, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind(bind).await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 19];
+                if s.read_exact(&mut buf).await.is_ok() && buf[5] == 0xe0 {
+                    let _ =
+                        s.write_all(&[0x03, 0, 0, 0x13, 0x0e, 0xd0, 0, 0, 0x12, 0x34, 0, 2, 0, 8, 0, 1, 0, 0, 0]).await;
+                }
+            });
+        }
+    });
+    (port, task)
+}
+
+/// Remote Desktop through an SSH server: the server reaching the desktop is
+/// told apart from one where nothing answers, or something else does.
+#[tokio::test]
+async fn remote_desktop_through_ssh() {
+    use malasdoh_core::rdp;
+    let Some(env) = Env::new() else { return };
+    let conn = Arc::new(env.connect().await);
+    let (port, _rdp) = fake_rdp("127.0.0.1:0").await;
+    let within = std::time::Duration::from_secs(5);
+    rdp::probe(&conn, "127.0.0.1", port, within).await.unwrap();
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let e = format!("{:#}", rdp::probe(&conn, "127.0.0.1", closed, within).await.unwrap_err());
+    assert!(e.contains("refused to forward") || e.contains("nothing answers"), "{e}");
+    let e = format!("{:#}", rdp::probe(&conn, "127.0.0.1", env.sshd.port, within).await.unwrap_err());
+    assert!(e.contains("not as Remote Desktop"), "the SSH server is not one: {e}");
+    conn.disconnect().await;
+}
+
+/// Remote Desktop through the built-in WireGuard tunnel (a connection's
+/// Proxy): a local port whose connections go through the tunnel.
+#[tokio::test]
+async fn remote_desktop_through_wireguard() {
+    use malasdoh_core::rdp;
+    use malasdoh_core::wireguard::WgConfig;
+    let _serial = WIREGUARD_TESTS.lock().await;
+    let Ok(conf_path) = std::env::var("MALASDOH_WIREGUARD") else {
+        eprintln!("skipped: set MALASDOH_WIREGUARD to a client .conf for a server at 10.9.9.1");
+        return;
+    };
+    let text = std::fs::read_to_string(&conf_path).unwrap();
+    let (port, _rdp) = fake_rdp("10.9.9.1:0").await;
+    let Some(env) = Env::new() else { return };
+    let id = uuid::Uuid::new_v4();
+    env.secrets.set(&SecretKey::WireGuardKey(id), &WgConfig::private_key_text(&text).unwrap()).unwrap();
+    let ctx = Arc::new(env.ctx(TestPrompter::accepting()));
+    ctx.wireguard.write().unwrap().insert(id, WgConfig::strip_private_key(&text));
+    let mut p = env.profile();
+    p.host = "10.9.9.1".into();
+    p.port = port;
+    p.rdp = Some(Default::default());
+    p.proxy = malasdoh_core::proxy::Proxy::WireGuard { tunnel: id, name: "test".into() };
+
+    let s = ssh::dial(&p, &ctx).await.unwrap();
+    rdp::probe_stream(s, "10.9.9.1", "through WireGuard").await.unwrap();
+    let dial = {
+        let (p, ctx) = (p.clone(), ctx.clone());
+        move || {
+            let (p, ctx) = (p.clone(), ctx.clone());
+            async move { ssh::dial(&p, &ctx).await }
+        }
+    };
+    let (local, task) = rdp::listen(dial).await.unwrap();
+    for _ in 0..2 {
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
+        rdp::probe_stream(tcp, "the local port", "").await.unwrap();
+    }
+    task.abort();
+}
+
 /// Two different tunnels in use at the same time: MALASDOH_WIREGUARD (a
 /// server at 10.9.9.1) and MALASDOH_WIREGUARD2 (another at 10.9.10.1),
 /// with one SSH server listening on both.

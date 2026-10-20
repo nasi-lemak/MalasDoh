@@ -161,7 +161,42 @@ async fn log_in_list_and_connect() {
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("hello-from-"), "{out:?}");
     let fs = conn.open_sftp().await.unwrap();
     assert!(!fs.home().await.unwrap().is_empty());
-    conn.disconnect().await;
+
+    // Windows desktops, when the cluster has any (MALASDOH_TELEPORT_DESKTOP
+    // names one reachable from the server above): listed with the login,
+    // and Remote Desktop through a port forwarded by that server.
+    let desktops = malasdoh_core::teleport_api::list_desktops_with_login(&cluster, &tdir).await.unwrap();
+    if let Ok(name) = std::env::var("MALASDOH_TELEPORT_DESKTOP") {
+        let d = desktops.iter().find(|d| d.name == name).unwrap_or_else(|| panic!("{name} not in {desktops:?}"));
+        assert!(!d.logins.is_empty(), "the Windows users come too: {d:?}");
+        let p = teleport::desktop_profile(&cluster, d, &d.logins[0], None);
+        assert!(p.rdp.is_some() && p.teleport == Some(cluster.id));
+        let (host, port) = d.host_port();
+        assert_eq!((p.host.as_str(), p.port), (host.as_str(), port));
+        let conn = Arc::new(conn);
+        let within = std::time::Duration::from_secs(8);
+        malasdoh_core::rdp::probe(&conn, &host, port, within).await.unwrap();
+        let e = malasdoh_core::rdp::probe(&conn, "127.0.0.1", 1, within).await.unwrap_err();
+        assert!(format!("{e:#}").contains("nothing answers"), "{e:#}");
+        // Its SSH port answers, but not as Remote Desktop.
+        let e = malasdoh_core::rdp::probe(&conn, "127.0.0.1", 3022, within).await.unwrap_err();
+        assert!(format!("{e:#}").contains("not as Remote Desktop"), "{e:#}");
+        let spec =
+            malasdoh_core::forward::ForwardSpec { target_host: host.clone(), target_port: port, ..Default::default() };
+        let fwd = conn.start_forward(&spec).await.unwrap();
+        // An RDP hello (X.224 connection request); the desktop answers with
+        // a connection confirm (code 0xD0).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", fwd.port)).await.unwrap();
+        tcp.write_all(&malasdoh_core::rdp::hello()).await.unwrap();
+        let mut reply = [0u8; 11];
+        tokio::time::timeout(std::time::Duration::from_secs(5), tcp.read_exact(&mut reply)).await.unwrap().unwrap();
+        assert!(malasdoh_core::rdp::is_rdp_answer(&reply), "{reply:02x?}");
+        drop(fwd);
+        conn.disconnect().await;
+    } else {
+        conn.disconnect().await;
+    }
     assert!(prompter.0.lock().unwrap().is_empty(), "asked: {:?}", prompter.0.lock().unwrap());
 
     // Logged out: connecting says so before trying.

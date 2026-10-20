@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use egui::RichText;
 use malasdoh_core::secrets::SecretKey;
 use malasdoh_core::teleport::{self, CertState, Cluster, ClusterId, ClusterInfo, Node, TeleportError, TeleportStore};
+use malasdoh_core::teleport_api::Desktop;
 
 use crate::bridge::{EventKind, MULTI_RUN};
 use crate::session::Shared;
@@ -27,6 +28,11 @@ pub enum TeleportMsg {
         result: Result<Vec<Node>, String>,
         with_login: bool,
     },
+    /// The cluster's Windows desktops (listed with the login).
+    Desktops {
+        cluster: ClusterId,
+        result: Result<Vec<Desktop>, String>,
+    },
     Password {
         cluster: ClusterId,
         password: Option<String>,
@@ -43,6 +49,12 @@ pub enum TeleportAction {
         nodes: Vec<Node>,
         login: String,
     },
+    /// Add or update Remote Desktop connections for these desktops.
+    AddDesktops {
+        cluster: ClusterId,
+        desktops: Vec<Desktop>,
+        login: String,
+    },
     LogOut(ClusterId),
     Remove(ClusterId),
 }
@@ -56,6 +68,9 @@ struct AddForm {
     /// The proxy's certificate fingerprint, when this computer does not trust it.
     untrusted: Option<String>,
 }
+
+/// A desktop found: ticked to add, already a connection.
+type DesktopRow = (Desktop, bool, bool);
 
 #[derive(Default)]
 pub struct TeleportWindow {
@@ -76,6 +91,8 @@ pub struct TeleportWindow {
     message: Option<(String, bool)>,
     found: Option<(ClusterId, Vec<(Node, bool)>)>,
     login_choice: String,
+    desktops: Option<(ClusterId, Vec<DesktopRow>)>,
+    desktop_login: String,
     /// Sessions waiting for this login, to connect once it is done.
     pub waiting: Vec<(ClusterId, u64)>,
     loaded_password_for: Option<ClusterId>,
@@ -110,7 +127,12 @@ impl TeleportWindow {
         self.message = Some(("Your Teleport login has expired or is missing. Log in to continue.".into(), false));
     }
 
-    pub fn handle(&mut self, msg: TeleportMsg, store: &TeleportStore) -> Vec<TeleportAction> {
+    pub fn handle(
+        &mut self,
+        msg: TeleportMsg,
+        store: &TeleportStore,
+        profiles: &malasdoh_core::profile::ProfileStore,
+    ) -> Vec<TeleportAction> {
         let mut actions = Vec::new();
         match msg {
             TeleportMsg::Checked { address, pin, result, untrusted } => {
@@ -180,6 +202,27 @@ impl TeleportWindow {
                     Err(e) => self.message = Some((e, true)),
                 }
             }
+            TeleportMsg::Desktops { cluster, result } => match result {
+                Ok(list) => {
+                    let rows = list
+                        .into_iter()
+                        .map(|d| {
+                            let known = profiles
+                                .profiles
+                                .iter()
+                                .any(|p| p.teleport == Some(cluster) && p.rdp.is_some() && p.name == d.name);
+                            (d, !known, known)
+                        })
+                        .collect::<Vec<_>>();
+                    self.desktops = (!rows.is_empty()).then_some((cluster, rows));
+                }
+                // Listing servers is what matters; a cluster without desktop
+                // access (or an older one) just has none to show.
+                Err(e) => {
+                    tracing::info!("teleport desktops: {e}");
+                    self.desktops = None;
+                }
+            },
             TeleportMsg::Password { cluster, password } => {
                 if self.selected == Some(cluster)
                     && self.password.is_empty()
@@ -458,10 +501,17 @@ impl TeleportWindow {
                 let result = malasdoh_core::teleport_api::list_nodes_with_login(&cluster, &tdir)
                     .await
                     .map_err(|e| format!("{e:#}"));
+                let listed = result.is_ok();
                 events.send(
                     MULTI_RUN,
                     EventKind::Teleport(TeleportMsg::Found { cluster: cluster.id, result, with_login: true }),
                 );
+                if listed {
+                    let result = malasdoh_core::teleport_api::list_desktops_with_login(&cluster, &tdir)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    events.send(MULTI_RUN, EventKind::Teleport(TeleportMsg::Desktops { cluster: cluster.id, result }));
+                }
             });
         }
         if self.needs_code.contains(&c.id) {
@@ -545,6 +595,7 @@ impl TeleportWindow {
                 Some((format!("Added to the connection list, in the group \"Teleport · {}\".", c.label()), false));
             self.found = None;
         }
+        self.desktops_ui(ui, c, logged_in, actions);
         ui.separator();
         ui.horizontal(|ui| {
             if ui
@@ -557,11 +608,81 @@ impl TeleportWindow {
                 if self.found.as_ref().is_some_and(|(id, _)| *id == c.id) {
                     self.found = None;
                 }
+                if self.desktops.as_ref().is_some_and(|(id, _)| *id == c.id) {
+                    self.desktops = None;
+                }
             }
             if ui.button("Remove cluster").on_hover_text("Its connections stay, but cannot log in").clicked() {
                 actions.push(TeleportAction::Remove(c.id));
                 self.selected = None;
             }
         });
+    }
+
+    /// The cluster's Windows desktops, to add as Remote Desktop connections.
+    fn desktops_ui(&mut self, ui: &mut egui::Ui, c: &Cluster, logged_in: bool, actions: &mut Vec<TeleportAction>) {
+        let Some((cid, rows)) = self.desktops.as_mut().filter(|(cid, _)| *cid == c.id) else { return };
+        let cid = *cid;
+        ui.separator();
+        ui.label(RichText::new("Windows desktops").strong());
+        ui.label(
+            RichText::new(
+                "Opened in your own Remote Desktop program (smooth, unlike the browser), through one of the \
+                 cluster's servers in your list that can reach the desktop.",
+            )
+            .weak(),
+        );
+        let logins: BTreeSet<String> = rows.iter().flat_map(|(d, ..)| d.logins.iter().cloned()).collect();
+        if !logins.contains(&self.desktop_login) {
+            self.desktop_login = if logins.contains("Administrator") {
+                "Administrator".into()
+            } else {
+                logins.iter().next().cloned().unwrap_or_default()
+            };
+        }
+        egui::ScrollArea::vertical().id_salt("tp-desktops").max_height(160.0).show(ui, |ui| {
+            for (d, on, known) in rows.iter_mut() {
+                let labels: Vec<String> = d.labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                let mut text = format!("{}   {}", d.name, d.addr);
+                if !labels.is_empty() {
+                    text.push_str(&format!("   {}", labels.join(" ")));
+                }
+                if *known {
+                    text.push_str("   (in your list)");
+                }
+                ui.checkbox(on, text).on_hover_text(format!("Windows users: {}", d.logins.join(", ")));
+            }
+        });
+        let picked: Vec<Desktop> = rows.iter().filter(|(_, on, _)| *on).map(|(d, ..)| d.clone()).collect();
+        let mut added = false;
+        ui.horizontal(|ui| {
+            ui.label("Windows user");
+            egui::ComboBox::from_id_salt("tp-desktop-login").selected_text(&self.desktop_login).show_ui(ui, |ui| {
+                for l in &logins {
+                    ui.selectable_value(&mut self.desktop_login, l.clone(), l);
+                }
+            });
+            let label = format!("Add {} desktop(s)", picked.len());
+            if ui.add_enabled(!picked.is_empty() && logged_in, egui::Button::new(label)).clicked() {
+                actions.push(TeleportAction::AddDesktops {
+                    cluster: cid,
+                    desktops: picked.clone(),
+                    login: self.desktop_login.clone(),
+                });
+                added = true;
+            }
+        });
+        if added {
+            for (_, on, known) in rows.iter_mut() {
+                if *on {
+                    *known = true;
+                    *on = false;
+                }
+            }
+            self.message = Some((
+                format!("Added. Double-click one in \"Teleport · {}\" to open Remote Desktop.", c.label()),
+                false,
+            ));
+        }
     }
 }

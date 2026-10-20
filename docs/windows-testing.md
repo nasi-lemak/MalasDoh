@@ -106,6 +106,16 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   terminal and files work, with no fingerprint question.
 - [ ] 6.4 **Log out**, then connect again: the login form opens; after
   logging in, the connection carries on by itself.
+- [ ] 6.5 If the cluster has Windows desktops: they are listed under
+  **Windows desktops** after logging in. Pick the Windows user → **Add**.
+  At least one Linux server of the cluster that can reach the desktop must
+  be in your list too (6.3).
+- [ ] 6.6 Double-click the desktop (marked "· RDP"): the **Remote Desktop**
+  window says which server it goes through, and Windows' own Remote Desktop
+  opens and asks for your Windows password. Moving the mouse and scrolling
+  should feel like normal Remote Desktop, not like the browser.
+- [ ] 6.7 Close the Remote Desktop window: MalasDoh's window says it is
+  closed. Double-click again: it goes straight through the same server.
 
 ## 7. WireGuard (if you use it)
 

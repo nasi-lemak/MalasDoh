@@ -29,6 +29,9 @@ impl App {
                 TeleportAction::AddServers { cluster, nodes, login } => {
                     self.add_teleport_servers(cluster, nodes, login)
                 }
+                TeleportAction::AddDesktops { cluster, desktops, login } => {
+                    self.add_teleport_desktops(cluster, desktops, login)
+                }
                 TeleportAction::LogOut(id) => {
                     if let Some(c) = self.teleport.get(id) {
                         teleport::log_out(c, &tdir);
@@ -75,6 +78,41 @@ impl App {
                 c.hosts.insert(0, pattern);
             }
             self.save_profiles();
+        }
+    }
+
+    /// Remote Desktop connections for a cluster's Windows desktops.
+    fn add_teleport_desktops(
+        &mut self,
+        id: ClusterId,
+        desktops: Vec<malasdoh_core::teleport_api::Desktop>,
+        login: String,
+    ) {
+        let Some(cluster) = self.teleport.get(id).cloned() else { return };
+        for d in &desktops {
+            let existing: Option<Profile> = self
+                .profiles
+                .profiles
+                .iter()
+                .find(|p| p.teleport == Some(id) && p.rdp.is_some() && p.name == d.name)
+                .cloned();
+            let login =
+                if d.logins.contains(&login) || d.logins.is_empty() { login.clone() } else { d.logins[0].clone() };
+            let _ = self.profiles.upsert(teleport::desktop_profile(&cluster, d, &login, existing));
+        }
+        self.save_profiles();
+        let servers = self
+            .profiles
+            .profiles
+            .iter()
+            .filter(|p| p.teleport == Some(id) && p.rdp.is_none() && p.jump.is_some())
+            .count();
+        if servers == 0 {
+            self.notify(
+                "Desktops added. Remote Desktop goes through one of the cluster's Linux servers: add one near them too \
+                 (the Servers list above).",
+                false,
+            );
         }
     }
 

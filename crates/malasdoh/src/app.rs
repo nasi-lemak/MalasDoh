@@ -2,6 +2,7 @@
 //! a connection's questions.
 
 mod backup;
+mod rdp;
 mod teleport;
 mod wireguard;
 
@@ -64,6 +65,7 @@ pub struct App {
     teleport_win: crate::teleport_ui::TeleportWindow,
     wg_store: malasdoh_core::wireguard::WgStore,
     wg_win: crate::wireguard_ui::WireGuardWindow,
+    desktops: crate::rdp_ui::DesktopsWindow,
     export_dlg: Option<backup::ExportDialog>,
     import_dlg: Option<backup::ImportDialog>,
     /// "Type into several terminals": the sessions that get what is typed.
@@ -316,6 +318,7 @@ impl App {
             skip_text: settings_skip,
             teleport: malasdoh_core::teleport::TeleportStore::load(paths_teleport),
             teleport_win: Default::default(),
+            desktops: Default::default(),
             wg_store,
             wg_win: Default::default(),
             broadcast: None,
@@ -391,6 +394,9 @@ impl App {
     }
 
     fn connect(&mut self, id: ProfileId) {
+        if self.profiles.get(id).is_some_and(|p| p.rdp.is_some()) {
+            return self.open_desktop(id);
+        }
         let chain = match self.profiles.chain(id) {
             Ok(c) => c,
             Err(e) => return self.notify(format!("{e:#}"), true),
@@ -416,8 +422,12 @@ impl App {
                     continue;
                 }
                 AppEvent { kind: EventKind::Teleport(m), .. } => {
-                    let actions = self.teleport_win.handle(m, &self.teleport);
+                    let actions = self.teleport_win.handle(m, &self.teleport, &self.profiles);
                     self.teleport_actions(actions);
+                    continue;
+                }
+                AppEvent { kind: EventKind::Rdp(m), .. } => {
+                    self.desktop_msg(m);
                     continue;
                 }
                 AppEvent { kind: EventKind::Session(crate::session::SessionMsg::TeleportLogin(c)), session } => {
@@ -448,7 +458,8 @@ impl App {
                 | EventKind::MultiEdit(_)
                 | EventKind::Compare(_)
                 | EventKind::Keys(_)
-                | EventKind::Teleport(_) => {}
+                | EventKind::Teleport(_)
+                | EventKind::Rdp(_) => {}
             }
         }
     }
@@ -704,6 +715,7 @@ impl App {
         let mut connect = None;
         let mut edit = None;
         let mut duplicate = None;
+        let mut rdp_via = None;
         let mut group_proxy = None;
         let tunnels: Vec<(uuid::Uuid, String)> = self.wg_store.tunnels.iter().map(|t| (t.id, t.name.clone())).collect();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -726,17 +738,31 @@ impl App {
                 let title = if group.is_empty() { "Ungrouped".to_string() } else { group.clone() };
                 let shown = egui::CollapsingHeader::new(title).default_open(true).show(ui, |ui| {
                     for p in members {
-                        let r = ui.selectable_label(false, format!("🖥 {}", p.display_name())).on_hover_text(format!(
-                            "{}\n{}{}",
-                            p.destination(),
-                            p.auth.label(),
+                        let rdp = p.rdp.is_some();
+                        let label = if rdp {
+                            format!("🖥 {} · RDP", p.display_name())
+                        } else {
+                            format!("🖥 {}", p.display_name())
+                        };
+                        let what = if rdp {
+                            format!(
+                                "Remote Desktop to {}:{}{}",
+                                p.host,
+                                p.port,
+                                if p.user.is_empty() { String::new() } else { format!(" as {}", p.user) }
+                            )
+                        } else {
+                            format!("{}\n{}", p.destination(), p.auth.label())
+                        };
+                        let r = ui.selectable_label(false, label).on_hover_text(format!(
+                            "{what}{}",
                             if p.notes.is_empty() { String::new() } else { format!("\n{}", p.notes) }
                         ));
                         if r.double_clicked() {
                             connect = Some(p.id);
                         }
                         r.context_menu(|ui| {
-                            if ui.button("Connect").clicked() {
+                            if ui.button(if rdp { "Open Remote Desktop" } else { "Connect" }).clicked() {
                                 connect = Some(p.id);
                                 ui.close();
                             }
@@ -748,9 +774,19 @@ impl App {
                                 duplicate = Some(p.id);
                                 ui.close();
                             }
-                            if ui.button("Copy ssh command").clicked() {
+                            if !rdp && ui.button("Copy ssh command").clicked() {
                                 let port = if p.port == 22 { String::new() } else { format!(" -p {}", p.port) };
                                 ui.ctx().copy_text(format!("ssh {}@{}{port}", p.user, p.host));
+                                ui.close();
+                            }
+                            if !rdp && ui
+                                .button("Remote Desktop through this…")
+                                .on_hover_text(
+                                    "A Windows machine this server can reach, opened in your Remote Desktop program",
+                                )
+                                .clicked()
+                            {
+                                rdp_via = Some(p.id);
                                 ui.close();
                             }
                             ui.separator();
@@ -794,6 +830,16 @@ impl App {
         }
         if let Some(p) = edit.and_then(|id| self.profiles.get(id).cloned()) {
             self.form = Some(ProfileForm::new(p, false));
+        }
+        if let Some(via) = rdp_via.and_then(|id| self.profiles.get(id).cloned()) {
+            let p = Profile {
+                name: String::new(),
+                group: via.group.clone(),
+                port: 3389,
+                rdp: Some(malasdoh_core::profile::RemoteDesktop { via: Some(via.id) }),
+                ..Default::default()
+            };
+            self.form = Some(ProfileForm::new(p, true));
         }
         if let Some(mut p) = duplicate.and_then(|id| self.profiles.get(id).cloned()) {
             p.id = ProfileId::new();
@@ -1346,11 +1392,12 @@ impl App {
         let tunnels: Vec<(uuid::Uuid, String)> = self.wg_store.tunnels.iter().map(|t| (t.id, t.name.clone())).collect();
         let Some(form) = &mut self.form else { return };
         let mut result: Option<bool> = None;
+        // SSH connections only: what a jump host or a Remote Desktop route can be.
         let others: Vec<(ProfileId, String)> = self
             .profiles
             .profiles
             .iter()
-            .filter(|p| p.id != form.profile.id)
+            .filter(|p| p.id != form.profile.id && p.rdp.is_none())
             .map(|p| (p.id, p.display_name()))
             .collect();
         let groups = self.profiles.groups();
@@ -1359,6 +1406,23 @@ impl App {
             ui.heading(if form.is_new { "New connection" } else { "Edit connection" });
             egui::Grid::new("profile-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 let p = &mut form.profile;
+                ui.label("Type");
+                ui.horizontal(|ui| {
+                    let rdp = p.rdp.is_some();
+                    if ui.selectable_label(!rdp, "SSH").clicked() && rdp {
+                        p.rdp = None;
+                        if form.port.trim() == "3389" {
+                            form.port = "22".into();
+                        }
+                    }
+                    if ui.selectable_label(rdp, "Remote Desktop").clicked() && !rdp {
+                        p.rdp = Some(Default::default());
+                        if form.port.trim() == "22" {
+                            form.port = "3389".into();
+                        }
+                    }
+                });
+                ui.end_row();
                 ui.label("Name");
                 ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("prod-web-1"));
                 ui.end_row();
@@ -1368,9 +1432,44 @@ impl App {
                 ui.label("Port");
                 ui.add(egui::TextEdit::singleline(&mut form.port).desired_width(60.0));
                 ui.end_row();
-                ui.label("User");
-                ui.text_edit_singleline(&mut p.user);
+                ui.label(if p.rdp.is_some() { "Windows user" } else { "User" });
+                ui.add(egui::TextEdit::singleline(&mut p.user).hint_text(if p.rdp.is_some() {
+                    "e.g. Administrator, or DOMAIN\\name (empty: asked)"
+                } else {
+                    ""
+                }));
                 ui.end_row();
+                if let Some(rd) = &mut p.rdp {
+                    ui.label("Through");
+                    ui.vertical(|ui| {
+                        let none = if p.teleport.is_some() {
+                            "Any Teleport server here that reaches it"
+                        } else {
+                            "Directly (or through the Proxy below)"
+                        };
+                        let current = rd
+                            .via
+                            .and_then(|j| others.iter().find(|(id, _)| *id == j))
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_else(|| none.into());
+                        egui::ComboBox::from_id_salt("rdp-via").selected_text(current).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut rd.via, None, none);
+                            for (id, name) in &others {
+                                ui.selectable_value(&mut rd.via, Some(*id), name);
+                            }
+                        });
+                        ui.label(
+                            RichText::new(
+                                "MalasDoh forwards a local port through this SSH connection's server to the \
+                                 desktop, then opens your Remote Desktop program on it.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    });
+                    ui.end_row();
+                }
+                if p.rdp.is_none() {
                 ui.label("Authentication");
                 ui.vertical(|ui| {
                     egui::ComboBox::from_id_salt("auth").selected_text(p.auth.label()).show_ui(ui, |ui| {
@@ -1436,6 +1535,7 @@ impl App {
                     }
                 });
                 ui.end_row();
+                }
                 ui.label("Group");
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut p.group).hint_text("Production").desired_width(200.0));
@@ -1448,6 +1548,7 @@ impl App {
                     });
                 });
                 ui.end_row();
+                if p.rdp.is_none() {
                 ui.label("Start folder");
                 ui.add(egui::TextEdit::singleline(&mut p.start_dir).hint_text("home directory"));
                 ui.end_row();
@@ -1463,9 +1564,14 @@ impl App {
                 ui.label("Backups");
                 ui.checkbox(&mut p.remote_backup, "Also keep a .bak copy next to edited files on the server");
                 ui.end_row();
-                ui.label("Proxy");
-                proxy_editor(ui, &mut p.proxy, &tunnels);
-                ui.end_row();
+                }
+                // A Remote Desktop route through a server needs no proxy of its own.
+                if p.rdp.as_ref().is_none_or(|r| r.via.is_none() && p.teleport.is_none()) {
+                    ui.label("Proxy");
+                    proxy_editor(ui, &mut p.proxy, &tunnels);
+                    ui.end_row();
+                }
+                if p.rdp.is_none() {
                 ui.label("Keepalive");
                 ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut p.keepalive_secs).range(0..=3600).suffix(" s"));
@@ -1484,11 +1590,13 @@ impl App {
                      while you are connected, anyone with root there can use your keys too.",
                 );
                 ui.end_row();
+                }
                 ui.label("Notes");
                 ui.add(egui::TextEdit::multiline(&mut p.notes).desired_rows(2));
                 ui.end_row();
             });
             let p = &mut form.profile;
+            if p.rdp.is_none() {
             egui::CollapsingHeader::new(format!("Port forwards ({})", p.forwards.len())).show(ui, |ui| {
                 let mut remove = None;
                 egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
@@ -1510,6 +1618,7 @@ impl App {
                     p.forwards.push(Default::default());
                 }
             });
+            }
             if let Some(e) = &form.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
@@ -2057,6 +2166,11 @@ impl eframe::App for App {
         self.compares.ui(&ctx, &self.sessions, &self.shared);
         let actions = self.teleport_win.ui(&ctx, &self.teleport, &self.shared);
         self.teleport_actions(actions);
+        for a in self.desktops.ui(&ctx, &self.shared.rt, &crate::rdp_ui::Env::new(&self.shared)) {
+            match a {
+                crate::rdp_ui::RdpAction::Open(id) => self.open_desktop(id),
+            }
+        }
         let profiles = &self.profiles;
         let used = |id: uuid::Uuid| {
             profiles

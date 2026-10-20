@@ -50,6 +50,23 @@ remote-editing loop, where they are weakest:
   trusted by its fingerprint. Not supported: single sign-on and security-key
   logins, and clusters that want a code for every session
   (`require_session_mfa`); those need `tsh` or the web page.
+- **Remote Desktop** (RDP), in your own Remote Desktop program (`mstsc` on
+  Windows, FreeRDP or Remmina on Linux), which is what keeps the mouse and
+  screen smooth: MalasDoh only carries the connection. A Teleport cluster's
+  Windows desktops are listed after logging in, like its servers, and added
+  as Remote Desktop connections; opening one finds a server of the cluster
+  in your list that reaches the desktop (checked with a real RDP hello,
+  since Teleport accepts a forward before trying it), forwards a local port
+  through it, and remembers that server for next time. Any connection can
+  have one too: **Remote Desktop through this…** on an SSH connection, or
+  a Remote Desktop connection reached directly or through its Proxy (the
+  built-in WireGuard tunnel included). Closing the Remote Desktop window
+  closes the port. FreeRDP has no login window, so MalasDoh asks for the
+  Windows password (kept in the keychain if you like) and hands it over on
+  its standard input, not its command line. Note that this goes around
+  Teleport's own desktop access (and its session recording): it needs a
+  server allowed to forward ports, and is worth agreeing with whoever runs
+  the cluster.
 - **Proxies**: reach the first server through SOCKS5, an HTTP proxy
   (`CONNECT`), or any command (`ProxyCommand`, e.g. `nc -X connect -x
   proxy:3128 %h %p`, imported from `~/.ssh/config`). Proxy passwords are
@@ -326,7 +343,14 @@ when `MALASDOH_TELEPORT="address user password totp-secret"` is set (a local
 user with an authenticator; the secret is the base32 one from its QR code):
 trusting a self-signed proxy, a refused wrong code, login and login again,
 the server list, and a connection through the proxy with a command and SFTP
-and no host key questions. Otherwise it is skipped.
+and no host key questions. Otherwise it is skipped. With
+`MALASDOH_TELEPORT_DESKTOP` naming a Windows desktop the cluster's first
+server can reach (an xrdp server stands in well), it also lists the
+cluster's desktops and checks Remote Desktop through that server: the RDP
+probe, a closed port and a non-RDP one told apart, and a forwarded port
+that answers like a desktop. `remote_desktop_through_ssh` and
+`remote_desktop_through_wireguard` (in `tests/sshd.rs`) do the same through
+an OpenSSH server and through the WireGuard tunnel.
 
 `wireguard_tunnel_end_to_end` (in `tests/sshd.rs`) runs when
 `MALASDOH_WIREGUARD` names a client `.conf` for a WireGuard server at

@@ -52,6 +52,8 @@ pub enum EventKind {
     Keys(crate::keys_ui::KeysMsg),
     /// For the Teleport window; the session id is not used.
     Teleport(crate::teleport_ui::TeleportMsg),
+    /// For Remote Desktop connections; the session id is not used.
+    Rdp(crate::rdp_ui::RdpMsg),
 }
 
 #[derive(Clone)]

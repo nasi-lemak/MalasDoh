@@ -392,6 +392,21 @@ pub async fn connect<P: Prompter>(chain: Vec<Profile>, ctx: &ConnectContext<P>) 
     Ok(Connection { handle, hops, profile: target, remote_forwards })
 }
 
+/// A connection to `p.host:p.port` the way `p` is reached as a first hop:
+/// through its Proxy (WireGuard, SOCKS, HTTP, a command), or directly.
+pub async fn dial<P: Prompter>(p: &Profile, ctx: &ConnectContext<P>) -> Result<Box<dyn crate::proxy::Stream>> {
+    if p.proxy.is_none() {
+        let tcp =
+            tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect((p.host.as_str(), p.port)))
+                .await
+                .map_err(|_| anyhow::anyhow!("{}:{} did not answer in 15 s", p.host, p.port))?
+                .with_context(|| format!("could not reach {}:{}", p.host, p.port))?;
+        tcp.set_nodelay(true).ok();
+        return Ok(Box::new(tcp));
+    }
+    through_proxy(p, ctx).await
+}
+
 /// Reach the first hop through its proxy, asking for (and remembering, if
 /// told) the proxy password.
 async fn through_proxy<P: Prompter>(hop: &Profile, ctx: &ConnectContext<P>) -> Result<Box<dyn crate::proxy::Stream>> {

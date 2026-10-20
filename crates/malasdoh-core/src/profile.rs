@@ -112,6 +112,20 @@ pub struct Profile {
     /// The Teleport cluster whose login this connection uses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teleport: Option<crate::teleport::ClusterId>,
+    /// A Remote Desktop (RDP) connection rather than SSH: `host`:`port` is
+    /// the desktop and `user` its Windows user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rdp: Option<RemoteDesktop>,
+}
+
+/// How a Remote Desktop connection gets to its desktop.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteDesktop {
+    /// Through this SSH connection's server (a forwarded port). `None`:
+    /// for a Teleport desktop, any of the cluster's servers in the list that
+    /// can reach it (the one that worked is kept here); otherwise directly.
+    pub via: Option<ProfileId>,
 }
 
 impl Default for Profile {
@@ -138,6 +152,7 @@ impl Default for Profile {
             compression: false,
             forwards: Vec::new(),
             teleport: None,
+            rdp: None,
         }
     }
 }

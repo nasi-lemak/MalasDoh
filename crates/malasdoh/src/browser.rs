@@ -361,7 +361,7 @@ impl Browser {
             }
         });
         self.list_view = (pane.state.offset.y, pane.inner_rect.height());
-        self.sel.track_focus(ui.ctx(), pane.inner_rect);
+        self.sel.track_focus(ui, pane.inner_rect);
         // Local files dragged from the local pane upload into this folder.
         let drop = ui.interact(pane.inner_rect, egui::Id::new(("remote-drop", self.session)), Sense::hover());
         if drop.dnd_hover_payload::<crate::local::LocalDrag>().is_some() {
@@ -625,11 +625,13 @@ impl Browser {
                     }
                     ui.label("Folders are deleted with everything in them. This cannot be undone.");
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("Delete").color(ui.visuals().error_fg_color)).clicked() {
+                        if ui.button(RichText::new("Delete").color(ui.visuals().error_fg_color)).clicked()
+                            || crate::dlg::enter(ui, false)
+                        {
                             actions.push(Action::Delete(std::mem::take(paths)));
                             close = true;
                         }
-                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -697,7 +699,9 @@ impl Browser {
                         ui.colored_label(ui.visuals().warn_fg_color, e.to_string());
                     }
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(valid.is_ok(), egui::Button::new("Change")).clicked() {
+                        if ui.add_enabled(valid.is_ok(), egui::Button::new("Change")).clicked()
+                            || (valid.is_ok() && crate::dlg::enter(ui, false))
+                        {
                             actions.push(Action::Chown {
                                 paths: std::mem::take(paths),
                                 owner: owner.trim().to_string(),
@@ -706,7 +710,7 @@ impl Browser {
                             });
                             close = true;
                         }
-                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -726,14 +730,16 @@ impl Browser {
                     ui.label(RichText::new(format!("Created in {dir}. An existing name is never replaced.")).weak());
                     ui.horizontal(|ui| {
                         let ok = !name.trim().is_empty() && !target.trim().is_empty() && !name.contains('/');
-                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new("Create")).clicked()
+                            || (ok && crate::dlg::enter(ui, false))
+                        {
                             actions.push(Action::Symlink {
                                 target: target.trim().to_string(),
                                 link: sftp::join(&dir, name.trim()),
                             });
                             close = true;
                         }
-                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -760,7 +766,9 @@ impl Browser {
                     });
                     ui.horizontal(|ui| {
                         let ok = !out.trim().is_empty() && !out.contains('/');
-                        if ui.add_enabled(ok, egui::Button::new("Compress")).clicked() {
+                        if ui.add_enabled(ok, egui::Button::new("Compress")).clicked()
+                            || (ok && crate::dlg::enter(ui, false))
+                        {
                             actions.push(Action::Compress {
                                 names: std::mem::take(names),
                                 out: out.trim().to_string(),
@@ -768,7 +776,7 @@ impl Browser {
                             });
                             close = true;
                         }
-                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -810,20 +818,21 @@ fn short_time(t: u32) -> String {
 }
 
 /// A one-field dialog. `Some(true)` = OK, `Some(false)` = cancelled.
-fn name_dialog(ctx: &egui::Context, title: &str, value: &mut String) -> Option<bool> {
+pub(crate) fn name_dialog(ctx: &egui::Context, title: &str, value: &mut String) -> Option<bool> {
     let mut result = None;
     egui::Modal::new(egui::Id::new(("name-dialog", title))).show(ctx, |ui| {
         ui.heading(title);
         let r = ui.text_edit_singleline(value);
         r.request_focus();
-        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        // Not `lost_focus`: the box takes the focus back above.
+        if crate::dlg::enter(ui, false) {
             result = Some(true);
         }
         ui.horizontal(|ui| {
             if ui.button("OK").clicked() {
                 result = Some(true);
             }
-            if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                 result = Some(false);
             }
         });

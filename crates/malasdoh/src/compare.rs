@@ -397,10 +397,12 @@ impl Compares {
                 Mode::Backup => p.backups.get(p.backup).cloned().map(Side::Local),
             };
             ui.horizontal(|ui| {
-                if ui.add_enabled(right.is_some(), egui::Button::new("Compare")).clicked() {
+                if ui.add_enabled(right.is_some(), egui::Button::new("Compare")).clicked()
+                    || (right.is_some() && crate::dlg::enter(ui, false))
+                {
                     result = Some(right.clone());
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                     result = Some(None);
                 }
             });

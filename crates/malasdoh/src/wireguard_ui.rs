@@ -157,7 +157,7 @@ impl WireGuardWindow {
                 );
             }
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                if ui.button("Save").on_hover_text("Ctrl+Enter").clicked() || crate::dlg::window_enter(ui, true) {
                     match wireguard::check_edit(&ed.text, ed.file_key.as_deref()) {
                         Ok(edited) => {
                             action = Some(WgAction::Edit(ed.id, edited));
@@ -182,7 +182,7 @@ impl WireGuardWindow {
                         Err(e) => ed.error = Some(format!("{}: {e}", f.display())),
                     }
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button("Cancel").clicked() || crate::dlg::window_escape(ui) {
                     close = true;
                 }
             });
@@ -226,6 +226,8 @@ impl WireGuardWindow {
                                 if !name.trim().is_empty() {
                                     out.push(WgAction::Rename(e.id, name.trim().to_string()));
                                 }
+                                self.renaming = None;
+                            } else if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                                 self.renaming = None;
                             }
                         }

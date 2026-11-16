@@ -1187,7 +1187,7 @@ impl App {
                     if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         result = Some(true);
                     }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                         result = Some(false);
                     }
                 });
@@ -1291,7 +1291,7 @@ impl App {
                         if ui.button("Trust and connect").clicked() {
                             done = Some(true);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             done = Some(false);
                         }
                     });
@@ -1310,14 +1310,14 @@ impl App {
                     let r = ui.add(egui::TextEdit::singleline(&mut a.secret).password(true));
                     r.request_focus();
                     ui.checkbox(&mut a.remember, "Remember in the system keychain");
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if crate::dlg::enter(ui, false) {
                         done = Some(true);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
                             done = Some(true);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             done = Some(false);
                         }
                     });
@@ -1331,7 +1331,8 @@ impl App {
                     for (i, (prompt, echo)) in p.prompts.iter().enumerate() {
                         ui.label(prompt);
                         let r = ui.add(egui::TextEdit::singleline(&mut a.fields[i]).password(!echo));
-                        if i == 0 {
+                        // The first box to start with; Tab still moves on to the next.
+                        if i == 0 && ui.memory(|m| m.focused().is_none()) {
                             r.request_focus();
                         }
                     }
@@ -1339,7 +1340,7 @@ impl App {
                         if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             done = Some(true);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             done = Some(false);
                         }
                     });
@@ -1358,14 +1359,14 @@ impl App {
                         "Saved for this connection once sudo accepts it, so editing as root, root browsing and \
                          editing on many servers do not ask again. Otherwise it is kept in memory until you disconnect.",
                     );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if crate::dlg::enter(ui, false) {
                         done = Some(true);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
                             done = Some(true);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             done = Some(false);
                         }
                     });
@@ -1631,7 +1632,7 @@ impl App {
                 ui.end_row();
                 }
                 ui.label("Notes");
-                ui.add(egui::TextEdit::multiline(&mut p.notes).desired_rows(2));
+                ui.add(egui::TextEdit::multiline(&mut p.notes).id(egui::Id::new("profile-notes")).desired_rows(2));
                 ui.end_row();
             });
             let p = &mut form.profile;
@@ -1662,10 +1663,13 @@ impl App {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
             ui.horizontal(|ui| {
-                if ui.button(if form.is_new { "Save" } else { "Save changes" }).clicked() {
+                let in_notes = ui.memory(|m| m.has_focus(egui::Id::new("profile-notes")));
+                if ui.button(if form.is_new { "Save" } else { "Save changes" }).clicked()
+                    || (!in_notes && crate::dlg::enter(ui, false))
+                {
                     result = Some(true);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                     result = Some(false);
                 }
             });
@@ -1744,10 +1748,10 @@ impl App {
             ui.label(RichText::new("Files pass through this computer (a private temporary folder), so both servers only need to reach you.").weak().small());
             ui.horizontal(|ui| {
                 let ok = c.to.is_some() && !c.dest.trim().is_empty();
-                if ui.add_enabled(ok, egui::Button::new("Copy")).clicked() {
+                if ui.add_enabled(ok, egui::Button::new("Copy")).clicked() || (ok && crate::dlg::enter(ui, false)) {
                     result = Some(true);
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                     result = Some(false);
                 }
             });
@@ -1812,7 +1816,7 @@ impl App {
                 ui.heading(format!("Delete “{name}”?"));
                 ui.label("The saved connection is removed. Nothing on the server is touched.");
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() {
+                    if ui.button("Delete").clicked() || crate::dlg::enter(ui, false) {
                         let orphaned = self.profiles.remove(id);
                         let secrets = self.shared.secrets.clone();
                         self.shared.rt.spawn_blocking(move || {
@@ -1831,7 +1835,7 @@ impl App {
                         }
                         close = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                         close = true;
                     }
                 });
@@ -1848,15 +1852,16 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui
                         .button("Close, keep the edits")
-                        .on_hover_text("They are offered again the next time you connect")
+                        .on_hover_text("They are offered again the next time you connect (Enter)")
                         .clicked()
+                        || crate::dlg::enter(ui, false)
                     {
                         result = Some(false);
                     }
                     if ui.button("Close and discard").clicked() {
                         result = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                         result = None;
                         self.confirm_close = None;
                     }

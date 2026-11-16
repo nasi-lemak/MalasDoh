@@ -2286,7 +2286,7 @@ impl Session {
                     });
                 }
             });
-            if ui.button("Close").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if ui.button("Close").clicked() || crate::dlg::escape(ui) {
                 close = true;
             }
         });

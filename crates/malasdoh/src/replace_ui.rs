@@ -233,10 +233,12 @@ impl Review {
                         (n, 0) => format!("Replace {n} file(s)"),
                         (n, m) => format!("Replace {n} and copy {m} new"),
                     };
-                    if ui.button(RichText::new(label).strong()).clicked() {
+                    if ui.button(RichText::new(label).strong()).on_hover_text("Enter").clicked()
+                        || crate::dlg::window_enter(ui, false)
+                    {
                         action = Some(ReviewAction::Go);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Cancel").on_hover_text("Esc").clicked() || crate::dlg::window_escape(ui) {
                         action = Some(ReviewAction::Cancel);
                     }
                 });

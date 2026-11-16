@@ -616,15 +616,13 @@ impl Editor {
                     ui.label(format!("+{} −{} lines", d.added, d.removed));
                     diff_ui(ui, d, egui::Id::new(("review-diff", self.id)));
                     ui.horizontal(|ui| {
-                        if ui.button("💾 Save").clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command)
-                        {
+                        if ui.button("💾 Save").clicked() || crate::dlg::enter(ui, false) {
                             action = Some(EditorAction::Save { force: false, check: true });
                         }
                         if ui.button("Copy as patch").clicked() {
                             ui.ctx().copy_text(diff::unified(&self.session.base_text, &self.text, &self.session.path));
                         }
-                        if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -664,7 +662,7 @@ impl Editor {
                         if ui.button("Discard mine, load theirs").clicked() {
                             action = Some(EditorAction::Reload);
                         }
-                        if ui.button("Keep editing").clicked() {
+                        if ui.button("Keep editing").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -692,10 +690,10 @@ impl Editor {
                     ui.label(err);
                     ui.label("Save through sudo instead? Your edits are kept either way.");
                     ui.horizontal(|ui| {
-                        if ui.button("Save as root (sudo)").clicked() {
+                        if ui.button("Save as root (sudo)").clicked() || crate::dlg::enter(ui, false) {
                             action = Some(EditorAction::RetryWithSudo);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                             close = true;
                         }
                     });
@@ -715,7 +713,7 @@ impl Editor {
                     });
                     ui.label(RichText::new("Your edits are still in the editor.").weak());
                     ui.horizontal(|ui| {
-                        if ui.button("Keep editing").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if ui.button("Keep editing").clicked() || crate::dlg::escape(ui) || crate::dlg::enter(ui, false) {
                             close = true;
                         }
                         if ui.button("Copy output").clicked() {

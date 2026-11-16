@@ -177,11 +177,13 @@ impl<T: Clone + PartialEq> Selection<T> {
         (act, scroll)
     }
 
-    /// Clicks elsewhere take the keyboard away from the list.
-    pub fn track_focus(&mut self, ctx: &egui::Context, list: egui::Rect) {
+    /// Clicks elsewhere take the keyboard away from the list, including
+    /// clicks on a window lying over it.
+    pub fn track_focus(&mut self, ui: &egui::Ui, list: egui::Rect) {
+        let ctx = ui.ctx();
         let pressed = ctx.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
         if let Some(p) = pressed {
-            self.focused = list.contains(p);
+            self.focused = list.contains(p) && ctx.layer_id_at(p).is_none_or(|l| l == ui.layer_id());
         }
     }
 

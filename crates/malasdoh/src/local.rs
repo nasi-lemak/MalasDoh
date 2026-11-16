@@ -29,6 +29,30 @@ pub enum LocalAction {
     },
 }
 
+/// What a delete in the background is doing; `Some` once it is over, with
+/// the errors (empty: all gone).
+type DeleteSlot = std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>;
+
+/// A question the pane is asking.
+enum Dialog {
+    None,
+    Rename {
+        from: PathBuf,
+        name: String,
+    },
+    /// Delete these; `error` says why moving them to the bin failed.
+    Delete {
+        paths: Vec<PathBuf>,
+        error: Option<String>,
+    },
+}
+
+/// Where deleted files go, in this system's words.
+#[cfg(windows)]
+const BIN: &str = "Recycle Bin";
+#[cfg(not(windows))]
+const BIN: &str = "Trash";
+
 struct Entry {
     name: String,
     path: PathBuf,
@@ -47,6 +71,9 @@ pub struct LocalBrowser {
     list_view: (f32, f32),
     filter: String,
     show_hidden: bool,
+    dialog: Dialog,
+    /// A delete running in the background, and what it deletes.
+    deleting: Option<(DeleteSlot, Vec<PathBuf>)>,
 }
 
 /// On Windows, `canonicalize` gives `\\?\C:\...` (a "verbatim" path) and
@@ -79,6 +106,8 @@ impl LocalBrowser {
             list_view: (0.0, 0.0),
             filter: String::new(),
             show_hidden: false,
+            dialog: Dialog::None,
+            deleting: None,
         };
         b.refresh();
         b
@@ -125,6 +154,159 @@ impl LocalBrowser {
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         self.entries = entries;
         self.sel.retain(|p| p.exists());
+    }
+
+    fn start_rename(&mut self, from: PathBuf) {
+        let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.dialog = Dialog::Rename { from, name };
+    }
+
+    fn start_delete(&mut self) {
+        if !self.sel.selected.is_empty() && self.deleting.is_none() {
+            self.dialog = Dialog::Delete { paths: self.sel.selected.clone(), error: None };
+        }
+    }
+
+    fn rename(&mut self, from: &Path, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        check_name(name)?;
+        let to = from.with_file_name(name);
+        if to == from {
+            return Ok(());
+        }
+        // Changing only the letter case finds the file itself on Windows and macOS.
+        if to.symlink_metadata().is_ok() && !same_file(from, &to) {
+            return Err(format!("{name} is already there"));
+        }
+        std::fs::rename(from, &to).map_err(|e| format!("Cannot rename {}: {e}", from.display()))?;
+        self.refresh();
+        self.sel.only(&to);
+        Ok(())
+    }
+
+    /// Delete in the background: to the bin, or for good with `permanent`.
+    fn delete(&mut self, paths: Vec<PathBuf>, permanent: bool) {
+        let slot = DeleteSlot::default();
+        self.deleting = Some((slot.clone(), paths.clone()));
+        std::thread::spawn(move || {
+            let errors = if permanent {
+                paths
+                    .iter()
+                    .filter_map(|p| {
+                        let r = if p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+                            std::fs::remove_dir_all(p)
+                        } else {
+                            std::fs::remove_file(p)
+                        };
+                        r.err().map(|e| format!("{}: {e}", p.display()))
+                    })
+                    .collect()
+            } else {
+                match trash::delete_all(&paths) {
+                    Ok(()) => Vec::new(),
+                    Err(e) => vec![format!("Cannot move to the {BIN}: {e}")],
+                }
+            };
+            *slot.lock().unwrap() = Some(errors);
+        });
+    }
+
+    fn poll_delete(&mut self, ctx: &egui::Context) {
+        let Some((slot, paths)) = &self.deleting else { return };
+        let Some(errors) = slot.lock().unwrap().take() else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        // What is left can still go for good, from the same dialog.
+        let left: Vec<PathBuf> = paths.iter().filter(|p| p.symlink_metadata().is_ok()).cloned().collect();
+        self.deleting = None;
+        self.refresh();
+        if !errors.is_empty() {
+            if left.is_empty() {
+                self.error = Some(errors.join("\n"));
+            } else {
+                self.dialog = Dialog::Delete { paths: left, error: Some(errors.join("\n")) };
+            }
+        }
+    }
+
+    fn dialog_ui(&mut self, ctx: &egui::Context) {
+        let mut close = false;
+        let mut rename = None;
+        let mut delete = None;
+        match &mut self.dialog {
+            Dialog::None => {}
+            Dialog::Rename { from, name } => {
+                if let Some(ok) = crate::browser::name_dialog(ctx, "Rename", name) {
+                    if ok {
+                        rename = Some((from.clone(), name.clone()));
+                    }
+                    close = true;
+                }
+            }
+            Dialog::Delete { paths, error } => {
+                egui::Modal::new("local-delete".into()).show(ctx, |ui| {
+                    ui.set_max_width(520.0);
+                    ui.heading(if error.is_some() {
+                        "Delete for good?".to_string()
+                    } else {
+                        format!("Move to the {BIN}?")
+                    });
+                    for p in paths.iter().take(10) {
+                        ui.monospace(p.display().to_string());
+                    }
+                    if paths.len() > 10 {
+                        ui.label(format!("…and {} more", paths.len() - 10));
+                    }
+                    if let Some(e) = error {
+                        ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                        ui.label("Deleting them for good cannot be undone; folders go with everything in them.");
+                    } else {
+                        ui.label(RichText::new(format!("From the {BIN} you can put them back.")).weak());
+                    }
+                    ui.horizontal(|ui| {
+                        if error.is_none() {
+                            if ui
+                                .button(RichText::new(format!("Move to the {BIN}")).strong())
+                                .on_hover_text("Enter")
+                                .clicked()
+                                || crate::dlg::enter(ui, false)
+                            {
+                                delete = Some((std::mem::take(paths), false));
+                            }
+                            if ui
+                                .button(RichText::new("Delete for good").color(ui.visuals().error_fg_color))
+                                .on_hover_text("Cannot be undone")
+                                .clicked()
+                            {
+                                delete = Some((std::mem::take(paths), true));
+                            }
+                        } else if ui
+                            .button(RichText::new("Delete for good").color(ui.visuals().error_fg_color))
+                            .on_hover_text("Cannot be undone")
+                            .clicked()
+                        {
+                            delete = Some((std::mem::take(paths), true));
+                        }
+                        if ui.button("Cancel").on_hover_text("Esc").clicked() || crate::dlg::escape(ui) {
+                            close = true;
+                        }
+                    });
+                });
+            }
+        }
+        if let Some((from, name)) = rename
+            && let Err(e) = self.rename(&from, &name)
+        {
+            self.error = Some(e);
+        }
+        if let Some((paths, permanent)) = delete {
+            self.delete(paths, permanent);
+            close = true;
+        }
+        if close {
+            self.dialog = Dialog::None;
+        }
     }
 
     fn hidden(name: &str, path: &Path) -> bool {
@@ -213,6 +395,8 @@ impl LocalBrowser {
                     open_dir = Some(up.to_path_buf());
                 }
             }
+            Some(KeyAction::Rename(p)) => self.start_rename(p),
+            Some(KeyAction::Delete) => self.start_delete(),
             _ => {}
         }
         let mut area = egui::ScrollArea::vertical().id_salt(("local", session)).auto_shrink([false, false]);
@@ -271,22 +455,46 @@ impl LocalBrowser {
                 } else {
                     vec![e.path.clone()]
                 }));
-                let modified = e.modified.and_then(|t| {
-                    let d = SystemTime::now().duration_since(t).ok()?;
-                    Some(match d.as_secs() {
-                        s if s < 3600 => format!("{} min ago", s / 60),
-                        s if s < 86400 => format!("{} h ago", s / 3600),
-                        s => format!("{} days ago", s / 86400),
-                    })
+                if resp.secondary_clicked() && !selected {
+                    self.sel.only(&e.path);
+                }
+                let path = e.path.clone();
+                let is_dir = e.is_dir;
+                let resp = resp.on_hover_text(format!("{}\n{}", e.path.display(), modified(e.modified)));
+                resp.context_menu(|ui| {
+                    let n = self.sel.selected.len();
+                    if is_dir && n == 1 && ui.button("Open").clicked() {
+                        open_dir = Some(path.clone());
+                        ui.close();
+                    }
+                    if ui.button("Upload").clicked() {
+                        actions.push(LocalAction::Upload(self.sel.selected.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Copy path").clicked() {
+                        ui.ctx().copy_text(path.display().to_string());
+                        ui.close();
+                    }
+                    if n == 1 && ui.button("Rename…").on_hover_text("F2").clicked() {
+                        self.start_rename(path.clone());
+                        ui.close();
+                    }
+                    ui.separator();
+                    let label = if n > 1 { format!("Delete {n} items…") } else { "Delete…".into() };
+                    if ui.button(label).on_hover_text("Delete key").clicked() {
+                        self.start_delete();
+                        ui.close();
+                    }
                 });
-                resp.on_hover_text(format!("{}\n{}", e.path.display(), modified.unwrap_or_default()));
             }
         });
         self.list_view = (pane.state.offset.y, pane.inner_rect.height());
-        self.sel.track_focus(ui.ctx(), pane.inner_rect);
+        self.sel.track_focus(ui, pane.inner_rect);
         if let Some(d) = open_dir {
             self.navigate(d);
         }
+        self.dialog_ui(ui.ctx());
+        self.poll_delete(ui.ctx());
         // Remote items dropped onto this pane download here.
         let drop = ui.interact(pane.inner_rect, egui::Id::new(("local-drop", session)), Sense::hover());
         if drop.dnd_hover_payload::<RemoteDrag>().is_some() {
@@ -301,6 +509,47 @@ impl LocalBrowser {
     }
 }
 
+/// How long ago a file changed, for its tooltip.
+fn modified(t: Option<SystemTime>) -> String {
+    let Some(d) = t.and_then(|t| SystemTime::now().duration_since(t).ok()) else { return String::new() };
+    match d.as_secs() {
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86400 => format!("{} h ago", s / 3600),
+        s => format!("{} days ago", s / 86400),
+    }
+}
+
+/// Do both paths name the same file (letter case aside, where it does not count)?
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (a.symlink_metadata(), b.symlink_metadata()) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    }
+}
+
+/// A new name for a file in the same folder.
+fn check_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("Give it a name".into());
+    }
+    if name.contains(['/', '\\']) {
+        return Err("A name cannot contain / or \\".into());
+    }
+    #[cfg(windows)]
+    if name.contains(['<', '>', ':', '"', '|', '?', '*']) || name.ends_with(['.', ' ']) {
+        return Err("Windows does not allow < > : \" | ? * in a name, or a name ending in a dot or space".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +561,40 @@ mod tests {
         assert_eq!(p(r"\\?\UNC\nas\share\dir"), r"\\nas\share\dir");
         assert_eq!(p(r"\\?\Volume{abc}\x"), r"\\?\Volume{abc}\x");
         assert_eq!(p("/home/me"), "/home/me");
+    }
+
+    #[test]
+    fn names_are_checked() {
+        assert!(check_name("notes.txt").is_ok());
+        assert!(check_name("").is_err());
+        assert!(check_name("..").is_err());
+        assert!(check_name("a/b").is_err());
+        assert!(check_name("a\\b").is_err());
+    }
+
+    #[test]
+    fn rename_keeps_other_files() {
+        let dir = std::env::temp_dir().join(format!("malasdoh-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        std::fs::write(dir.join("b.txt"), "b").unwrap();
+        let mut b = LocalBrowser::new(Some(dir.clone()));
+        assert!(b.rename(&dir.join("a.txt"), "b.txt").is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "b");
+        b.rename(&dir.join("a.txt"), " c.txt ").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "a");
+        assert_eq!(b.selection(), [dir.join("c.txt")]);
+        // Changing only the case renames it, and never takes another file's place.
+        b.rename(&dir.join("c.txt"), "C.txt").unwrap();
+        assert!(dir.join("C.txt").exists());
+        b.delete(vec![dir.join("C.txt"), dir.join("b.txt")], true);
+        let ctx = egui::Context::default();
+        while b.deleting.is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            b.poll_delete(&ctx);
+        }
+        assert!(b.entries.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

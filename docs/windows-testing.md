@@ -67,6 +67,18 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   range between. **↓**/**Shift+↓** move and extend; **F2** renames;
   **Delete** asks first; **Enter** on a folder opens it; **Backspace** goes
   back up; **Esc** clears. The same keys work in **Local files**.
+- [ ] 4.3c In **Local files**, right-click a file: **Rename…** and
+  **Delete…** are there. **F2**, type a new name, **Enter**: renamed. Rename
+  it to the name of another file in the folder: refused, nothing is
+  replaced. Select two files, **Delete**, **Enter**: both go to the
+  **Recycle Bin** (restore them from there). Delete a folder with files in
+  it and choose **Delete for good**: gone, not in the Recycle Bin.
+- [ ] 4.3d Dialogs answer the keyboard: **Enter** for the main button,
+  **Esc** to cancel. Try the password prompt (Enter logs in), Rename and New
+  folder on the server (Enter), the delete question (Enter deletes, Esc
+  keeps), and in **Port forwards** fill in a new forward and press Enter.
+  With the forwards window open, typing a command and Enter in the
+  terminal behind it runs the command and adds no forward.
 - [ ] 4.4 Double-click a text file, change a line: the gutter shows a blue
   mark; hover it to see the old line. **Save**: the diff appears, then it
   saves. A Windows-style (CRLF) file stays CRLF.

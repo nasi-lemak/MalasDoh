@@ -6,6 +6,7 @@ mod app;
 mod bridge;
 mod browser;
 mod compare;
+mod dlg;
 mod editor;
 mod find_ui;
 mod forwards;

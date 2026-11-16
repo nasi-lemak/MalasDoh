@@ -320,10 +320,12 @@ impl TeleportWindow {
         });
         let mut check = None;
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.busy && !f.address.trim().is_empty(), egui::Button::new("Check")).clicked() {
+            let can = !self.busy && !f.address.trim().is_empty();
+            if ui.add_enabled(can, egui::Button::new("Check")).clicked() || (can && crate::dlg::window_enter(ui, false))
+            {
                 check = Some(f.pin.clone());
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel").clicked() || crate::dlg::window_escape(ui) {
                 result = Some(None);
             }
         });

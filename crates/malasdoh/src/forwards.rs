@@ -221,12 +221,14 @@ impl Forwards {
                             ui.colored_label(ui.visuals().warn_fg_color, e.to_string());
                         }
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(valid.is_ok(), egui::Button::new("Add and start")).clicked() {
+                            if ui.add_enabled(valid.is_ok(), egui::Button::new("Add and start")).clicked()
+                                || (valid.is_ok() && crate::dlg::window_enter(ui, false))
+                            {
                                 let spec = self.draft.take().unwrap();
                                 self.items.push(Item { spec, handle: None, starting: false, error: None, wanted: true, temporary: true });
                                 start = Some(self.items.len() - 1);
                             }
-                            if ui.button("Cancel").clicked() {
+                            if ui.button("Cancel").clicked() || crate::dlg::window_escape(ui) {
                                 self.draft = None;
                             }
                         });

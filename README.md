@@ -155,7 +155,14 @@ remote-editing loop, where they are weakest:
   filter, pause, errors and warnings coloured, and it keeps going across log
   rotation. Closing the tab stops `tail` on the server.
 - **Two panes**: "Local files" puts this computer's folders next to the
-  server's, WinSCP style; drag either way, or use the Upload button.
+  server's, WinSCP style; drag either way, or use the Upload button. Its
+  right-click menu (or F2 and Delete) renames and deletes your own files:
+  Delete moves them to the Recycle Bin (the Trash on Linux and macOS), or
+  for good if you choose so; a rename never replaces another file.
+- **Keyboard in dialogs**: Enter presses a dialog's main button (OK, Save,
+  Rename, Delete…) and Esc cancels. In a box where Enter starts a new line
+  (pasting a key, editing a WireGuard configuration) it is Ctrl+Enter. The
+  host key question has no Enter on purpose: you choose with the mouse.
 - **Copy between servers**: send files or folders from one connected server to
   another (they pass through a private temporary folder on your computer, so the
   servers do not need to reach each other).

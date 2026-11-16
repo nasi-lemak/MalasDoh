@@ -418,11 +418,13 @@ impl KeysWindow {
                 Some(Editing::Rename(id, name)) if *id == k.id => {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
-                        if ui.button("Save").clicked() && !name.trim().is_empty() {
+                        if (ui.button("Save").clicked() || crate::dlg::window_enter(ui, false))
+                            && !name.trim().is_empty()
+                        {
                             out.push(KeysAction::RenameStored(k.id, name.trim().to_string()));
                             done = true;
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::window_escape(ui) {
                             done = true;
                         }
                     });
@@ -436,7 +438,8 @@ impl KeysWindow {
                             .hint_text("ssh-ed25519-cert-v01@openssh.com AAAA… (the -cert.pub file's contents)"),
                     );
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        if ui.button("Save").on_hover_text("Ctrl+Enter").clicked() || crate::dlg::window_enter(ui, true)
+                        {
                             if text.trim().is_empty() {
                                 out.push(KeysAction::SetCertificate(k.id, None));
                                 done = true;
@@ -450,7 +453,7 @@ impl KeysWindow {
                                 }
                             }
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").clicked() || crate::dlg::window_escape(ui) {
                             done = true;
                         }
                         ui.label(RichText::new("Empty: no certificate.").weak().small());
@@ -466,7 +469,7 @@ impl KeysWindow {
                             out.push(KeysAction::RemoveStored(k.id));
                             done = true;
                         }
-                        if ui.button("Keep").clicked() {
+                        if ui.button("Keep").clicked() || crate::dlg::window_escape(ui) {
                             done = true;
                         }
                     });
@@ -524,7 +527,9 @@ impl KeysWindow {
         let mut close = false;
         ui.horizontal(|ui| {
             let can = !f.name.trim().is_empty() && !f.text.trim().is_empty();
-            if ui.add_enabled(can, egui::Button::new("Keep it")).clicked() {
+            if ui.add_enabled(can, egui::Button::new("Keep it")).on_hover_text("Ctrl+Enter").clicked()
+                || (can && crate::dlg::window_enter(ui, true))
+            {
                 let pass = f.asks_passphrase.then_some(f.passphrase.as_str());
                 match stored_keys::check_pasted(&f.text, pass) {
                     Ok(p) => {
@@ -556,7 +561,7 @@ impl KeysWindow {
                     Err(e) => f.error = Some(e.to_string()),
                 }
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button("Cancel").clicked() || crate::dlg::window_escape(ui) {
                 close = true;
             }
         });

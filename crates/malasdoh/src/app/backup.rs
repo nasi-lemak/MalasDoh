@@ -75,10 +75,11 @@ impl App {
             }
             ui.horizontal(|ui| {
                 let ok = d.pass.chars().count() >= 8 && d.pass == d.pass2;
-                if ui.add_enabled(ok, egui::Button::new("Export…")).clicked() {
+                if ui.add_enabled(ok, egui::Button::new("Export…")).clicked() || (ok && crate::dlg::enter(ui, false))
+                {
                     go = true;
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                     close = true;
                 }
                 if d.pass.chars().count() < 8 {
@@ -133,7 +134,7 @@ impl App {
                 ui.label("Passphrase");
                 let r = ui.add(egui::TextEdit::singleline(&mut d.pass).password(true));
                 r.request_focus();
-                go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                go |= !d.pass.is_empty() && crate::dlg::enter(ui, false);
             });
             ui.label(
                 RichText::new("Connections and snippets you already have are kept; only new ones are added.").weak(),
@@ -143,7 +144,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 go |= ui.add_enabled(!d.pass.is_empty(), egui::Button::new("Import")).clicked();
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
                     close = true;
                 }
             });

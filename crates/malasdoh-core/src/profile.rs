@@ -46,6 +46,12 @@ pub enum AuthMethod {
     Key {
         path: String,
     },
+    /// A key pasted into MalasDoh (Tools → SSH keys), kept in the keychain.
+    Stored {
+        id: uuid::Uuid,
+        /// Its name, for showing.
+        name: String,
+    },
     Password,
 }
 
@@ -55,6 +61,7 @@ impl AuthMethod {
             AuthMethod::Auto => "Automatic",
             AuthMethod::Agent => "SSH agent",
             AuthMethod::Key { .. } => "Key file",
+            AuthMethod::Stored { .. } => "Stored key",
             AuthMethod::Password => "Password",
         }
     }

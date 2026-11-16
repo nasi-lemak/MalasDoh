@@ -2,6 +2,7 @@
 //! a connection's questions.
 
 mod backup;
+mod keys;
 mod rdp;
 mod teleport;
 mod wireguard;
@@ -59,6 +60,8 @@ pub struct App {
     journal: Journal,
     journal_win: JournalWindow,
     keys_win: KeysWindow,
+    /// Keys pasted into Tools → SSH keys.
+    key_store: malasdoh_core::stored_keys::KeyStore,
     /// Settings → Transfers' skip list as typed.
     skip_text: String,
     teleport: malasdoh_core::teleport::TeleportStore,
@@ -269,6 +272,7 @@ impl App {
         let paths_journal = paths.journal_file();
         let settings_skip = settings.transfer.skip.join(", ");
         let wg_store = malasdoh_core::wireguard::WgStore::load(paths.wireguard_file());
+        let key_store = malasdoh_core::stored_keys::KeyStore::load(paths.ssh_keys_file());
         let paths_teleport = paths.teleport_file();
         // Copies made for external editors are kept a week, then tidied away.
         let cache = paths.edit_cache_dir();
@@ -284,6 +288,7 @@ impl App {
             paths,
             transfer: Arc::new(std::sync::RwLock::new(settings.transfer.clone())),
             wireguard: Arc::new(std::sync::RwLock::new(wg_store.configs())),
+            stored_keys: Arc::new(std::sync::RwLock::new(key_store.map())),
         };
         let mut app = Self {
             shared,
@@ -315,6 +320,7 @@ impl App {
             journal: Journal::new(paths_journal),
             journal_win: JournalWindow::default(),
             keys_win: KeysWindow::default(),
+            key_store,
             skip_text: settings_skip,
             teleport: malasdoh_core::teleport::TeleportStore::load(paths_teleport),
             teleport_win: Default::default(),
@@ -1389,6 +1395,7 @@ impl App {
     }
 
     fn form_ui(&mut self, ctx: &egui::Context) {
+        let stored: Vec<(uuid::Uuid, String)> = self.key_store.keys.iter().map(|k| (k.id, k.name.clone())).collect();
         let tunnels: Vec<(uuid::Uuid, String)> = self.wg_store.tunnels.iter().map(|t| (t.id, t.name.clone())).collect();
         let Some(form) = &mut self.form else { return };
         let mut result: Option<bool> = None;
@@ -1473,10 +1480,15 @@ impl App {
                 ui.label("Authentication");
                 ui.vertical(|ui| {
                     egui::ComboBox::from_id_salt("auth").selected_text(p.auth.label()).show_ui(ui, |ui| {
+                        let first_stored = stored
+                            .first()
+                            .map(|(id, n)| AuthMethod::Stored { id: *id, name: n.clone() })
+                            .unwrap_or(AuthMethod::Stored { id: uuid::Uuid::nil(), name: String::new() });
                         for option in [
                             AuthMethod::Auto,
                             AuthMethod::Agent,
                             AuthMethod::Key { path: String::new() },
+                            first_stored,
                             AuthMethod::Password,
                         ] {
                             let same = std::mem::discriminant(&option) == std::mem::discriminant(&p.auth);
@@ -1504,6 +1516,33 @@ impl App {
                         }
                         AuthMethod::Auto => {
                             ui.label(RichText::new("SSH agent, then ~/.ssh/id_* keys, then password").weak().small());
+                        }
+                        AuthMethod::Stored { id, name } => {
+                            if stored.is_empty() {
+                                ui.label(
+                                    RichText::new("No stored keys yet: paste one in Tools → SSH keys.")
+                                        .small()
+                                        .color(ui.visuals().warn_fg_color),
+                                );
+                            } else {
+                                let shown = if name.is_empty() { "Choose a key".to_string() } else { name.clone() };
+                                egui::ComboBox::from_id_salt("stored-key").selected_text(shown).show_ui(ui, |ui| {
+                                    for (sid, sname) in &stored {
+                                        if ui.selectable_label(*id == *sid, sname).clicked() {
+                                            *id = *sid;
+                                            *name = sname.clone();
+                                        }
+                                    }
+                                });
+                                if !stored.iter().any(|(sid, _)| sid == id) && !id.is_nil() {
+                                    ui.label(
+                                        RichText::new("That key was removed: choose another.")
+                                            .small()
+                                            .color(ui.visuals().warn_fg_color),
+                                    );
+                                }
+                            }
+                            ui.label(RichText::new("A key pasted into MalasDoh, kept in the keychain").weak().small());
                         }
                         _ => {}
                     }
@@ -1641,6 +1680,10 @@ impl App {
                         form.error = Some("Port must be a number between 1 and 65535".into());
                         return;
                     }
+                }
+                if matches!(&form.profile.auth, AuthMethod::Stored { id, .. } if id.is_nil()) {
+                    form.error = Some("Choose which stored key to log in with.".into());
+                    return;
                 }
                 form.profile.host = form.profile.host.trim().to_string();
                 form.profile.user = form.profile.user.trim().to_string();
@@ -2181,16 +2224,8 @@ impl eframe::App for App {
         };
         let actions = self.wg_win.ui(&ctx, &self.wg_store, &used);
         self.wireguard_actions(&ctx, actions);
-        if let Some((id, key)) = self.keys_win.ui(&ctx, &self.sessions, &self.shared)
-            && let Some(mut p) = self.profiles.get(id).cloned()
-        {
-            p.auth = AuthMethod::Key { path: key.display().to_string() };
-            let name = p.display_name();
-            if self.profiles.upsert(p).is_ok() {
-                self.save_profiles();
-                self.notify(format!("{name} now logs in with {}", key.display()), false);
-            }
-        }
+        let actions = self.keys_win.ui(&ctx, &self.sessions, &self.shared, &self.key_store);
+        self.key_actions(actions);
         self.question_ui(&ctx);
 
         if self.last_persist.elapsed() > Duration::from_secs(5) {

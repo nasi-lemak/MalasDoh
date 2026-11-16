@@ -816,6 +816,77 @@ async fn user_certificate_logs_in_without_authorized_keys() {
     assert_eq!(conn.exec("echo cert-ok", None).await.unwrap().stdout, b"cert-ok\n");
 }
 
+/// A private key pasted into MalasDoh (protected by a passphrase, as many
+/// are): checked once, kept in the keychain without the passphrase, and
+/// used with no key file and no question. A pasted certificate is used too.
+#[tokio::test]
+async fn pasted_key_logs_in_from_the_keychain() {
+    use malasdoh_core::stored_keys::{self, StoredKey};
+    let Some(sshd) = start_sshd_with(|d| {
+        keygen(&d.join("ca"), "");
+        let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+        sign(d, "client.pub", false, user.trim());
+        format!("TrustedUserCAKeys {}/ca.pub", d.display())
+    }) else {
+        return;
+    };
+    let env = Env::with(sshd).unwrap();
+    let dir = env.sshd.dir.path().to_path_buf();
+    let text = std::fs::read_to_string(dir.join("client")).unwrap();
+    let pasted = stored_keys::check_pasted(&text, Some(PASSPHRASE)).unwrap();
+    let id = uuid::Uuid::new_v4();
+    env.secrets.set(&SecretKey::StoredKey(id), &pasted.private).unwrap();
+    let entry = StoredKey {
+        id,
+        name: "from proton".into(),
+        public: pasted.public.clone(),
+        certificate: None,
+        key_in_file: false,
+        private: None,
+    };
+    let connect = |entry: StoredKey| {
+        let ctx = env.ctx(TestPrompter { passphrase: None, ..TestPrompter::accepting() });
+        ctx.stored_keys.write().unwrap().insert(entry.id, entry.clone());
+        let mut p = env.profile();
+        p.auth = AuthMethod::Stored { id: entry.id, name: entry.name.clone() };
+        async move {
+            let r = ssh::connect(vec![p], &ctx).await;
+            let asked = ctx.prompter.asked.lock().unwrap().clone();
+            (r, asked)
+        }
+    };
+
+    // The plain key, in authorized_keys.
+    let (conn, asked) = connect(entry.clone()).await;
+    let conn = conn.unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(conn.exec("echo pasted-ok", None).await.unwrap().stdout, b"pasted-ok\n");
+    assert!(!asked.iter().any(|a| a.starts_with("passphrase")), "no passphrase question: {asked:?}");
+    conn.disconnect().await;
+
+    // Only a certificate works now: the pasted one is used.
+    std::fs::write(dir.join("authorized_keys"), "").unwrap();
+    let cert_text = std::fs::read_to_string(dir.join("client-cert.pub")).unwrap();
+    let cert = stored_keys::check_certificate(&cert_text, &pasted.public).unwrap();
+    let (conn, _) = connect(entry.clone()).await;
+    assert!(conn.is_err(), "without the certificate the key is refused");
+    let mut with_cert = entry.clone();
+    with_cert.certificate = Some(cert);
+    let (conn, _) = connect(with_cert).await;
+    conn.unwrap_or_else(|e| panic!("{e:#}")).disconnect().await;
+
+    // A certificate for another key is refused when pasted.
+    keygen(&dir.join("other"), "");
+    let other = std::fs::read_to_string(dir.join("other.pub")).unwrap();
+    assert!(stored_keys::check_certificate(&cert_text, other.trim()).is_err());
+
+    // A stored key that is gone says so.
+    let ctx = env.ctx(TestPrompter::accepting());
+    let mut p = env.profile();
+    p.auth = AuthMethod::Stored { id: uuid::Uuid::new_v4(), name: "old".into() };
+    let e = format!("{:#}", ssh::connect(vec![p], &ctx).await.err().unwrap());
+    assert!(e.contains("\"old\" is gone"), "{e}");
+}
+
 #[tokio::test]
 async fn without_sftp_files_work_through_the_shell() {
     use malasdoh_core::sync::{self, SyncOptions};

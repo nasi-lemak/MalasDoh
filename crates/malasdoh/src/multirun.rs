@@ -136,6 +136,7 @@ impl MultiRun {
                 let prompter = Arc::new(UiPrompter { events: ev.clone(), session: MULTI_RUN });
                 let mut ctx = ConnectContext::new(shared2.known_hosts.clone(), shared2.secrets.clone(), prompter);
                 ctx.wireguard = shared2.wireguard.clone();
+                ctx.stored_keys = shared2.stored_keys.clone();
                 let work = async {
                     let conn = ssh::connect(chain, &ctx).await?;
                     let out = conn.exec(&command, None).await;

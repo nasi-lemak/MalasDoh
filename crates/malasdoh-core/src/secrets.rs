@@ -26,6 +26,8 @@ pub enum SecretKey {
     /// The Windows password of a Remote Desktop connection, for programs
     /// without a login dialog of their own (FreeRDP).
     RdpPassword(ProfileId),
+    /// A private key pasted into MalasDoh (Tools → SSH keys).
+    StoredKey(uuid::Uuid),
 }
 
 impl SecretKey {
@@ -38,6 +40,7 @@ impl SecretKey {
             SecretKey::TeleportPassword(id) => format!("teleport-password:{id}"),
             SecretKey::WireGuardKey(id) => format!("wireguard-key:{id}"),
             SecretKey::RdpPassword(id) => format!("rdp-password:{id}"),
+            SecretKey::StoredKey(id) => format!("ssh-key:{id}"),
         }
     }
 }

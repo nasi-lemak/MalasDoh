@@ -68,6 +68,10 @@ impl AppPaths {
 
     /// WireGuard configurations, without their private keys (those are in
     /// the system keychain).
+    pub fn ssh_keys_file(&self) -> PathBuf {
+        self.config_dir.join("ssh_keys.toml")
+    }
+
     pub fn wireguard_file(&self) -> PathBuf {
         self.config_dir.join("wireguard.toml")
     }

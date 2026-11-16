@@ -96,12 +96,20 @@ remote-editing loop, where they are weakest:
 - **SSH keys** (Tools → SSH keys): make an Ed25519 key (with a passphrase if
   you like), put any key on a server like `ssh-copy-id` does (owner-only
   permissions, never added twice), then switch the connection to log in with
-  it.
+  it. **Paste a key…** keeps a private key without a file (from a password
+  manager such as Proton Pass, say): OpenSSH, PEM or PuTTY format, checked
+  when pasted, its passphrase asked once and taken off, and kept in the
+  system keychain (on a computer without one, in the owner-only settings
+  file, and the window says so). Choose it on a connection as
+  **Authentication → Stored key**; its public key can be copied or put on a
+  server from the same window, and an OpenSSH certificate for it can be
+  pasted too.
 - **Import** connections from `~/.ssh/config`, PuTTY (registry on Windows,
   `~/.putty/sessions` elsewhere) and WinSCP (registry or `WinSCP.ini`, with
   its folders). Saved passwords are not imported.
-- **Certificates for you**: `id_ed25519-cert.pub` next to your key, or a
-  certificate in your agent, is used automatically.
+- **Certificates for you**: `id_ed25519-cert.pub` next to your key, a
+  certificate in your agent, or one pasted with a stored key, is used
+  automatically.
 - **Terminal**: xterm-256color and truecolor, full-screen programs (vim, nano,
   htop, less), scrollback, selection and copy, bracketed paste, several
   terminals per connection. Ctrl+C copies when text is selected and interrupts

@@ -46,6 +46,8 @@ pub struct Shared {
     pub paths: AppPaths,
     /// WireGuard configurations (no keys), kept current by the app.
     pub wireguard: malasdoh_core::wireguard::Configs,
+    /// Keys pasted into Tools → SSH keys, kept current by the app.
+    pub stored_keys: malasdoh_core::stored_keys::StoredKeys,
     /// Settings → Transfers, kept current by the app.
     pub transfer: Arc<std::sync::RwLock<malasdoh_core::transfer::TransferOptions>>,
 }
@@ -400,6 +402,7 @@ impl Session {
             let prompter = Arc::new(UiPrompter { events: shared2.events.clone(), session: id });
             let mut ctx = ConnectContext::new(shared2.known_hosts.clone(), shared2.secrets.clone(), prompter);
             ctx.wireguard = shared2.wireguard.clone();
+            ctx.stored_keys = shared2.stored_keys.clone();
             let msg = match ssh::connect(chain, &ctx).await {
                 Ok(conn) => {
                     let conn = Arc::new(conn);

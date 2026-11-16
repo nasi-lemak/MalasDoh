@@ -22,6 +22,7 @@ fn connect_ctx(shared: &Shared) -> ConnectContext<UiPrompter> {
     let prompter = Arc::new(UiPrompter { events: shared.events.clone(), session: MULTI_RUN });
     let mut ctx = ConnectContext::new(shared.known_hosts.clone(), shared.secrets.clone(), prompter);
     ctx.wireguard = shared.wireguard.clone();
+    ctx.stored_keys = shared.stored_keys.clone();
     ctx
 }
 

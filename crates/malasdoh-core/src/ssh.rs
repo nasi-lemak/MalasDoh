@@ -85,6 +85,8 @@ pub struct ConnectContext<P> {
     pub agent_socket: Option<PathBuf>,
     /// WireGuard configurations (without private keys), by tunnel id.
     pub wireguard: crate::wireguard::Configs,
+    /// Keys pasted into MalasDoh, for [`AuthMethod::Stored`].
+    pub stored_keys: crate::stored_keys::StoredKeys,
 }
 
 impl<P> ConnectContext<P> {
@@ -92,7 +94,15 @@ impl<P> ConnectContext<P> {
         let default_keys = user_ssh_dir()
             .map(|d| ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|n| d.join(n)).collect())
             .unwrap_or_default();
-        Self { known_hosts, secrets, prompter, default_keys, agent_socket: None, wireguard: Default::default() }
+        Self {
+            known_hosts,
+            secrets,
+            prompter,
+            default_keys,
+            agent_socket: None,
+            wireguard: Default::default(),
+            stored_keys: Default::default(),
+        }
     }
 }
 
@@ -539,6 +549,14 @@ where
         AuthMethod::Auto => ctx.default_keys.iter().filter(|k| k.exists()).cloned().collect(),
         _ => vec![],
     };
+    if let AuthMethod::Stored { id, name } = &p.auth
+        && st.allows(MethodKind::PublicKey)
+    {
+        let source = stored_source(*id, name, ctx).await?;
+        if try_source(h, &user, source, ctx, &mut st).await? {
+            return Ok(());
+        }
+    }
     for key in keys {
         if !st.allows(MethodKind::PublicKey) {
             break;
@@ -657,6 +675,15 @@ where
     Ok(false)
 }
 
+/// A private key to try: its text, a name for messages and the passphrase
+/// prompt, where a remembered passphrase is kept, and its certificate.
+struct KeySource {
+    text: String,
+    label: String,
+    passphrase_key: SecretKey,
+    cert: Option<russh::keys::Certificate>,
+}
+
 async fn try_key<H, P>(
     h: &mut Handle<H>,
     user: &str,
@@ -669,8 +696,64 @@ where
     P: Prompter,
 {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading key {}", path.display()))?;
-    let path_str = path.display().to_string();
-    let secret_key = SecretKey::Passphrase(path_str.clone());
+    let label = path.display().to_string();
+    // OpenSSH convention: the certificate for `id_ed25519` is `id_ed25519-cert.pub`.
+    let cert_path = PathBuf::from(format!("{}-cert.pub", path.display()));
+    let cert = if cert_path.exists() {
+        match russh::keys::load_openssh_certificate(&cert_path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("ignoring certificate {}: {e}", cert_path.display());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let source = KeySource { text, passphrase_key: SecretKey::Passphrase(label.clone()), label, cert };
+    try_source(h, user, source, ctx, st).await
+}
+
+/// A key pasted into MalasDoh: from the keychain (or, without one, the
+/// stored keys file), with its certificate if it has one.
+async fn stored_source<P>(id: uuid::Uuid, name: &str, ctx: &ConnectContext<P>) -> Result<KeySource> {
+    let entry = ctx.stored_keys.read().unwrap().get(&id).cloned().with_context(|| {
+        format!("the stored key \"{name}\" is gone (Tools → SSH keys); choose another key for this connection")
+    })?;
+    let secrets = ctx.secrets.clone();
+    let e = entry.clone();
+    let text = tokio::task::spawn_blocking(move || crate::stored_keys::private_key(&e, secrets.as_ref())).await??;
+    let cert = match &entry.certificate {
+        Some(line) => match russh::keys::Certificate::from_openssh(line) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("ignoring the certificate of {}: {e}", entry.name);
+                None
+            }
+        },
+        None => None,
+    };
+    Ok(KeySource {
+        text,
+        label: format!("stored key \"{}\"", entry.name),
+        passphrase_key: SecretKey::Passphrase(format!("stored:{id}")),
+        cert,
+    })
+}
+
+async fn try_source<H, P>(
+    h: &mut Handle<H>,
+    user: &str,
+    source: KeySource,
+    ctx: &ConnectContext<P>,
+    st: &mut AuthState,
+) -> Result<bool>
+where
+    H: client::Handler<Error = russh::Error>,
+    P: Prompter,
+{
+    let KeySource { text, label, passphrase_key: secret_key, cert } = source;
+    let path_str = label.clone();
     let key = match russh::keys::decode_secret_key(&text, None) {
         Ok(k) => k,
         Err(russh::keys::Error::KeyIsEncrypted) => {
@@ -704,20 +787,13 @@ where
                 }
             }
         }
-        Err(e) => return Err(anyhow::Error::from(e).context(format!("could not load key {}", path.display()))),
+        Err(e) => return Err(anyhow::Error::from(e).context(format!("could not load key {label}"))),
     };
     let key = Arc::new(key);
-    // OpenSSH convention: the certificate for `id_ed25519` is `id_ed25519-cert.pub`.
-    let cert_path = PathBuf::from(format!("{}-cert.pub", path.display()));
-    if cert_path.exists() {
-        match russh::keys::load_openssh_certificate(&cert_path) {
-            Ok(cert) => {
-                if st.update(h.authenticate_openssh_cert(user, key.clone(), cert).await?) {
-                    return Ok(true);
-                }
-            }
-            Err(e) => tracing::warn!("ignoring certificate {}: {e}", cert_path.display()),
-        }
+    if let Some(cert) = cert
+        && st.update(h.authenticate_openssh_cert(user, key.clone(), cert).await?)
+    {
+        return Ok(true);
     }
     let hash = if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
         h.best_supported_rsa_hash().await?.flatten()

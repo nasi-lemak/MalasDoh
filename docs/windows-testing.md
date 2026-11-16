@@ -36,6 +36,13 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
 - [ ] 2.4 Key login, whichever you use: a key file in `C:\Users\you\.ssh`
   (OpenSSH or `.ppk`), **Pageant** running with your key, or the Windows
   OpenSSH agent service. Connects without a password.
+- [ ] 2.4b A key copied from a password manager (e.g. Proton Pass): **Tools →
+  SSH keys → Paste a key…**, give it a name, paste the private key → **Keep
+  it** (if it has a passphrase, it asks for it once). It says the key is in
+  the system keychain; Credential Manager has an `ssh-key:` entry. **Copy
+  public key** and put it on the server (or **Put on a server**). Edit the
+  connection: **Authentication → Stored key** → your key. It connects with
+  no question, and no key file exists in `C:\Users\you\.ssh` for it.
 - [ ] 2.5 A host you already trust in `C:\Users\you\.ssh\known_hosts` (from
   Windows `ssh`) connects without the "New server" fingerprint question.
 

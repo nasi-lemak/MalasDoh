@@ -1,6 +1,7 @@
 //! The remote file browser. It only draws and collects intent; the session
 //! carries out each [`Action`] on the connection.
 
+use crate::listsel::KeyAction;
 use egui::{Align, Layout, RichText, Sense};
 use malasdoh_core::commands::Archive;
 use malasdoh_core::sftp::{self, EntryKind, RemoteEntry, human_size, mode_string};
@@ -120,7 +121,10 @@ pub struct Browser {
     pub error: Option<String>,
     /// Shown under the toolbar, e.g. that files go through shell commands.
     pub note: Option<String>,
-    selected: Vec<String>,
+    sel: crate::listsel::Selection<String>,
+    /// The list's scroll offset and height last frame, for keeping the
+    /// keyboard's row in view.
+    list_view: (f32, f32),
     filter: String,
     show_hidden: bool,
     back: Vec<String>,
@@ -162,11 +166,12 @@ impl Browser {
                 self.path_input = path.clone();
                 self.path = path;
                 self.error = None;
-                self.selected.retain(|s| self.entries.iter().any(|e| &e.path == s));
+                let entries = &self.entries;
+                self.sel.retain(|s| entries.iter().any(|e| &e.path == s));
                 if let Some(r) = self.reveal.take()
                     && self.entries.iter().any(|e| e.path == r)
                 {
-                    self.selected = vec![r];
+                    self.sel.only(&r);
                 }
             }
             Err(e) => {
@@ -246,8 +251,8 @@ impl Browser {
                         actions.push(Action::OpenPatch);
                     }
                 });
-                if !self.selected.is_empty() && ui.button("⬇").on_hover_text("Download selected").clicked() {
-                    actions.push(Action::Download(self.selected.clone()));
+                if !self.sel.selected.is_empty() && ui.button("⬇").on_hover_text("Download selected").clicked() {
+                    actions.push(Action::Download(self.sel.selected.clone()));
                 }
                 if ui.button("🔍").on_hover_text("Find files by name or contents").clicked() {
                     actions.push(Action::OpenFind);
@@ -326,16 +331,37 @@ impl Browser {
         let show_time = ui.available_width() > 430.0 || self.sort == SortBy::Modified;
 
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-        let pane = egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
-            ui,
-            row_h,
-            visible.len(),
-            |ui, range| {
-                for e in &visible[range] {
-                    self.row_ui(ui, e, row_h, show_time, &mut actions);
-                }
+        // The list's keys (once it was clicked): Ctrl+A, arrows, Enter, Delete, F2, Backspace.
+        let order: Vec<String> = visible.iter().map(|e| e.path.clone()).collect();
+        let (key, scroll_to) = self.sel.keys(ui.ctx(), &order);
+        match key {
+            Some(KeyAction::Open(p)) => match visible.iter().find(|e| e.path == p) {
+                Some(e) if e.is_dir_like() => actions.push(Action::Navigate(p)),
+                Some(_) => actions.push(Action::Edit { path: p, sudo: self.root }),
+                None => {}
             },
-        );
+            Some(KeyAction::Delete) => self.dialog = Dialog::ConfirmDelete(self.sel.selected.clone()),
+            Some(KeyAction::Rename(p)) => {
+                self.dialog = Dialog::Rename { name: sftp::file_name(&p).to_string(), from: p };
+            }
+            Some(KeyAction::Parent) if self.path != "/" && !self.path.is_empty() => {
+                actions.push(Action::Navigate(sftp::parent(&self.path)));
+            }
+            _ => {}
+        }
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(i) = scroll_to
+            && let Some(y) = crate::listsel::scroll_for(i, row_h, self.list_view.0, self.list_view.1)
+        {
+            area = area.vertical_scroll_offset(y);
+        }
+        let pane = area.show_rows(ui, row_h, visible.len(), |ui, range| {
+            for e in &visible[range] {
+                self.row_ui(ui, e, &order, row_h, show_time, &mut actions);
+            }
+        });
+        self.list_view = (pane.state.offset.y, pane.inner_rect.height());
+        self.sel.track_focus(ui.ctx(), pane.inner_rect);
         // Local files dragged from the local pane upload into this folder.
         let drop = ui.interact(pane.inner_rect, egui::Id::new(("remote-drop", self.session)), Sense::hover());
         if drop.dnd_hover_payload::<crate::local::LocalDrag>().is_some() {
@@ -355,8 +381,17 @@ impl Browser {
         actions
     }
 
-    fn row_ui(&mut self, ui: &mut egui::Ui, e: &RemoteEntry, row_h: f32, show_time: bool, actions: &mut Vec<Action>) {
-        let selected = self.selected.contains(&e.path);
+    #[allow(clippy::too_many_arguments)]
+    fn row_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        e: &RemoteEntry,
+        order: &[String],
+        row_h: f32,
+        show_time: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        let selected = self.sel.selected.contains(&e.path);
         let icon = match e.kind {
             EntryKind::Dir => "🗀",
             EntryKind::Symlink { to_dir: true } => "🗁",
@@ -419,21 +454,13 @@ impl Browser {
         );
 
         if resp.drag_started() && !selected {
-            self.selected = vec![e.path.clone()];
+            self.sel.only(&e.path);
         }
-        let dragged = if selected { self.selected.clone() } else { vec![e.path.clone()] };
+        let dragged = if selected { self.sel.selected.clone() } else { vec![e.path.clone()] };
         resp.dnd_set_drag_payload(crate::local::RemoteDrag { session: self.session, paths: dragged });
         if resp.clicked() {
-            let multi = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
-            if multi {
-                if selected {
-                    self.selected.retain(|p| p != &e.path);
-                } else {
-                    self.selected.push(e.path.clone());
-                }
-            } else {
-                self.selected = vec![e.path.clone()];
-            }
+            let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+            self.sel.click(order, &e.path, ctrl, shift);
         }
         if resp.double_clicked() {
             if e.is_dir_like() {
@@ -456,8 +483,8 @@ impl Browser {
         );
         let resp = resp.on_hover_text(tooltip);
         resp.context_menu(|ui| {
-            if !self.selected.contains(&e.path) {
-                self.selected = vec![e.path.clone()];
+            if !self.sel.contains(&e.path) {
+                self.sel.only(&e.path);
             }
             if e.is_dir_like() {
                 if ui.button("Open").clicked() {
@@ -519,9 +546,9 @@ impl Browser {
                     }
                 }
                 ui.separator();
-                if self.selected.len() == 2 {
+                if self.sel.selected.len() == 2 {
                     if ui.button("Compare the two selected files").clicked() {
-                        actions.push(Action::Compare(self.selected.clone()));
+                        actions.push(Action::Compare(self.sel.selected.clone()));
                         ui.close();
                     }
                 } else if ui.button("Compare with…").on_hover_text("Another server, a local file or a backup").clicked()
@@ -532,11 +559,11 @@ impl Browser {
             }
             ui.separator();
             if ui.button("Download").clicked() {
-                actions.push(Action::Download(self.selected.clone()));
+                actions.push(Action::Download(self.sel.selected.clone()));
                 ui.close();
             }
             if ui.button("Copy to another server…").clicked() {
-                actions.push(Action::CopyToServer(self.selected.clone()));
+                actions.push(Action::CopyToServer(self.sel.selected.clone()));
                 ui.close();
             }
             if ui.button("Copy path").clicked() {
@@ -552,9 +579,9 @@ impl Browser {
                 ui.close();
             }
             if ui.button("Owner…").on_hover_text("chown").clicked() {
-                let has_dir = self.entries.iter().any(|x| self.selected.contains(&x.path) && x.is_dir_like());
+                let has_dir = self.entries.iter().any(|x| self.sel.selected.contains(&x.path) && x.is_dir_like());
                 self.dialog = Dialog::Owner {
-                    paths: self.selected.clone(),
+                    paths: self.sel.selected.clone(),
                     owner: String::new(),
                     recursive: false,
                     sudo: true,
@@ -563,16 +590,16 @@ impl Browser {
                 ui.close();
             }
             if ui.button("Compress…").on_hover_text("Pack the selection into a .tar.gz or .zip here").clicked() {
-                let names: Vec<String> = self.selected.iter().map(|p| sftp::file_name(p).to_string()).collect();
+                let names: Vec<String> = self.sel.selected.iter().map(|p| sftp::file_name(p).to_string()).collect();
                 let base = if names.len() == 1 { names[0].clone() } else { sftp::file_name(&self.path).to_string() };
                 let base = if base.is_empty() { "archive".to_string() } else { base };
                 self.dialog = Dialog::Compress { names, out: format!("{base}.tar.gz"), kind: Archive::TarGz };
                 ui.close();
             }
             ui.separator();
-            let n = self.selected.len();
+            let n = self.sel.selected.len();
             if ui.button(if n > 1 { format!("Delete {n} items") } else { "Delete".into() }).clicked() {
-                self.dialog = Dialog::ConfirmDelete(self.selected.clone());
+                self.dialog = Dialog::ConfirmDelete(self.sel.selected.clone());
                 ui.close();
             }
         });

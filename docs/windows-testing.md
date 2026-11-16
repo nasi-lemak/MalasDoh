@@ -62,6 +62,11 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   Try a name with spaces and one with non-English letters.
 - [ ] 4.3 **Local files**: your computer's folders appear next to the
   server's; its **Drives** menu lists `C:\`, `D:\`…; drag files both ways.
+- [ ] 4.3b Click a file in the server's list, then **Ctrl+A**: everything is
+  selected (the terminal gets nothing). **Shift+click** another file: the
+  range between. **↓**/**Shift+↓** move and extend; **F2** renames;
+  **Delete** asks first; **Enter** on a folder opens it; **Backspace** goes
+  back up; **Esc** clears. The same keys work in **Local files**.
 - [ ] 4.4 Double-click a text file, change a line: the gutter shows a blue
   mark; hover it to see the old line. **Save**: the diff appears, then it
   saves. A Windows-style (CRLF) file stays CRLF.

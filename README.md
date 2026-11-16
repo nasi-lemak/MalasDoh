@@ -128,7 +128,12 @@ remote-editing loop, where they are weakest:
 - **File browser**: navigate, filter, hidden files, upload (button or drag and
   drop from the desktop) and download (files or whole folders, with progress and
   cancel), new file/folder, rename, delete, chmod, copy path, "cd here in
-  terminal". Nothing is overwritten without asking first. Sort by name, size
+  terminal". Nothing is overwritten without asking first. Selecting works as
+  in Explorer, in both the server's list and your computer's: Ctrl+click,
+  Shift+click for a range, Ctrl+A for all; once you have clicked in a list,
+  ↑/↓, Home/End and Page Up/Down move (Shift extends), Enter opens, Delete
+  deletes (after the usual question), F2 renames, Backspace goes up a
+  folder and Esc clears. Sort by name, size
   or date; bookmark folders per connection; change owner (`chown`, with sudo)
   and create symlinks; pack a selection into `.tar.gz`/`.tar.xz`/`.zip` and
   unpack archives into a new folder (never over existing files).

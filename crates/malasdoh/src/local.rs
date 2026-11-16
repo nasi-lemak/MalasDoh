@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use egui::{Align, Layout, RichText, Sense};
+
+use crate::listsel::KeyAction;
 use malasdoh_core::sftp::human_size;
 
 /// Dragged from the local pane.
@@ -40,7 +42,9 @@ pub struct LocalBrowser {
     input: String,
     entries: Vec<Entry>,
     error: Option<String>,
-    selected: Vec<PathBuf>,
+    sel: crate::listsel::Selection<PathBuf>,
+    /// The list's scroll offset and height last frame.
+    list_view: (f32, f32),
     filter: String,
     show_hidden: bool,
 }
@@ -71,7 +75,8 @@ impl LocalBrowser {
             path,
             entries: Vec::new(),
             error: None,
-            selected: Vec::new(),
+            sel: Default::default(),
+            list_view: (0.0, 0.0),
             filter: String::new(),
             show_hidden: false,
         };
@@ -80,7 +85,7 @@ impl LocalBrowser {
     }
 
     pub fn selection(&self) -> &[PathBuf] {
-        &self.selected
+        &self.sel.selected
     }
 
     pub fn navigate(&mut self, to: PathBuf) {
@@ -88,7 +93,7 @@ impl LocalBrowser {
             Ok(_) => {
                 self.path = to.canonicalize().map(without_verbatim).unwrap_or(to);
                 self.input = self.path.display().to_string();
-                self.selected.clear();
+                self.sel.clear();
                 self.refresh();
             }
             Err(e) => self.error = Some(format!("{}: {e}", to.display())),
@@ -119,7 +124,7 @@ impl LocalBrowser {
             .collect();
         entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         self.entries = entries;
-        self.selected.retain(|p| p.exists());
+        self.sel.retain(|p| p.exists());
     }
 
     fn hidden(name: &str, path: &Path) -> bool {
@@ -144,10 +149,10 @@ impl LocalBrowser {
         ui.horizontal(|ui| {
             ui.label(RichText::new("This computer").strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if !self.selected.is_empty()
+                if !self.sel.selected.is_empty()
                     && ui.button("Upload ⏵").on_hover_text("Upload the selected items to the server folder").clicked()
                 {
-                    actions.push(LocalAction::Upload(self.selected.clone()));
+                    actions.push(LocalAction::Upload(self.sel.selected.clone()));
                 }
             });
         });
@@ -198,79 +203,87 @@ impl LocalBrowser {
             .collect();
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
         let mut open_dir = None;
-        let pane = egui::ScrollArea::vertical().id_salt(("local", session)).auto_shrink([false, false]).show_rows(
-            ui,
-            row_h,
-            visible.len(),
-            |ui, range| {
-                for &i in &visible[range] {
-                    let e = &self.entries[i];
-                    let selected = self.selected.contains(&e.path);
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click_and_drag());
-                    if selected {
-                        ui.painter().rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
-                    }
-                    let inner = rect.shrink2(egui::vec2(6.0, 0.0));
-                    let body = egui::TextStyle::Body.resolve(ui.style());
-                    let weak = ui.visuals().weak_text_color();
-                    let mut right = inner.right();
-                    if !e.is_dir {
-                        let r = ui.painter().text(
-                            egui::pos2(right, inner.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            human_size(e.size),
-                            body.clone(),
-                            weak,
-                        );
-                        right = r.left() - 10.0;
-                    }
-                    let color =
-                        if e.is_dir || selected { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
-                    let icon = if e.is_dir { "🗀" } else { "🗋" };
-                    ui.painter_at(egui::Rect::from_min_max(inner.min, egui::pos2(right, inner.max.y))).text(
-                        egui::pos2(inner.left(), inner.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        format!("{icon}  {}", e.name),
-                        body,
-                        color,
-                    );
-                    if resp.clicked() {
-                        if ui.input(|i| i.modifiers.command || i.modifiers.ctrl) {
-                            if selected {
-                                self.selected.retain(|p| p != &e.path);
-                            } else {
-                                self.selected.push(e.path.clone());
-                            }
-                        } else {
-                            self.selected = vec![e.path.clone()];
-                        }
-                    }
-                    if resp.double_clicked() && e.is_dir {
-                        open_dir = Some(e.path.clone());
-                    }
-                    if resp.drag_started() && !selected {
-                        self.selected = vec![e.path.clone()];
-                    }
-                    resp.dnd_set_drag_payload(LocalDrag(if selected {
-                        self.selected.clone()
-                    } else {
-                        vec![e.path.clone()]
-                    }));
-                    let modified = e.modified.and_then(|t| {
-                        let d = SystemTime::now().duration_since(t).ok()?;
-                        Some(match d.as_secs() {
-                            s if s < 3600 => format!("{} min ago", s / 60),
-                            s if s < 86400 => format!("{} h ago", s / 3600),
-                            s => format!("{} days ago", s / 86400),
-                        })
-                    });
-                    resp.on_hover_text(format!("{}\n{}", e.path.display(), modified.unwrap_or_default()));
+        // The list's keys (once it was clicked): Ctrl+A, arrows, Enter on a folder, Backspace.
+        let order: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).collect();
+        let (key, scroll_to) = self.sel.keys(ui.ctx(), &order);
+        match key {
+            Some(KeyAction::Open(p)) if p.is_dir() => open_dir = Some(p),
+            Some(KeyAction::Parent) => {
+                if let Some(up) = self.path.parent() {
+                    open_dir = Some(up.to_path_buf());
                 }
-            },
-        );
+            }
+            _ => {}
+        }
+        let mut area = egui::ScrollArea::vertical().id_salt(("local", session)).auto_shrink([false, false]);
+        if let Some(i) = scroll_to
+            && let Some(y) = crate::listsel::scroll_for(i, row_h, self.list_view.0, self.list_view.1)
+        {
+            area = area.vertical_scroll_offset(y);
+        }
+        let pane = area.show_rows(ui, row_h, visible.len(), |ui, range| {
+            for &i in &visible[range] {
+                let e = &self.entries[i];
+                let selected = self.sel.contains(&e.path);
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click_and_drag());
+                if selected {
+                    ui.painter().rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                }
+                let inner = rect.shrink2(egui::vec2(6.0, 0.0));
+                let body = egui::TextStyle::Body.resolve(ui.style());
+                let weak = ui.visuals().weak_text_color();
+                let mut right = inner.right();
+                if !e.is_dir {
+                    let r = ui.painter().text(
+                        egui::pos2(right, inner.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        human_size(e.size),
+                        body.clone(),
+                        weak,
+                    );
+                    right = r.left() - 10.0;
+                }
+                let color =
+                    if e.is_dir || selected { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
+                let icon = if e.is_dir { "🗀" } else { "🗋" };
+                ui.painter_at(egui::Rect::from_min_max(inner.min, egui::pos2(right, inner.max.y))).text(
+                    egui::pos2(inner.left(), inner.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("{icon}  {}", e.name),
+                    body,
+                    color,
+                );
+                if resp.clicked() {
+                    let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+                    self.sel.click(&order, &e.path, ctrl, shift);
+                }
+                if resp.double_clicked() && e.is_dir {
+                    open_dir = Some(e.path.clone());
+                }
+                if resp.drag_started() && !selected {
+                    self.sel.only(&e.path);
+                }
+                resp.dnd_set_drag_payload(LocalDrag(if selected {
+                    self.sel.selected.clone()
+                } else {
+                    vec![e.path.clone()]
+                }));
+                let modified = e.modified.and_then(|t| {
+                    let d = SystemTime::now().duration_since(t).ok()?;
+                    Some(match d.as_secs() {
+                        s if s < 3600 => format!("{} min ago", s / 60),
+                        s if s < 86400 => format!("{} h ago", s / 3600),
+                        s => format!("{} days ago", s / 86400),
+                    })
+                });
+                resp.on_hover_text(format!("{}\n{}", e.path.display(), modified.unwrap_or_default()));
+            }
+        });
+        self.list_view = (pane.state.offset.y, pane.inner_rect.height());
+        self.sel.track_focus(ui.ctx(), pane.inner_rect);
         if let Some(d) = open_dir {
             self.navigate(d);
         }

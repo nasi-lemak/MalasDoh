@@ -12,6 +12,7 @@ mod forwards;
 mod highlight;
 mod journal_ui;
 mod keys_ui;
+mod listsel;
 mod local;
 mod logview;
 mod multiedit;

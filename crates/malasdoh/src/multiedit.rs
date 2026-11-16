@@ -392,7 +392,7 @@ impl MultiEdit {
         self.rt = Some(shared.rt.clone());
         let mut open = true;
         let (mut load, mut preview, mut save) = (false, false, false);
-        egui::Window::new("Edit a file on many servers")
+        let shown = egui::Window::new("Edit a file on many servers")
             .open(&mut open)
             .default_width(980.0)
             .default_height(640.0)
@@ -523,6 +523,9 @@ impl MultiEdit {
                 ui.separator();
                 self.results_ui(ui);
             });
+        if self.hosts.is_empty() && crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         if !open {
             self.clear_hosts();
         }

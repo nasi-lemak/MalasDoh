@@ -142,7 +142,7 @@ impl Forwards {
         let mut start = None;
         let mut stop = None;
         let mut remove = None;
-        egui::Window::new(format!("Port forwards — {title}"))
+        let shown = egui::Window::new(format!("Port forwards — {title}"))
             .id(egui::Id::new(("forwards", session)))
             .open(&mut open)
             .default_width(640.0)
@@ -240,6 +240,9 @@ impl Forwards {
                         .small(),
                 );
             });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         if let Some(i) = stop {
             self.stop(i, conn, shared);

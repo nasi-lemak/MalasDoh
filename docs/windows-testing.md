@@ -79,6 +79,12 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   keeps), and in **Port forwards** fill in a new forward and press Enter.
   With the forwards window open, typing a command and Enter in the
   terminal behind it runs the command and adds no forward.
+- [ ] 4.3e In a file list, type the first letters of a file's name: it
+  jumps there. **Ctrl+C** copies the selected paths (paste them in
+  Notepad). **Ctrl+Shift+N**: new folder. **F5** refreshes. Open a folder,
+  then **Alt+←** goes back and **Alt+→** forward. **Ctrl+L**: the path box,
+  selected, ready to type. **Shift+F10**: the right-click menu, at the row;
+  **Esc** closes it.
 - [ ] 4.4 Double-click a text file, change a line: the gutter shows a blue
   mark; hover it to see the old line. **Save**: the diff appears, then it
   saves. A Windows-style (CRLF) file stays CRLF.
@@ -173,15 +179,32 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   press **Save**: it says "Not saved" with the line number. Fix it, Save: it
   tests again, and connections using it still connect.
 
-## 8. Safety nets
+## 8. Keyboard
 
-- [ ] 8.1 Edit a file without saving, then end MalasDoh in **Task Manager**.
+- [ ] 8.0a **F1** shows the list of keys; **Esc** closes it.
+- [ ] 8.0b **Ctrl+K**, type part of a connection's name, **Enter**: it
+  connects (once). **Ctrl+K**, type, **↓**: the list has the keyboard;
+  **↓**/**↑**, **F2** (edit, **Esc** closes), **Delete** (asks; **Esc**
+  keeps it), **Enter** connects.
+- [ ] 8.0c With two connections open, **Ctrl+Tab** switches between them,
+  and you can type in the terminal straight away. **Ctrl+Shift+T** opens a
+  terminal, **Ctrl+PgUp**/**Ctrl+PgDn** move between tabs, **Ctrl+Shift+W**
+  closes one. In the terminal, **Ctrl+K** and **Ctrl+N** still do what bash
+  does with them.
+- [ ] 8.0d Upload a big file; click its row in Transfers: **Space** pauses,
+  **Space** again continues, **Delete** cancels.
+- [ ] 8.0e **Tools → Run on many hosts**: click a host, **↓**, **Space**
+  ticks the next one, **Ctrl+A** ticks all (again: none).
+
+## 9. Safety nets
+
+- [ ] 9.1 Edit a file without saving, then end MalasDoh in **Task Manager**.
   Start it, connect again: it offers the unsaved edits back.
-- [ ] 8.2 **Port forward**: add a local forward (e.g. 8080 → localhost:80 on
+- [ ] 9.2 **Port forward**: add a local forward (e.g. 8080 → localhost:80 on
   the server) and open `http://localhost:8080` in your browser. Windows
   Firewall should not ask (it only listens on 127.0.0.1).
-- [ ] 8.3 Quit with a session open; start again: "Reopen last session" works.
-- [ ] 8.4 **Connection → Export connections…** to a file with a passphrase,
+- [ ] 9.3 Quit with a session open; start again: "Reopen last session" works.
+- [ ] 9.4 **Connection → Export connections…** to a file with a passphrase,
   then **Import connections…** it back: nothing is duplicated.
 
 ## Reporting

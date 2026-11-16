@@ -131,9 +131,12 @@ remote-editing loop, where they are weakest:
   terminal". Nothing is overwritten without asking first. Selecting works as
   in Explorer, in both the server's list and your computer's: Ctrl+click,
   Shift+click for a range, Ctrl+A for all; once you have clicked in a list,
-  ↑/↓, Home/End and Page Up/Down move (Shift extends), Enter opens, Delete
-  deletes (after the usual question), F2 renames, Backspace goes up a
-  folder and Esc clears. Sort by name, size
+  ↑/↓, Home/End and Page Up/Down move (Shift extends), typing a name's first
+  letters jumps to it, Enter opens, Delete deletes (after the usual
+  question), F2 renames, Ctrl+C copies the paths, Ctrl+Shift+N makes a
+  folder, Backspace or Alt+↑ goes up, Alt+←/→ go back and forward, F5
+  refreshes, Ctrl+L and Ctrl+F jump to the path and filter boxes, Shift+F10
+  opens the right-click menu and Esc clears. Sort by name, size
   or date; bookmark folders per connection; change owner (`chown`, with sudo)
   and create symlinks; pack a selection into `.tar.gz`/`.tar.xz`/`.zip` and
   unpack archives into a new folder (never over existing files).
@@ -159,10 +162,23 @@ remote-editing loop, where they are weakest:
   right-click menu (or F2 and Delete) renames and deletes your own files:
   Delete moves them to the Recycle Bin (the Trash on Linux and macOS), or
   for good if you choose so; a rename never replaces another file.
-- **Keyboard in dialogs**: Enter presses a dialog's main button (OK, Save,
-  Rename, Delete…) and Esc cancels. In a box where Enter starts a new line
-  (pasting a key, editing a WireGuard configuration) it is Ctrl+Enter. The
-  host key question has no Enter on purpose: you choose with the mouse.
+- **Keyboard**: F1 (or Tools → Keyboard shortcuts) lists every key.
+  Ctrl+Tab and Ctrl+Shift+Tab switch connections, Ctrl+PgUp/PgDn switch
+  terminal and file tabs, Ctrl+Shift+T opens a terminal and Ctrl+Shift+W
+  closes the tab. Ctrl+K (or Ctrl+Shift+P) jumps to the connection search:
+  type part of a name and Enter connects, or ↓ goes into the list, where the
+  arrows, letters, Enter, F2 (edit) and Delete work. Ctrl+N is a new
+  connection. Plain Ctrl+letter keys stay with the terminal while you type
+  in it (Ctrl+K and Ctrl+N mean something to the shell); the Ctrl+Shift
+  ones work everywhere.
+  In dialogs Enter presses the main button (OK, Save, Rename, Delete…) and
+  Esc cancels; in a box where Enter starts a new line (pasting a key,
+  editing a WireGuard configuration) it is Ctrl+Enter. The host key
+  question has no Enter on purpose: you choose with the mouse. Esc also
+  closes the window you are using (SSH keys, Teleport, Find files…).
+  The transfer list takes Delete (cancel) and Space (pause or continue) on
+  the rows you click, the host list of "Run on many hosts" takes Space and
+  Ctrl+A, and Find files results open with Enter.
 - **Copy between servers**: send files or folders from one connected server to
   another (they pass through a private temporary folder on your computer, so the
   servers do not need to reach each other).

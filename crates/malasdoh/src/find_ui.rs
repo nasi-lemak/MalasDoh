@@ -2,6 +2,8 @@
 
 use egui::RichText;
 
+use crate::listsel::KeyAction;
+
 pub struct FindWindow {
     pub open: bool,
     pub dir: String,
@@ -15,6 +17,9 @@ pub struct FindWindow {
     pub truncated: bool,
     pub error: Option<String>,
     searched: bool,
+    /// The result the keyboard is on (↑/↓, letters; Enter opens it).
+    sel: crate::listsel::Selection<String>,
+    scroll_to: Option<String>,
 }
 
 /// Results are cut at this many.
@@ -48,6 +53,8 @@ impl Default for FindWindow {
             truncated: false,
             error: None,
             searched: false,
+            sel: Default::default(),
+            scroll_to: None,
         }
     }
 }
@@ -83,7 +90,7 @@ impl FindWindow {
         }
         let mut action = None;
         let mut open = self.open;
-        egui::Window::new("Find files")
+        let shown = egui::Window::new("Find files")
             .id(egui::Id::new(("find", session)))
             .open(&mut open)
             .default_size([620.0, 460.0])
@@ -152,19 +159,44 @@ impl FindWindow {
                     ui.colored_label(ui.visuals().error_fg_color, e);
                 }
                 ui.separator();
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                let (key, scroll) =
+                    self.sel.keys(ui.ctx(), &self.results, |p| malasdoh_core::sftp::file_name(p).to_string());
+                match key {
+                    Some(KeyAction::Open(p)) => action = Some(FindAction::Open(p)),
+                    Some(KeyAction::Copy) => ui.ctx().copy_text(self.sel.selected.join("\n")),
+                    _ => {}
+                }
+                if let Some(i) = scroll {
+                    self.scroll_to = self.results.get(i).cloned();
+                }
+                let list = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for p in &self.results {
                         let r = ui
-                            .add(egui::Label::new(RichText::new(p).monospace()).sense(egui::Sense::click()).truncate())
-                            .on_hover_text("Click: show in the browser. Double-click: open in the editor.");
+                            .add(
+                                egui::Button::selectable(self.sel.contains(p), RichText::new(p).monospace()).truncate(),
+                            )
+                            .on_hover_text(
+                                "Click: show in the browser. Double-click or Enter: open in the editor. \
+                                 The arrow keys or a name's first letters move.",
+                            );
                         if r.double_clicked() {
                             action = Some(FindAction::Open(p.clone()));
                         } else if r.clicked() {
+                            self.sel.only(p);
+                            self.sel.focused = true;
                             action = Some(FindAction::Reveal(p.clone()));
+                        }
+                        if self.scroll_to.as_ref() == Some(p) {
+                            r.scroll_to_me(None);
+                            self.scroll_to = None;
                         }
                     }
                 });
+                self.sel.track_focus(ui, list.inner_rect);
             });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         action
     }

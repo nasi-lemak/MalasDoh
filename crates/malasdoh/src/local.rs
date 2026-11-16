@@ -40,6 +40,7 @@ enum Dialog {
         from: PathBuf,
         name: String,
     },
+    NewFolder(String),
     /// Delete these; `error` says why moving them to the bin failed.
     Delete {
         paths: Vec<PathBuf>,
@@ -72,6 +73,9 @@ pub struct LocalBrowser {
     filter: String,
     show_hidden: bool,
     dialog: Dialog,
+    /// Folders visited, for Back, and left by Back, for Forward.
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
     /// A delete running in the background, and what it deletes.
     deleting: Option<(DeleteSlot, Vec<PathBuf>)>,
 }
@@ -107,6 +111,8 @@ impl LocalBrowser {
             filter: String::new(),
             show_hidden: false,
             dialog: Dialog::None,
+            back: Vec::new(),
+            forward: Vec::new(),
             deleting: None,
         };
         b.refresh();
@@ -118,14 +124,44 @@ impl LocalBrowser {
     }
 
     pub fn navigate(&mut self, to: PathBuf) {
+        let here = self.path.clone();
+        if self.go(to) && self.path != here {
+            self.back.push(here);
+            if self.back.len() > 50 {
+                self.back.remove(0);
+            }
+            self.forward.clear();
+        }
+    }
+
+    /// Back (or Forward, with `forward`) through the folders visited.
+    fn history(&mut self, forward: bool) {
+        let to = if forward { self.forward.pop() } else { self.back.pop() };
+        let Some(to) = to else { return };
+        let here = self.path.clone();
+        if self.go(to.clone()) {
+            if forward { self.back.push(here) } else { self.forward.push(here) }
+        } else if forward {
+            self.forward.push(to);
+        } else {
+            self.back.push(to);
+        }
+    }
+
+    /// Show `to`; false if it cannot be read.
+    fn go(&mut self, to: PathBuf) -> bool {
         match std::fs::read_dir(&to) {
             Ok(_) => {
                 self.path = to.canonicalize().map(without_verbatim).unwrap_or(to);
                 self.input = self.path.display().to_string();
                 self.sel.clear();
                 self.refresh();
+                true
             }
-            Err(e) => self.error = Some(format!("{}: {e}", to.display())),
+            Err(e) => {
+                self.error = Some(format!("{}: {e}", to.display()));
+                false
+            }
         }
     }
 
@@ -184,6 +220,16 @@ impl LocalBrowser {
         Ok(())
     }
 
+    fn new_folder(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        check_name(name)?;
+        let to = self.path.join(name);
+        std::fs::create_dir(&to).map_err(|e| format!("Cannot make {}: {e}", to.display()))?;
+        self.refresh();
+        self.sel.only(&to);
+        Ok(())
+    }
+
     /// Delete in the background: to the bin, or for good with `permanent`.
     fn delete(&mut self, paths: Vec<PathBuf>, permanent: bool) {
         let slot = DeleteSlot::default();
@@ -233,6 +279,7 @@ impl LocalBrowser {
     fn dialog_ui(&mut self, ctx: &egui::Context) {
         let mut close = false;
         let mut rename = None;
+        let mut new_folder = None;
         let mut delete = None;
         match &mut self.dialog {
             Dialog::None => {}
@@ -240,6 +287,14 @@ impl LocalBrowser {
                 if let Some(ok) = crate::browser::name_dialog(ctx, "Rename", name) {
                     if ok {
                         rename = Some((from.clone(), name.clone()));
+                    }
+                    close = true;
+                }
+            }
+            Dialog::NewFolder(name) => {
+                if let Some(ok) = crate::browser::name_dialog(ctx, "New folder", name) {
+                    if ok {
+                        new_folder = Some(name.clone());
                     }
                     close = true;
                 }
@@ -300,6 +355,11 @@ impl LocalBrowser {
         {
             self.error = Some(e);
         }
+        if let Some(name) = new_folder
+            && let Err(e) = self.new_folder(&name)
+        {
+            self.error = Some(e);
+        }
         if let Some((paths, permanent)) = delete {
             self.delete(paths, permanent);
             close = true;
@@ -339,12 +399,19 @@ impl LocalBrowser {
             });
         });
         ui.horizontal(|ui| {
-            if ui.button("⬆").on_hover_text("Parent folder").clicked()
+            if ui.add_enabled(!self.back.is_empty(), egui::Button::new("⬅")).on_hover_text("Back (Alt+Left)").clicked()
+            {
+                self.history(false);
+            }
+            if !self.forward.is_empty() && ui.button("➡").on_hover_text("Forward (Alt+Right)").clicked() {
+                self.history(true);
+            }
+            if ui.button("⬆").on_hover_text("Parent folder (Alt+Up or Backspace)").clicked()
                 && let Some(p) = self.path.parent().map(Path::to_path_buf)
             {
                 self.navigate(p);
             }
-            if ui.button("⟳").on_hover_text("Refresh").clicked() {
+            if ui.button("⟳").on_hover_text("Refresh (F5)").clicked() {
                 self.refresh();
             }
             if ui.button("~").on_hover_text("Home folder").clicked() {
@@ -360,15 +427,29 @@ impl LocalBrowser {
                     }
                 }
             });
-            let r = ui.add(egui::TextEdit::singleline(&mut self.input).desired_width(f32::INFINITY));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.input)
+                    .id(egui::Id::new(("local-path", session)))
+                    .desired_width(f32::INFINITY),
+            );
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let to = malasdoh_core::paths::expand_tilde(self.input.trim());
                 self.navigate(to);
             }
         });
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(120.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .id(egui::Id::new(("local-filter", session)))
+                    .hint_text("Filter (Ctrl+F)")
+                    .desired_width(120.0),
+            );
             ui.checkbox(&mut self.show_hidden, "Hidden");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("+ Folder").on_hover_text("New folder (Ctrl+Shift+N)").clicked() {
+                    self.dialog = Dialog::NewFolder(String::new());
+                }
+            });
         });
         if let Some(e) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
@@ -387,7 +468,9 @@ impl LocalBrowser {
         let mut open_dir = None;
         // The list's keys (once it was clicked): Ctrl+A, arrows, Enter on a folder, Backspace.
         let order: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).collect();
-        let (key, scroll_to) = self.sel.keys(ui.ctx(), &order);
+        let (key, scroll_to) = self
+            .sel
+            .keys(ui.ctx(), &order, |p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         match key {
             Some(KeyAction::Open(p)) if p.is_dir() => open_dir = Some(p),
             Some(KeyAction::Parent) => {
@@ -397,6 +480,30 @@ impl LocalBrowser {
             }
             Some(KeyAction::Rename(p)) => self.start_rename(p),
             Some(KeyAction::Delete) => self.start_delete(),
+            Some(KeyAction::Back) => self.history(false),
+            Some(KeyAction::Forward) => self.history(true),
+            Some(KeyAction::Refresh) => self.refresh(),
+            Some(KeyAction::FocusPath) => {
+                self.sel.focused = false;
+                crate::shortcut::focus_select(
+                    ui.ctx(),
+                    egui::Id::new(("local-path", session)),
+                    self.input.chars().count(),
+                );
+            }
+            Some(KeyAction::FocusFilter) => {
+                self.sel.focused = false;
+                crate::shortcut::focus_select(
+                    ui.ctx(),
+                    egui::Id::new(("local-filter", session)),
+                    self.filter.chars().count(),
+                );
+            }
+            Some(KeyAction::NewFolder) => self.dialog = Dialog::NewFolder(String::new()),
+            Some(KeyAction::Copy) => {
+                let paths: Vec<String> = self.sel.selected.iter().map(|p| p.display().to_string()).collect();
+                ui.ctx().copy_text(paths.join("\n"));
+            }
             _ => {}
         }
         let mut area = egui::ScrollArea::vertical().id_salt(("local", session)).auto_shrink([false, false]);
@@ -461,7 +568,7 @@ impl LocalBrowser {
                 let path = e.path.clone();
                 let is_dir = e.is_dir;
                 let resp = resp.on_hover_text(format!("{}\n{}", e.path.display(), modified(e.modified)));
-                resp.context_menu(|ui| {
+                self.sel.menu_popup(&resp, &path).show(|ui| {
                     let n = self.sel.selected.len();
                     if is_dir && n == 1 && ui.button("Open").clicked() {
                         open_dir = Some(path.clone());
@@ -471,17 +578,18 @@ impl LocalBrowser {
                         actions.push(LocalAction::Upload(self.sel.selected.clone()));
                         ui.close();
                     }
-                    if ui.button("Copy path").clicked() {
-                        ui.ctx().copy_text(path.display().to_string());
+                    if ui.add(egui::Button::new("Copy path").shortcut_text("Ctrl+C")).clicked() {
+                        let paths: Vec<String> = self.sel.selected.iter().map(|p| p.display().to_string()).collect();
+                        ui.ctx().copy_text(paths.join("\n"));
                         ui.close();
                     }
-                    if n == 1 && ui.button("Rename…").on_hover_text("F2").clicked() {
+                    if n == 1 && ui.add(egui::Button::new("Rename…").shortcut_text("F2")).clicked() {
                         self.start_rename(path.clone());
                         ui.close();
                     }
                     ui.separator();
                     let label = if n > 1 { format!("Delete {n} items…") } else { "Delete…".into() };
-                    if ui.button(label).on_hover_text("Delete key").clicked() {
+                    if ui.add(egui::Button::new(label).shortcut_text("Del")).clicked() {
                         self.start_delete();
                         ui.close();
                     }

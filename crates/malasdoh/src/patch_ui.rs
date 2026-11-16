@@ -98,7 +98,7 @@ impl PatchWindow {
         }
         let mut action = None;
         let mut open = self.open;
-        egui::Window::new("Apply a patch")
+        let shown = egui::Window::new("Apply a patch")
             .id(egui::Id::new(("patch", session)))
             .open(&mut open)
             .default_size([760.0, 560.0])
@@ -179,6 +179,9 @@ impl PatchWindow {
                 ui.separator();
                 self.results_ui(ui);
             });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         action
     }

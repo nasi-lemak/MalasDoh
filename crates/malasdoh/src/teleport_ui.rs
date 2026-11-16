@@ -242,54 +242,58 @@ impl TeleportWindow {
             return actions;
         }
         let mut open = true;
-        egui::Window::new("Teleport").open(&mut open).default_width(640.0).default_height(520.0).show(ctx, |ui| {
-            ui.label(
-                RichText::new(
-                    "Log in to a Teleport cluster with your password and authenticator code, then use its servers \
+        let shown =
+            egui::Window::new("Teleport").open(&mut open).default_width(640.0).default_height(520.0).show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Log in to a Teleport cluster with your password and authenticator code, then use its servers \
                      like any other connection. Teleport's own client (tsh) is not needed.",
-                )
-                .weak(),
-            );
-            ui.horizontal_wrapped(|ui| {
-                for c in &store.clusters {
-                    let state = teleport::cert_state(&c.key_path(&shared.paths.teleport_dir()));
-                    let status = match &state {
-                        Some(s) if s.is_valid() => format!("✔ {}", remaining(s)),
-                        _ => "not logged in".into(),
-                    };
-                    let label = format!("{} ({}) · {status}", c.label(), c.user);
-                    if ui.selectable_label(self.selected == Some(c.id) && self.add.is_none(), label).clicked() {
-                        self.selected = Some(c.id);
-                        self.add = None;
-                        self.message = None;
-                        self.found = None;
+                    )
+                    .weak(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    for c in &store.clusters {
+                        let state = teleport::cert_state(&c.key_path(&shared.paths.teleport_dir()));
+                        let status = match &state {
+                            Some(s) if s.is_valid() => format!("✔ {}", remaining(s)),
+                            _ => "not logged in".into(),
+                        };
+                        let label = format!("{} ({}) · {status}", c.label(), c.user);
+                        if ui.selectable_label(self.selected == Some(c.id) && self.add.is_none(), label).clicked() {
+                            self.selected = Some(c.id);
+                            self.add = None;
+                            self.message = None;
+                            self.found = None;
+                        }
                     }
+                    if ui.button("+ Add a cluster").clicked() {
+                        self.add = Some(AddForm::default());
+                        self.message = None;
+                    }
+                });
+                ui.separator();
+                if self.add.is_some() {
+                    if let Some(a) = self.add_ui(ui, shared) {
+                        actions.push(a);
+                    }
+                } else if let Some(c) = self.selected.and_then(|id| store.get(id)).cloned() {
+                    self.cluster_ui(ui, &c, shared, &mut actions);
+                } else if store.clusters.is_empty() {
+                    ui.label("No clusters yet. Add yours with its web address (what you open in the browser).");
                 }
-                if ui.button("+ Add a cluster").clicked() {
-                    self.add = Some(AddForm::default());
-                    self.message = None;
+                if let Some((m, err)) = &self.message {
+                    ui.add_space(6.0);
+                    let color = if *err { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
+                    ui.colored_label(color, m);
+                }
+                if self.busy {
+                    ui.spinner();
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
                 }
             });
-            ui.separator();
-            if self.add.is_some() {
-                if let Some(a) = self.add_ui(ui, shared) {
-                    actions.push(a);
-                }
-            } else if let Some(c) = self.selected.and_then(|id| store.get(id)).cloned() {
-                self.cluster_ui(ui, &c, shared, &mut actions);
-            } else if store.clusters.is_empty() {
-                ui.label("No clusters yet. Add yours with its web address (what you open in the browser).");
-            }
-            if let Some((m, err)) = &self.message {
-                ui.add_space(6.0);
-                let color = if *err { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
-                ui.colored_label(color, m);
-            }
-            if self.busy {
-                ui.spinner();
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
-            }
-        });
+        if !self.busy && crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         if !open {
             self.open = false;
             self.listed.clear();

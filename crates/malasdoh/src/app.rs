@@ -1,9 +1,12 @@
 //! The main window: connection list, session tabs, and the dialogs that answer
 //! a connection's questions.
 
+use crate::listsel::KeyAction;
+
 mod backup;
 mod keys;
 mod rdp;
+mod shortcuts;
 mod teleport;
 mod wireguard;
 
@@ -40,6 +43,11 @@ pub struct App {
     active: Option<SessionId>,
     next_session: SessionId,
     filter: String,
+    /// The connection list's selection, and its rows as shown last frame.
+    side_sel: crate::listsel::Selection<ProfileId>,
+    side_order: Vec<ProfileId>,
+    /// A row to bring into view (the keyboard moved to it).
+    side_scroll: Option<ProfileId>,
     form: Option<ProfileForm>,
     confirm_delete: Option<ProfileId>,
     confirm_close: Option<SessionId>,
@@ -54,6 +62,8 @@ pub struct App {
     multi: MultiRun,
     multi_edit: MultiEdit,
     show_sidebar: bool,
+    /// The list of keyboard shortcuts (F1).
+    show_keys_help: bool,
     last_local_dir: Option<std::path::PathBuf>,
     cross: Option<CrossCopy>,
     compares: Compares,
@@ -300,6 +310,9 @@ impl App {
             active: None,
             next_session: 1,
             filter: String::new(),
+            side_sel: Default::default(),
+            side_order: Vec::new(),
+            side_scroll: None,
             form: None,
             confirm_delete: None,
             confirm_close: None,
@@ -314,6 +327,7 @@ impl App {
             multi: MultiRun::default(),
             multi_edit: MultiEdit::default(),
             show_sidebar: true,
+            show_keys_help: false,
             last_local_dir: None,
             cross: None,
             compares: Compares::default(),
@@ -548,8 +562,17 @@ impl App {
     fn menu_ui(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("Connection", |ui| {
-                if ui.button("New connection…").clicked() {
+                if ui.add(egui::Button::new("New connection…").shortcut_text("Ctrl+N")).clicked() {
                     self.form = Some(ProfileForm::new(Profile::default(), true));
+                    ui.close();
+                }
+                if ui.add(egui::Button::new("Find a connection…").shortcut_text("Ctrl+K")).clicked() {
+                    self.show_sidebar = true;
+                    crate::shortcut::focus_select(
+                        ui.ctx(),
+                        egui::Id::new(shortcuts::SEARCH_ID),
+                        self.filter.chars().count(),
+                    );
                     ui.close();
                 }
                 if ui.button("Import from ~/.ssh/config").clicked() {
@@ -654,6 +677,11 @@ impl App {
                     self.journal_win.show(&self.journal, None);
                     ui.close();
                 }
+                ui.separator();
+                if ui.add(egui::Button::new("Keyboard shortcuts…").shortcut_text("F1")).clicked() {
+                    self.show_keys_help = true;
+                    ui.close();
+                }
             });
             ui.separator();
             let mut switch = None;
@@ -666,7 +694,11 @@ impl App {
                 let name =
                     if s.has_unsaved() { format!("{} *", s.profile.display_name()) } else { s.profile.display_name() };
                 job.append(&name, 0.0, egui::TextFormat::simple(body, ui.visuals().text_color()));
-                if ui.selectable_label(selected, job).clicked() {
+                if ui
+                    .selectable_label(selected, job)
+                    .on_hover_text("Ctrl+Tab / Ctrl+Shift+Tab: next or previous connection")
+                    .clicked()
+                {
                     switch = Some(s.id);
                 }
                 if selected && ui.small_button("✖").on_hover_text("Close this connection").clicked() {
@@ -700,12 +732,33 @@ impl App {
         ui.horizontal(|ui| {
             ui.heading("Connections");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("+").on_hover_text("New connection").clicked() {
+                if ui.button("+").on_hover_text("New connection (Ctrl+N)").clicked() {
                     self.form = Some(ProfileForm::new(Profile::default(), true));
                 }
             });
         });
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Search").desired_width(f32::INFINITY));
+        let search = ui.add(
+            egui::TextEdit::singleline(&mut self.filter)
+                .id(egui::Id::new(shortcuts::SEARCH_ID))
+                .hint_text("Search (Ctrl+K)")
+                .desired_width(f32::INFINITY),
+        );
+        // Enter connects to the first match; ↓ goes down into the list.
+        if search.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            && !self.filter.trim().is_empty()
+            && let Some(&first) = self.side_order.first()
+        {
+            self.connect(first);
+        }
+        if search.has_focus()
+            && let Some(&first) = self.side_order.first()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+        {
+            search.surrender_focus();
+            self.side_sel.only(&first);
+            self.side_sel.focused = true;
+        }
         ui.separator();
         if self.profiles.profiles.is_empty() {
             ui.label("No saved connections yet.");
@@ -720,11 +773,36 @@ impl App {
         let filter = self.filter.to_lowercase();
         let mut connect = None;
         let mut edit = None;
+        // The list's keys, once it was clicked: arrows, letters, Enter, F2, Delete.
+        let profiles = &self.profiles;
+        let (key, scroll) = self
+            .side_sel
+            .keys(ui.ctx(), &self.side_order, |id| profiles.get(*id).map(|p| p.display_name()).unwrap_or_default());
+        match key {
+            Some(KeyAction::Open(id)) => connect = Some(id),
+            Some(KeyAction::Rename(id)) => edit = Some(id),
+            Some(KeyAction::Delete) if self.side_sel.selected.len() == 1 => {
+                self.confirm_delete = Some(self.side_sel.selected[0]);
+            }
+            Some(KeyAction::FocusFilter) => {
+                self.side_sel.focused = false;
+                crate::shortcut::focus_select(
+                    ui.ctx(),
+                    egui::Id::new(shortcuts::SEARCH_ID),
+                    self.filter.chars().count(),
+                );
+            }
+            _ => {}
+        }
+        if let Some(i) = scroll {
+            self.side_scroll = self.side_order.get(i).copied();
+        }
+        let mut order = Vec::new();
         let mut duplicate = None;
         let mut rdp_via = None;
         let mut group_proxy = None;
         let tunnels: Vec<(uuid::Uuid, String)> = self.wg_store.tunnels.iter().map(|t| (t.id, t.name.clone())).collect();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let list = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for group in self.profiles.groups() {
                 let mut members: Vec<&Profile> = self
                     .profiles
@@ -760,19 +838,29 @@ impl App {
                         } else {
                             format!("{}\n{}", p.destination(), p.auth.label())
                         };
-                        let r = ui.selectable_label(false, label).on_hover_text(format!(
+                        order.push(p.id);
+                        let r = ui.selectable_label(self.side_sel.contains(&p.id), label).on_hover_text(format!(
                             "{what}{}",
                             if p.notes.is_empty() { String::new() } else { format!("\n{}", p.notes) }
                         ));
+                        if r.clicked() || r.secondary_clicked() {
+                            self.side_sel.only(&p.id);
+                            self.side_sel.focused = true;
+                        }
                         if r.double_clicked() {
                             connect = Some(p.id);
                         }
-                        r.context_menu(|ui| {
-                            if ui.button(if rdp { "Open Remote Desktop" } else { "Connect" }).clicked() {
+                        if self.side_scroll == Some(p.id) {
+                            r.scroll_to_me(None);
+                            self.side_scroll = None;
+                        }
+                        self.side_sel.menu_popup(&r, &p.id).show(|ui| {
+                            let open = if rdp { "Open Remote Desktop" } else { "Connect" };
+                            if ui.add(egui::Button::new(open).shortcut_text("Enter")).clicked() {
                                 connect = Some(p.id);
                                 ui.close();
                             }
-                            if ui.button("Edit…").clicked() {
+                            if ui.add(egui::Button::new("Edit…").shortcut_text("F2")).clicked() {
                                 edit = Some(p.id);
                                 ui.close();
                             }
@@ -796,7 +884,7 @@ impl App {
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.button("Delete…").clicked() {
+                            if ui.add(egui::Button::new("Delete…").shortcut_text("Del")).clicked() {
                                 self.confirm_delete = Some(p.id);
                                 ui.close();
                             }
@@ -827,10 +915,12 @@ impl App {
                 });
             }
         });
+        self.side_order = order;
+        self.side_sel.track_focus(ui, list.inner_rect);
         if let Some((group, proxy)) = group_proxy {
             self.set_group_proxy(&group, proxy);
         }
-        ui.label(RichText::new("Double-click to connect").weak().small());
+        ui.label(RichText::new("Double-click or Enter to connect").weak().small());
         if let Some(id) = connect {
             self.connect(id);
         }
@@ -946,7 +1036,9 @@ impl App {
                 if r.clicked() {
                     activate = Some(Pane::Term(t.id));
                 }
-                if s.active == Some(Pane::Term(t.id)) && ui.small_button("✖").clicked() {
+                if s.active == Some(Pane::Term(t.id))
+                    && ui.small_button("✖").on_hover_text("Close (Ctrl+Shift+W)").clicked()
+                {
                     close_term = Some(t.id);
                 }
             }
@@ -971,7 +1063,9 @@ impl App {
                 {
                     activate = Some(Pane::Editor(e.id));
                 }
-                if s.active == Some(Pane::Editor(e.id)) && ui.small_button("✖").clicked() {
+                if s.active == Some(Pane::Editor(e.id))
+                    && ui.small_button("✖").on_hover_text("Close (Ctrl+Shift+W)").clicked()
+                {
                     close_editor = Some(e.id);
                 }
             }
@@ -1000,7 +1094,11 @@ impl App {
                 }
             }
             if s.state == ConnState::Connected {
-                if ui.button("+ Terminal").clicked() {
+                if ui
+                    .button("+ Terminal")
+                    .on_hover_text("New terminal (Ctrl+Shift+T). Ctrl+PgUp / Ctrl+PgDn switch between tabs.")
+                    .clicked()
+                {
                     s.open_terminal(&shared, &settings);
                 }
                 let menu = ui.menu_button("⏷", |ui| {
@@ -1158,9 +1256,12 @@ impl App {
         if self.show_snippets {
             let mut open = true;
             let mut changed = false;
-            egui::Window::new("Snippets").open(&mut open).default_width(760.0).show(ctx, |ui| {
+            let shown = egui::Window::new("Snippets").open(&mut open).default_width(760.0).show(ctx, |ui| {
                 changed = snippets::manager_ui(ui, &mut self.snippets);
             });
+            if crate::dlg::closes(ctx, &shown) {
+                open = false;
+            }
             self.show_snippets = open;
             if changed && let Err(e) = self.snippets.save(&self.shared.paths.config_dir.join("snippets.toml")) {
                 self.notify(format!("Could not save snippets: {e:#}"), true);
@@ -1889,9 +1990,12 @@ impl App {
         let mut open = true;
         let paths = self.shared.paths.clone();
         let tab = &mut self.settings_tab;
-        egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(true).default_width(1040.0).show(
-            ctx,
-            |ui| {
+        let shown = egui::Window::new("Settings")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(1040.0)
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(tab, SettingsTab::General, "General");
                     ui.selectable_value(tab, SettingsTab::Transfers, "Transfers");
@@ -1964,8 +2068,10 @@ impl App {
                     SettingsTab::Transfers => transfers_ui(ui, &mut s.transfer, &mut self.skip_text),
                     SettingsTab::Checks => checks_ui(ui, &mut s.validation_rules),
                 }
-            },
-        );
+            });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.show_settings = open;
         if self.settings != before {
             ctx.set_theme(if self.settings.dark_mode { egui::Theme::Dark } else { egui::Theme::Light });
@@ -2187,6 +2293,7 @@ impl eframe::App for App {
             );
         }
 
+        self.shortcuts(&ctx);
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
         if self.broadcast.is_some() {
@@ -2206,6 +2313,7 @@ impl eframe::App for App {
         self.backup_ui(&ctx);
         self.settings_ui(&ctx);
         self.snippet_windows_ui(&ctx);
+        self.keys_help_ui(&ctx);
         self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);
         self.multi_edit.ui(&ctx, &self.profiles, &self.shared, &self.settings.validation_rules);
         if let Some((a, b)) = self.journal_win.ui(&ctx, &self.journal, &self.sessions) {

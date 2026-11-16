@@ -204,7 +204,7 @@ impl WireGuardWindow {
         }
         let mut open = true;
         let running = wireguard::running();
-        egui::Window::new("WireGuard").open(&mut open).default_width(640.0).show(ctx, |ui| {
+        let shown = egui::Window::new("WireGuard").open(&mut open).default_width(640.0).show(ctx, |ui| {
             ui.label(
                 RichText::new(
                     "MalasDoh can reach servers through a WireGuard tunnel of its own: nothing to install, no admin \
@@ -227,7 +227,7 @@ impl WireGuardWindow {
                                     out.push(WgAction::Rename(e.id, name.trim().to_string()));
                                 }
                                 self.renaming = None;
-                            } else if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            } else if crate::dlg::window_escape(ui) {
                                 self.renaming = None;
                             }
                         }
@@ -419,6 +419,9 @@ impl WireGuardWindow {
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             }
         });
+        if self.text.trim().is_empty() && self.editing.is_none() && crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         if !open {
             self.open = false;
             self.text.clear();

@@ -84,7 +84,7 @@ impl SyncWindow {
         let mut compare = false;
         let mut run = false;
         let mut show = None;
-        egui::Window::new("Compare and synchronise folders")
+        let shown = egui::Window::new("Compare and synchronise folders")
             .id(egui::Id::new(("sync", session)))
             .open(&mut open)
             .default_width(720.0)
@@ -255,6 +255,9 @@ impl SyncWindow {
                     }
                 }
             });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         let Some(fs) = fs else { return };
         if let Some(rel) = show {

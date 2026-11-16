@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use egui::RichText;
+
+use crate::listsel::{KeyAction, Selection};
 use malasdoh_core::profile::{Profile, ProfileId, ProfileStore};
 use malasdoh_core::ssh::{self, ConnectContext, ExecOutput, shell_quote};
 
@@ -159,9 +161,11 @@ impl MultiRun {
         let mut open = true;
         let mut start = false;
         let mut retry = None;
-        egui::Window::new("Run on many hosts").open(&mut open).default_width(900.0).default_height(600.0).show(
-            ctx,
-            |ui| {
+        let shown = egui::Window::new("Run on many hosts")
+            .open(&mut open)
+            .default_width(900.0)
+            .default_height(600.0)
+            .show(ctx, |ui| {
                 let busy = self.running();
                 egui::Panel::left("multi-hosts").resizable(true).default_size(240.0).show(ui, |ui| {
                     host_picker(ui, profiles, &mut self.selected, &mut self.filter);
@@ -232,8 +236,10 @@ impl MultiRun {
                 if busy {
                     ui.ctx().request_repaint_after(Duration::from_millis(250));
                 }
-            },
-        );
+            });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         if start {
             self.start(profiles, shared, None);
@@ -344,7 +350,17 @@ impl MultiRun {
     }
 }
 
+fn tick(selected: &mut BTreeSet<ProfileId>, id: ProfileId, on: bool) {
+    if on {
+        selected.insert(id);
+    } else {
+        selected.remove(&id);
+    }
+}
+
 /// Hosts by group with checkboxes (a group's box ticks all its members).
+/// Once clicked, ↑/↓ (or a name's first letters) move, Space ticks and
+/// Ctrl+A ticks every host shown (or unticks them, if all are ticked).
 pub fn host_picker(
     ui: &mut egui::Ui,
     profiles: &ProfileStore,
@@ -353,41 +369,78 @@ pub fn host_picker(
 ) {
     ui.label(RichText::new("Hosts").strong());
     ui.add(egui::TextEdit::singleline(filter).hint_text("Filter").desired_width(f32::INFINITY));
-    egui::ScrollArea::vertical().id_salt("multi-host-list").show(ui, |ui| {
-        for group in profiles.groups() {
+    let groups: Vec<(String, Vec<&Profile>)> = profiles
+        .groups()
+        .into_iter()
+        .map(|group| {
             let members: Vec<&Profile> = profiles
                 .profiles
                 .iter()
                 .filter(|p| p.group.trim() == group && p.rdp.is_none())
                 .filter(|p| filter.is_empty() || p.display_name().to_lowercase().contains(&filter.to_lowercase()))
                 .collect();
-            if members.is_empty() {
-                continue;
-            }
+            (group, members)
+        })
+        .filter(|(_, m)| !m.is_empty())
+        .collect();
+    let order: Vec<ProfileId> = groups.iter().flat_map(|(_, m)| m.iter().map(|p| p.id)).collect();
+    // Where the keyboard is, kept in egui's memory for this list.
+    let key = ui.id().with("host-picker-keys");
+    let mut cursor: Selection<ProfileId> = ui.data_mut(|d| d.get_temp(key)).unwrap_or_default();
+    if cursor.focused
+        && !ui.ctx().memory(|m| m.focused().is_some())
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
+    {
+        let all = order.iter().all(|id| selected.contains(id));
+        for id in &order {
+            tick(selected, *id, !all);
+        }
+    }
+    let (act, scroll) =
+        cursor.keys(ui.ctx(), &order, |id| profiles.get(*id).map(|p| p.display_name()).unwrap_or_default());
+    if let Some(KeyAction::Toggle | KeyAction::Open(_)) = act
+        && let Some(&id) = cursor.selected.first()
+    {
+        let on = !selected.contains(&id);
+        tick(selected, id, on);
+    }
+    let scroll_to = scroll.and_then(|i| order.get(i).copied());
+    let list = egui::ScrollArea::vertical().id_salt("multi-host-list").show(ui, |ui| {
+        for (group, members) in groups {
             let all = members.iter().all(|p| selected.contains(&p.id));
             let mut all_now = all;
             let label = if group.is_empty() { "Ungrouped".to_string() } else { group.clone() };
             if ui.checkbox(&mut all_now, RichText::new(label).strong()).changed() {
                 for p in &members {
-                    if all_now {
-                        selected.insert(p.id);
-                    } else {
-                        selected.remove(&p.id);
-                    }
+                    tick(selected, p.id, all_now);
                 }
             }
             ui.indent(("g", &group), |ui| {
                 for p in members {
                     let mut on = selected.contains(&p.id);
-                    if ui.checkbox(&mut on, p.display_name()).on_hover_text(p.destination()).changed() {
-                        if on {
-                            selected.insert(p.id);
-                        } else {
-                            selected.remove(&p.id);
-                        }
+                    let r = ui.checkbox(&mut on, p.display_name()).on_hover_text(p.destination());
+                    if r.changed() {
+                        tick(selected, p.id, on);
+                    }
+                    if r.clicked() {
+                        cursor.only(&p.id);
+                        cursor.focused = true;
+                    }
+                    if cursor.focused && cursor.contains(&p.id) {
+                        ui.painter().rect_stroke(
+                            r.rect.expand(1.0),
+                            2.0,
+                            ui.visuals().selection.stroke,
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    if scroll_to == Some(p.id) {
+                        r.scroll_to_me(None);
                     }
                 }
             });
         }
     });
+    cursor.track_focus(ui, list.inner_rect);
+    ui.data_mut(|d| d.insert_temp(key, cursor));
 }

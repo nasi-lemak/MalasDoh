@@ -188,179 +188,188 @@ impl KeysWindow {
             return out;
         }
         let mut open = self.open;
-        egui::Window::new("SSH keys").open(&mut open).resizable(false).default_width(560.0).show(ctx, |ui| {
-            // As tall as the screen allows before it scrolls, so "Put on a
-            // server" can be seen filling in the section below.
-            let tall = ui.ctx().content_rect().height() - 120.0;
-            egui::ScrollArea::vertical().max_height(tall).min_scrolled_height(tall.min(700.0)).show(ui, |ui| {
-                self.stored_ui(ui, store, &mut out);
-                ui.separator();
-                ui.heading("New key");
-                egui::Grid::new("keygen").num_columns(2).show(ui, |ui| {
-                    ui.label("Save as");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
-                        if ui.button("Browse…").clicked()
-                            && let Some(p) = rfd::FileDialog::new().set_title("Save the new key as").save_file()
-                        {
-                            self.path = p.display().to_string();
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Comment");
-                    ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(360.0));
-                    ui.end_row();
-                    ui.label("Passphrase");
-                    ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).desired_width(240.0))
-                        .on_hover_text("Recommended. Leave empty for a key that needs none.");
-                    ui.end_row();
-                    ui.label("Again");
-                    ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true).desired_width(240.0));
-                    ui.end_row();
-                });
-                let mismatch = self.pass != self.pass2;
-                if mismatch {
-                    ui.colored_label(ui.visuals().warn_fg_color, "The passphrases do not match.");
-                }
-                if ui
-                    .add_enabled(!mismatch && !self.path.trim().is_empty(), egui::Button::new("Generate Ed25519 key"))
-                    .clicked()
-                {
-                    let path = malasdoh_core::paths::expand_tilde(self.path.trim());
-                    match keys::generate(&path, self.comment.trim(), &self.pass) {
-                        Ok(line) => {
-                            self.generated = Some(line);
-                            self.error = None;
-                            self.install_key = keys::pub_path(&path).display().to_string();
-                            self.pass.clear();
-                            self.pass2.clear();
-                        }
-                        Err(e) => self.error = Some(format!("{e:#}")),
-                    }
-                }
-                if let Some(e) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
-                }
-                if let Some(line) = &self.generated {
-                    ui.label("Public key (safe to share):");
-                    ui.horizontal(|ui| {
-                        // Button first: the line is cut to fit, the button never is.
-                        if ui.small_button("Copy").clicked() {
-                            ui.ctx().copy_text(line.clone());
-                        }
-                        ui.add(egui::Label::new(RichText::new(line).monospace()).truncate()).on_hover_text(line);
-                    });
-                }
-
-                ui.separator();
-                ui.heading("Put a key on a server");
-                ui.label(
-                    RichText::new(
-                        "Like ssh-copy-id: adds the public key to ~/.ssh/authorized_keys on the server, once.",
-                    )
-                    .weak(),
-                );
-                let connected: Vec<(SessionId, String)> = sessions
-                    .iter()
-                    .filter(|s| s.state == ConnState::Connected)
-                    .map(|s| (s.id, s.profile.display_name()))
-                    .collect();
-                if self.target.is_none_or(|t| !connected.iter().any(|c| c.0 == t)) {
-                    self.target = connected.first().map(|c| c.0);
-                }
-                egui::Grid::new("keyinstall").num_columns(2).show(ui, |ui| {
-                    ui.label("Key");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.install_key).desired_width(300.0));
-                        egui::ComboBox::from_id_salt("known-keys").selected_text("…").width(30.0).show_ui(ui, |ui| {
-                            for k in known_keys() {
-                                let s = k.display().to_string();
-                                if ui.selectable_label(self.install_key == s, &s).clicked() {
-                                    self.install_key = s;
-                                }
+        let shown =
+            egui::Window::new("SSH keys").open(&mut open).resizable(false).default_width(560.0).show(ctx, |ui| {
+                // As tall as the screen allows before it scrolls, so "Put on a
+                // server" can be seen filling in the section below.
+                let tall = ui.ctx().content_rect().height() - 120.0;
+                egui::ScrollArea::vertical().max_height(tall).min_scrolled_height(tall.min(700.0)).show(ui, |ui| {
+                    self.stored_ui(ui, store, &mut out);
+                    ui.separator();
+                    ui.heading("New key");
+                    egui::Grid::new("keygen").num_columns(2).show(ui, |ui| {
+                        ui.label("Save as");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
+                            if ui.button("Browse…").clicked()
+                                && let Some(p) = rfd::FileDialog::new().set_title("Save the new key as").save_file()
+                            {
+                                self.path = p.display().to_string();
                             }
                         });
-                        if ui.button("Browse…").clicked()
-                            && let Some(p) = rfd::FileDialog::new().set_title("Key to install").pick_file()
-                        {
-                            self.install_key = p.display().to_string();
-                        }
+                        ui.end_row();
+                        ui.label("Comment");
+                        ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(360.0));
+                        ui.end_row();
+                        ui.label("Passphrase");
+                        ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).desired_width(240.0))
+                            .on_hover_text("Recommended. Leave empty for a key that needs none.");
+                        ui.end_row();
+                        ui.label("Again");
+                        ui.add(egui::TextEdit::singleline(&mut self.pass2).password(true).desired_width(240.0));
+                        ui.end_row();
                     });
-                    ui.end_row();
-                    ui.label("Server");
-                    let name = self
-                        .target
-                        .and_then(|t| connected.iter().find(|c| c.0 == t))
-                        .map(|c| c.1.clone())
-                        .unwrap_or_else(|| "Connect to the server first".into());
-                    egui::ComboBox::from_id_salt("key-target").selected_text(name).show_ui(ui, |ui| {
-                        for (id, n) in &connected {
-                            ui.selectable_value(&mut self.target, Some(*id), n);
-                        }
-                    });
-                    ui.end_row();
-                });
-                if self
-                    .install_stored
-                    .as_ref()
-                    .is_some_and(|(id, _)| store.get(*id).is_none_or(|k| k.public.trim() != self.install_key.trim()))
-                {
-                    self.install_stored = None;
-                }
-                let ready = !self.busy && self.target.is_some() && !self.install_key.trim().is_empty();
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(ready, egui::Button::new("Add key to server")).clicked() {
-                        self.result = None;
-                        self.offer = None;
-                        let typed = self.install_key.trim();
-                        // A public key line itself, or a key file.
-                        let is_line = ["ssh-", "ecdsa-", "sk-"].iter().any(|p| typed.starts_with(p));
-                        let (line, key) = if is_line {
-                            let key = self.install_stored.as_ref().map(|(id, n)| KeyChoice::Stored(*id, n.clone()));
-                            (Ok(typed.to_string()), key)
-                        } else {
-                            let path = malasdoh_core::paths::expand_tilde(typed);
-                            (keys::public_line(&path), Some(KeyChoice::File(path)))
-                        };
-                        match (line, self.target.and_then(|t| sessions.iter().find(|s| s.id == t))) {
-                            (Err(e), _) => self.result = Some((format!("{e:#}"), true)),
-                            (Ok(line), Some(s)) => match s.connection() {
-                                Some(conn) => {
-                                    self.busy = true;
-                                    let (events, session) = (shared.events.clone(), s.id);
-                                    shared.rt.spawn(async move {
-                                        let result =
-                                            keys::install(&conn, &line, None).await.map_err(|e| format!("{e:#}"));
-                                        events.send(0, EventKind::Keys(KeysMsg::Installed { session, key, result }));
-                                    });
-                                }
-                                None => self.result = Some(("Not connected".into(), true)),
-                            },
-                            (Ok(_), None) => {}
+                    let mismatch = self.pass != self.pass2;
+                    if mismatch {
+                        ui.colored_label(ui.visuals().warn_fg_color, "The passphrases do not match.");
+                    }
+                    if ui
+                        .add_enabled(
+                            !mismatch && !self.path.trim().is_empty(),
+                            egui::Button::new("Generate Ed25519 key"),
+                        )
+                        .clicked()
+                    {
+                        let path = malasdoh_core::paths::expand_tilde(self.path.trim());
+                        match keys::generate(&path, self.comment.trim(), &self.pass) {
+                            Ok(line) => {
+                                self.generated = Some(line);
+                                self.error = None;
+                                self.install_key = keys::pub_path(&path).display().to_string();
+                                self.pass.clear();
+                                self.pass2.clear();
+                            }
+                            Err(e) => self.error = Some(format!("{e:#}")),
                         }
                     }
-                    if self.busy {
-                        ui.spinner();
+                    if let Some(e) = &self.error {
+                        ui.colored_label(ui.visuals().error_fg_color, e);
                     }
-                });
-                if let Some((msg, err)) = &self.result {
-                    let c = if *err { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
-                    ui.colored_label(c, msg);
-                }
-                let mut used = false;
-                if let Some((id, name, key)) = &self.offer {
+                    if let Some(line) = &self.generated {
+                        ui.label("Public key (safe to share):");
+                        ui.horizontal(|ui| {
+                            // Button first: the line is cut to fit, the button never is.
+                            if ui.small_button("Copy").clicked() {
+                                ui.ctx().copy_text(line.clone());
+                            }
+                            ui.add(egui::Label::new(RichText::new(line).monospace()).truncate()).on_hover_text(line);
+                        });
+                    }
+
+                    ui.separator();
+                    ui.heading("Put a key on a server");
+                    ui.label(
+                        RichText::new(
+                            "Like ssh-copy-id: adds the public key to ~/.ssh/authorized_keys on the server, once.",
+                        )
+                        .weak(),
+                    );
+                    let connected: Vec<(SessionId, String)> = sessions
+                        .iter()
+                        .filter(|s| s.state == ConnState::Connected)
+                        .map(|s| (s.id, s.profile.display_name()))
+                        .collect();
+                    if self.target.is_none_or(|t| !connected.iter().any(|c| c.0 == t)) {
+                        self.target = connected.first().map(|c| c.0);
+                    }
+                    egui::Grid::new("keyinstall").num_columns(2).show(ui, |ui| {
+                        ui.label("Key");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.install_key).desired_width(300.0));
+                            egui::ComboBox::from_id_salt("known-keys").selected_text("…").width(30.0).show_ui(
+                                ui,
+                                |ui| {
+                                    for k in known_keys() {
+                                        let s = k.display().to_string();
+                                        if ui.selectable_label(self.install_key == s, &s).clicked() {
+                                            self.install_key = s;
+                                        }
+                                    }
+                                },
+                            );
+                            if ui.button("Browse…").clicked()
+                                && let Some(p) = rfd::FileDialog::new().set_title("Key to install").pick_file()
+                            {
+                                self.install_key = p.display().to_string();
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Server");
+                        let name = self
+                            .target
+                            .and_then(|t| connected.iter().find(|c| c.0 == t))
+                            .map(|c| c.1.clone())
+                            .unwrap_or_else(|| "Connect to the server first".into());
+                        egui::ComboBox::from_id_salt("key-target").selected_text(name).show_ui(ui, |ui| {
+                            for (id, n) in &connected {
+                                ui.selectable_value(&mut self.target, Some(*id), n);
+                            }
+                        });
+                        ui.end_row();
+                    });
+                    if self.install_stored.as_ref().is_some_and(|(id, _)| {
+                        store.get(*id).is_none_or(|k| k.public.trim() != self.install_key.trim())
+                    }) {
+                        self.install_stored = None;
+                    }
+                    let ready = !self.busy && self.target.is_some() && !self.install_key.trim().is_empty();
                     ui.horizontal(|ui| {
-                        if ui.button(format!("Log in to {name} with this key from now on")).clicked() {
-                            out.push(KeysAction::UseKey(*id, key.clone()));
-                            used = true;
+                        if ui.add_enabled(ready, egui::Button::new("Add key to server")).clicked() {
+                            self.result = None;
+                            self.offer = None;
+                            let typed = self.install_key.trim();
+                            // A public key line itself, or a key file.
+                            let is_line = ["ssh-", "ecdsa-", "sk-"].iter().any(|p| typed.starts_with(p));
+                            let (line, key) = if is_line {
+                                let key = self.install_stored.as_ref().map(|(id, n)| KeyChoice::Stored(*id, n.clone()));
+                                (Ok(typed.to_string()), key)
+                            } else {
+                                let path = malasdoh_core::paths::expand_tilde(typed);
+                                (keys::public_line(&path), Some(KeyChoice::File(path)))
+                            };
+                            match (line, self.target.and_then(|t| sessions.iter().find(|s| s.id == t))) {
+                                (Err(e), _) => self.result = Some((format!("{e:#}"), true)),
+                                (Ok(line), Some(s)) => match s.connection() {
+                                    Some(conn) => {
+                                        self.busy = true;
+                                        let (events, session) = (shared.events.clone(), s.id);
+                                        shared.rt.spawn(async move {
+                                            let result =
+                                                keys::install(&conn, &line, None).await.map_err(|e| format!("{e:#}"));
+                                            events
+                                                .send(0, EventKind::Keys(KeysMsg::Installed { session, key, result }));
+                                        });
+                                    }
+                                    None => self.result = Some(("Not connected".into(), true)),
+                                },
+                                (Ok(_), None) => {}
+                            }
+                        }
+                        if self.busy {
+                            ui.spinner();
                         }
                     });
-                }
-                if used {
-                    self.offer = None;
-                }
+                    if let Some((msg, err)) = &self.result {
+                        let c = if *err { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
+                        ui.colored_label(c, msg);
+                    }
+                    let mut used = false;
+                    if let Some((id, name, key)) = &self.offer {
+                        ui.horizontal(|ui| {
+                            if ui.button(format!("Log in to {name} with this key from now on")).clicked() {
+                                out.push(KeysAction::UseKey(*id, key.clone()));
+                                used = true;
+                            }
+                        });
+                    }
+                    if used {
+                        self.offer = None;
+                    }
+                });
             });
-        });
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         if !open {
             self.paste = None;

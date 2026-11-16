@@ -57,6 +57,8 @@ pub struct Terminal {
     pending_paste: Option<String>,
     /// The button held down while the program receives the mouse.
     mouse_down: Option<(MouseButton, (u16, u16))>,
+    /// Take the keyboard next frame (a new terminal, or one switched to).
+    pub take_focus: bool,
 }
 
 impl Terminal {
@@ -76,6 +78,7 @@ impl Terminal {
             theme: &crate::themes::THEMES[0],
             pending_paste: None,
             mouse_down: None,
+            take_focus: false,
         }
     }
 
@@ -311,7 +314,12 @@ impl Terminal {
 
         let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
         let id = response.id;
-        if response.clicked() || response.drag_started() || response.secondary_clicked() || response.middle_clicked() {
+        if response.clicked()
+            || response.drag_started()
+            || response.secondary_clicked()
+            || response.middle_clicked()
+            || std::mem::take(&mut self.take_focus)
+        {
             response.request_focus();
         }
         let focused = response.has_focus();
@@ -436,7 +444,7 @@ impl Terminal {
         }
 
         // Keys typed into a dialog or menu must not also reach the shell.
-        let blocked = ui.ctx().memory(|m| m.top_modal_layer().is_some()) || ui.ctx().any_popup_open();
+        let blocked = ui.ctx().memory(|m| m.top_modal_layer().is_some()) || egui::Popup::is_any_open(ui.ctx());
         if focused && !blocked {
             self.handle_input(ui, opts.confirm_paste, &mut out);
         }

@@ -291,7 +291,7 @@ impl Compares {
             } else {
                 &w.right
             };
-            egui::Window::new(format!("Compare: {}", sftp::file_name(&side_path(named))))
+            let shown = egui::Window::new(format!("Compare: {}", sftp::file_name(&side_path(named))))
                 .id(egui::Id::new(("compare", w.id)))
                 .open(&mut open)
                 .default_size([900.0, 560.0])
@@ -301,6 +301,9 @@ impl Compares {
                         reload = Some(w.id);
                     }
                 });
+            if crate::dlg::closes(ctx, &shown) {
+                open = false;
+            }
             w.open = open;
         }
         if let Some(id) = reload

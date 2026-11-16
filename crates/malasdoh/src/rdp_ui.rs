@@ -205,7 +205,7 @@ impl DesktopsWindow {
         let mut open = true;
         let mut close = None;
         let mut forget = None;
-        egui::Window::new("Remote Desktop").open(&mut open).default_width(520.0).show(ctx, |ui| {
+        let shown = egui::Window::new("Remote Desktop").open(&mut open).default_width(520.0).show(ctx, |ui| {
             for d in &mut self.items {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&d.name).strong());
@@ -316,6 +316,9 @@ impl DesktopsWindow {
         }
         if let Some(id) = forget {
             self.items.retain(|d| d.id != id);
+        }
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
         }
         if !open {
             // Hidden, not closed: open desktops stay open.

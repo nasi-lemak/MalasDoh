@@ -1,22 +1,43 @@
 //! Selecting in a file list the way file managers do: Ctrl+click toggles,
 //! Shift+click takes a range, Ctrl+A takes everything, and the arrow keys
-//! move (Shift extends). Shared by the server and local file lists.
+//! move (Shift extends), and typing a name's first letters jumps to it.
+//! Shared by the file lists and the connection list.
+
+use std::time::{Duration, Instant};
 
 /// A list's selection: what is selected, where a Shift range starts, and
 /// the item the keyboard is on.
+#[derive(Clone)]
 pub struct Selection<T> {
     pub selected: Vec<T>,
     anchor: Option<T>,
     cursor: Option<T>,
     /// The list was clicked last, so keys go to it.
     pub focused: bool,
+    /// What was typed to jump to a name, and when.
+    typed: String,
+    typed_at: Option<Instant>,
+    /// The right-click menu opened from the keyboard (Shift+F10) for this
+    /// item; `true` on the frame it opens.
+    menu: Option<(T, bool)>,
 }
 
 impl<T> Default for Selection<T> {
     fn default() -> Self {
-        Self { selected: Vec::new(), anchor: None, cursor: None, focused: false }
+        Self {
+            selected: Vec::new(),
+            anchor: None,
+            cursor: None,
+            focused: false,
+            typed: String::new(),
+            typed_at: None,
+            menu: None,
+        }
     }
 }
+
+/// Typed letters are one name while they come within this of each other.
+const TYPE_AHEAD: Duration = Duration::from_millis(1000);
 
 /// What a key asks of the list's owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +47,22 @@ pub enum KeyAction<T> {
     Delete,
     /// F2 on one item.
     Rename(T),
-    /// Backspace: the folder above.
+    /// Backspace or Alt+Up: the folder above.
     Parent,
+    /// Alt+Left and Alt+Right.
+    Back,
+    Forward,
+    /// F5.
+    Refresh,
+    /// Ctrl+L: the path box; Ctrl+F: the filter box.
+    FocusPath,
+    FocusFilter,
+    /// Ctrl+Shift+N.
+    NewFolder,
+    /// Ctrl+C: copy what is selected (its paths).
+    Copy,
+    /// Space, when not in the middle of typing a name: tick, pause…
+    Toggle,
 }
 
 impl<T: Clone + PartialEq> Selection<T> {
@@ -110,18 +145,31 @@ impl<T: Clone + PartialEq> Selection<T> {
 
     /// The list's keys, when it has the keyboard. Returns what the owner
     /// should do, and a row to scroll to.
-    pub fn keys(&mut self, ctx: &egui::Context, order: &[T]) -> (Option<KeyAction<T>>, Option<usize>) {
+    pub fn keys(
+        &mut self,
+        ctx: &egui::Context,
+        order: &[T],
+        name: impl Fn(&T) -> String,
+    ) -> (Option<KeyAction<T>>, Option<usize>) {
         use egui::{Key, Modifiers};
         // Not while typing elsewhere, nor under a dialog: Escape there clears
         // the text box's focus before this runs, and is the dialog's to use.
-        if !self.focused || ctx.memory(|m| m.focused().is_some() || m.top_modal_layer().is_some()) {
+        // A text box or the terminal taking the keyboard takes it from the
+        // list too, until the list is clicked again: the Enter that ends
+        // typing a path or a search is not the list's. A dialog's box does
+        // not (after F2 and Enter, the arrows still work).
+        if ctx.memory(|m| m.focused().is_some() && m.top_modal_layer().is_none()) {
+            self.focused = false;
+        }
+        // Nor while a menu is open: its Escape closes it.
+        if !self.focused || egui::Popup::is_any_open(ctx) || ctx.memory(|m| m.top_modal_layer().is_some()) {
             return (None, None);
         }
         let mut act = None;
         let mut scroll = None;
         let page = 10isize;
         ctx.input_mut(|i| {
-            if i.consume_key(Modifiers::COMMAND, Key::A) {
+            if crate::shortcut::consume(i, Modifiers::COMMAND, Key::A) {
                 self.select_all(order);
             }
             // Moves in order, each with its own Shift: a quick Shift+Down is
@@ -129,7 +177,7 @@ impl<T: Clone + PartialEq> Selection<T> {
             let mut moves = Vec::new();
             i.events.retain(|e| match e {
                 egui::Event::Key { key, pressed: true, modifiers, .. }
-                    if !modifiers.command && !modifiers.ctrl && !modifiers.alt =>
+                    if !modifiers.command && !modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd =>
                 {
                     let k = *key;
                     let known =
@@ -153,8 +201,61 @@ impl<T: Clone + PartialEq> Selection<T> {
                 };
                 scroll = self.move_to(order, to, shift);
             }
-            if i.consume_key(Modifiers::NONE, Key::Escape) {
+            // Space toggles, unless it is part of a name being typed.
+            let naming = self.typed_at.is_some_and(|t| t.elapsed() <= TYPE_AHEAD) && !self.typed.is_empty();
+            if !naming && i.consume_key(Modifiers::NONE, Key::Space) {
+                i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " "));
+                act = Some(KeyAction::Toggle);
+            }
+            // Letters jump to the next name starting with what was typed.
+            let mut typed = String::new();
+            i.events.retain(|e| match e {
+                egui::Event::Text(t) if !i.modifiers.command && !i.modifiers.ctrl => {
+                    typed.push_str(t);
+                    false
+                }
+                _ => true,
+            });
+            if !typed.is_empty()
+                && let Some(at) = self.type_ahead(order, &typed, &name)
+            {
+                scroll = self.move_to(order, at as isize, false);
+            }
+            // Esc clears; with nothing selected it is left for the window.
+            if !self.selected.is_empty() && i.consume_key(Modifiers::NONE, Key::Escape) {
                 self.clear();
+            }
+            if crate::shortcut::consume(i, Modifiers::SHIFT, Key::F10)
+                && let Some(x) = self.cursor.clone().or_else(|| self.selected.last().cloned())
+            {
+                self.menu = Some((x, true));
+            }
+            if crate::shortcut::consume(i, Modifiers::ALT, Key::ArrowUp) {
+                act = Some(KeyAction::Parent);
+            }
+            if crate::shortcut::consume(i, Modifiers::ALT, Key::ArrowLeft) {
+                act = Some(KeyAction::Back);
+            }
+            if crate::shortcut::consume(i, Modifiers::ALT, Key::ArrowRight) {
+                act = Some(KeyAction::Forward);
+            }
+            if i.consume_key(Modifiers::NONE, Key::F5) {
+                act = Some(KeyAction::Refresh);
+            }
+            if crate::shortcut::consume(i, Modifiers::COMMAND | Modifiers::SHIFT, Key::N) {
+                act = Some(KeyAction::NewFolder);
+            }
+            if crate::shortcut::consume(i, Modifiers::COMMAND, Key::L) {
+                act = Some(KeyAction::FocusPath);
+            }
+            if crate::shortcut::consume(i, Modifiers::COMMAND, Key::F) {
+                act = Some(KeyAction::FocusFilter);
+            }
+            // egui turns Ctrl+C into a Copy event.
+            let before = i.events.len();
+            i.events.retain(|e| !matches!(e, egui::Event::Copy));
+            if i.events.len() != before && !self.selected.is_empty() {
+                act = Some(KeyAction::Copy);
             }
             let one = (self.selected.len() == 1).then(|| self.selected[0].clone());
             if i.consume_key(Modifiers::NONE, Key::Enter)
@@ -175,6 +276,53 @@ impl<T: Clone + PartialEq> Selection<T> {
             }
         });
         (act, scroll)
+    }
+
+    /// The item to jump to after typing `typed`: the next one, from the
+    /// keyboard's row on, whose name starts with all that was typed lately.
+    /// Typing the same letter again moves on to the next such name.
+    fn type_ahead(&mut self, order: &[T], typed: &str, name: &impl Fn(&T) -> String) -> Option<usize> {
+        let fresh = self.typed_at.is_none_or(|t| t.elapsed() > TYPE_AHEAD);
+        if fresh {
+            self.typed.clear();
+        }
+        self.typed_at = Some(Instant::now());
+        self.typed.push_str(&typed.to_lowercase());
+        if self.typed.trim().is_empty() {
+            self.typed.clear();
+            return None;
+        }
+        let here = self.cursor_index(order);
+        let mut chars = self.typed.chars();
+        let first = chars.next()?;
+        // One letter typed again and again cycles through the names starting with it.
+        let cycling = chars.all(|c| c == first);
+        let needle = if cycling { first.to_string() } else { self.typed.clone() };
+        let start = match here {
+            Some(h) if cycling => h + 1,
+            Some(h) => h,
+            None => 0,
+        };
+        (0..order.len())
+            .map(|k| (start + k) % order.len())
+            .find(|&j| name(&order[j]).to_lowercase().starts_with(&needle))
+    }
+
+    /// The right-click menu for `item`'s row: opens on a right-click, or at
+    /// the row after Shift+F10. Show it with `.show(...)`.
+    pub fn menu_popup<'a>(&mut self, resp: &'a egui::Response, item: &T) -> egui::Popup<'a> {
+        let mut popup = egui::Popup::context_menu(resp);
+        if let Some((x, fresh)) = &mut self.menu
+            && x == item
+        {
+            popup = popup.at_position(resp.rect.left_bottom() + egui::vec2(24.0, 0.0));
+            if std::mem::take(fresh) {
+                popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
+            } else if !egui::Popup::is_id_open(&resp.ctx, egui::Popup::default_response_id(resp)) {
+                self.menu = None;
+            }
+        }
+        popup
     }
 
     /// Clicks elsewhere take the keyboard away from the list, including
@@ -267,6 +415,29 @@ mod tests {
         s.select_all(&order);
         s.retain(|x| *x != "c");
         assert_eq!(s.selected, ["a", "b", "d", "e"]);
+    }
+
+    #[test]
+    fn typing_jumps_to_names() {
+        let order = vec!["alpha", "beta", "bravo", "charlie", "Bash"];
+        let name = |x: &&str| x.to_string();
+        let mut s = Selection::default();
+        assert_eq!(s.type_ahead(&order, "b", &name), Some(1));
+        s.only(&"beta");
+        // The same letter again: the next name with it, then round again.
+        assert_eq!(s.type_ahead(&order, "b", &name), Some(2));
+        s.only(&"bravo");
+        assert_eq!(s.type_ahead(&order, "b", &name), Some(4));
+        s.only(&"Bash");
+        assert_eq!(s.type_ahead(&order, "b", &name), Some(1));
+        // More letters narrow it, from where the keyboard is.
+        s.typed_at = None;
+        s.only(&"alpha");
+        assert_eq!(s.type_ahead(&order, "br", &name), Some(2));
+        assert_eq!(s.type_ahead(&order, "x", &name), None);
+        // After a pause it starts over.
+        s.typed_at = Some(Instant::now() - TYPE_AHEAD * 2);
+        assert_eq!(s.type_ahead(&order, "c", &name), Some(3));
     }
 
     #[test]

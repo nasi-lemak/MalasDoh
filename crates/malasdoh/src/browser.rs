@@ -128,8 +128,11 @@ pub struct Browser {
     filter: String,
     show_hidden: bool,
     back: Vec<String>,
-    /// Set while a "back" navigation is in flight, so it is not recorded again.
-    going_back: Option<String>,
+    /// Where Back came from, for Forward.
+    forward: Vec<String>,
+    /// A Back (`true`) or Forward navigation in flight, and its target, so it
+    /// is not recorded as a new visit (and is put back if it fails).
+    going: Option<(bool, String)>,
     dialog: Dialog,
     pub transfers: crate::queue::Queue,
     /// The owning session, for drag and drop.
@@ -155,13 +158,21 @@ impl Browser {
         self.loading = false;
         match result {
             Ok(entries) => {
-                let going_back = self.going_back.take().is_some();
-                if !going_back && path != self.path && !self.path.is_empty() {
-                    self.back.push(std::mem::take(&mut self.path));
+                if path != self.path && !self.path.is_empty() {
+                    let here = std::mem::take(&mut self.path);
+                    match self.going.take() {
+                        Some((true, _)) => self.forward.push(here),
+                        Some((false, _)) => self.back.push(here),
+                        None => {
+                            self.back.push(here);
+                            self.forward.clear();
+                        }
+                    }
                     if self.back.len() > 50 {
                         self.back.remove(0);
                     }
                 }
+                self.going = None;
                 self.entries = entries;
                 self.path_input = path.clone();
                 self.path = path;
@@ -175,8 +186,10 @@ impl Browser {
                 }
             }
             Err(e) => {
-                if let Some(prev) = self.going_back.take() {
-                    self.back.push(prev);
+                match self.going.take() {
+                    Some((true, to)) => self.back.push(to),
+                    Some((false, to)) => self.forward.push(to),
+                    None => {}
                 }
                 self.path_input = self.path.clone();
                 self.error = Some(e);
@@ -188,16 +201,18 @@ impl Browser {
         let mut actions = Vec::new();
 
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.back.is_empty(), egui::Button::new("⬅")).on_hover_text("Back").clicked()
-                && let Some(prev) = self.back.pop()
+            if ui.add_enabled(!self.back.is_empty(), egui::Button::new("⬅")).on_hover_text("Back (Alt+Left)").clicked()
             {
-                self.going_back = Some(prev.clone());
-                actions.push(Action::Navigate(prev));
+                self.history(false, &mut actions);
             }
-            if ui.button("⬆").on_hover_text("Parent folder").clicked() && !self.path.is_empty() {
+            if !self.forward.is_empty() && ui.button("➡").on_hover_text("Forward (Alt+Right)").clicked() {
+                self.history(true, &mut actions);
+            }
+            if ui.button("⬆").on_hover_text("Parent folder (Alt+Up or Backspace)").clicked() && !self.path.is_empty()
+            {
                 actions.push(Action::Navigate(sftp::parent(&self.path)));
             }
-            if ui.button("⟳").on_hover_text("Refresh").clicked() {
+            if ui.button("⟳").on_hover_text("Refresh (F5)").clicked() {
                 actions.push(Action::Refresh);
             }
             let label = if self.root {
@@ -216,21 +231,30 @@ impl Browser {
             if ui.add_enabled(!self.root_pending, egui::Button::new(label)).on_hover_text(tip).clicked() {
                 actions.push(Action::ToggleRoot);
             }
-            let r = ui
-                .add(egui::TextEdit::singleline(&mut self.path_input).desired_width(f32::INFINITY).hint_text("/path"));
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.path_input)
+                    .id(egui::Id::new(("path", self.session)))
+                    .desired_width(f32::INFINITY)
+                    .hint_text("/path"),
+            );
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 actions.push(Action::Navigate(self.path_input.trim().to_string()));
             }
         });
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter").desired_width(110.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .id(egui::Id::new(("filter", self.session)))
+                    .hint_text("Filter (Ctrl+F)")
+                    .desired_width(110.0),
+            );
             ui.checkbox(&mut self.show_hidden, "Hidden");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.menu_button("+ New", |ui| {
                     if ui.button("New file…").clicked() {
                         self.dialog = Dialog::NewFile(String::new());
                     }
-                    if ui.button("New folder…").clicked() {
+                    if ui.add(egui::Button::new("New folder…").shortcut_text("Ctrl+Shift+N")).clicked() {
                         self.dialog = Dialog::NewFolder(String::new());
                     }
                     if ui.button("New symlink…").clicked() {
@@ -333,7 +357,7 @@ impl Browser {
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
         // The list's keys (once it was clicked): Ctrl+A, arrows, Enter, Delete, F2, Backspace.
         let order: Vec<String> = visible.iter().map(|e| e.path.clone()).collect();
-        let (key, scroll_to) = self.sel.keys(ui.ctx(), &order);
+        let (key, scroll_to) = self.sel.keys(ui.ctx(), &order, |p| sftp::file_name(p).to_string());
         match key {
             Some(KeyAction::Open(p)) => match visible.iter().find(|e| e.path == p) {
                 Some(e) if e.is_dir_like() => actions.push(Action::Navigate(p)),
@@ -347,6 +371,27 @@ impl Browser {
             Some(KeyAction::Parent) if self.path != "/" && !self.path.is_empty() => {
                 actions.push(Action::Navigate(sftp::parent(&self.path)));
             }
+            Some(KeyAction::Back) => self.history(false, &mut actions),
+            Some(KeyAction::Forward) => self.history(true, &mut actions),
+            Some(KeyAction::Refresh) => actions.push(Action::Refresh),
+            Some(KeyAction::FocusPath) => {
+                self.sel.focused = false;
+                crate::shortcut::focus_select(
+                    ui.ctx(),
+                    egui::Id::new(("path", self.session)),
+                    self.path_input.chars().count(),
+                );
+            }
+            Some(KeyAction::FocusFilter) => {
+                self.sel.focused = false;
+                crate::shortcut::focus_select(
+                    ui.ctx(),
+                    egui::Id::new(("filter", self.session)),
+                    self.filter.chars().count(),
+                );
+            }
+            Some(KeyAction::NewFolder) => self.dialog = Dialog::NewFolder(String::new()),
+            Some(KeyAction::Copy) => ui.ctx().copy_text(self.sel.selected.join("\n")),
             _ => {}
         }
         let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
@@ -379,6 +424,15 @@ impl Browser {
 
         self.dialog_ui(ui.ctx(), confirm_delete, &mut actions);
         actions
+    }
+
+    /// Back (or Forward, with `forward`) through the folders visited.
+    fn history(&mut self, forward: bool, actions: &mut Vec<Action>) {
+        let to = if forward { self.forward.pop() } else { self.back.pop() };
+        if let Some(to) = to {
+            self.going = Some((!forward, to.clone()));
+            actions.push(Action::Navigate(to));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -482,7 +536,7 @@ impl Browser {
             }
         );
         let resp = resp.on_hover_text(tooltip);
-        resp.context_menu(|ui| {
+        self.sel.menu_popup(&resp, &e.path).show(|ui| {
             if !self.sel.contains(&e.path) {
                 self.sel.only(&e.path);
             }
@@ -566,11 +620,11 @@ impl Browser {
                 actions.push(Action::CopyToServer(self.sel.selected.clone()));
                 ui.close();
             }
-            if ui.button("Copy path").clicked() {
-                ui.ctx().copy_text(e.path.clone());
+            if ui.add(egui::Button::new("Copy path").shortcut_text("Ctrl+C")).clicked() {
+                ui.ctx().copy_text(self.sel.selected.join("\n"));
                 ui.close();
             }
-            if ui.button("Rename…").clicked() {
+            if ui.add(egui::Button::new("Rename…").shortcut_text("F2")).clicked() {
                 self.dialog = Dialog::Rename { from: e.path.clone(), name: e.name.clone() };
                 ui.close();
             }
@@ -598,7 +652,8 @@ impl Browser {
             }
             ui.separator();
             let n = self.sel.selected.len();
-            if ui.button(if n > 1 { format!("Delete {n} items") } else { "Delete".into() }).clicked() {
+            let label = if n > 1 { format!("Delete {n} items") } else { "Delete".into() };
+            if ui.add(egui::Button::new(label).shortcut_text("Del")).clicked() {
                 self.dialog = Dialog::ConfirmDelete(self.sel.selected.clone());
                 ui.close();
             }

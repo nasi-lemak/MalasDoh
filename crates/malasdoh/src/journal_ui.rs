@@ -45,11 +45,14 @@ impl JournalWindow {
         }
         let mut open = self.open;
         let mut compare = None;
-        egui::Window::new("Change journal")
+        let shown = egui::Window::new("Change journal")
             .open(&mut open)
             .default_size([980.0, 600.0])
             .resizable(true)
             .show(ctx, |ui| compare = self.body(ui, journal, sessions));
+        if crate::dlg::closes(ctx, &shown) {
+            open = false;
+        }
         self.open = open;
         compare
     }

@@ -473,7 +473,9 @@ impl Session {
     fn add_terminal(&mut self, lasting: Option<String>, shared: &Shared, settings: &Settings) {
         let id = self.next();
         let Some(tx) = self.start_shell(id, lasting.as_deref(), shared) else { return };
-        self.terms.push(TermPane { id, term: Terminal::new(settings.terminal_font_size), tx: Some(tx), lasting });
+        let mut term = Terminal::new(settings.terminal_font_size);
+        term.take_focus = true;
+        self.terms.push(TermPane { id, term, tx: Some(tx), lasting });
         self.active = Some(Pane::Term(id));
     }
 
@@ -1912,6 +1914,56 @@ impl Session {
             self.active =
                 self.terms.first().map(|t| Pane::Term(t.id)).or(self.editors.first().map(|e| Pane::Editor(e.id)));
         }
+    }
+
+    /// Give the keyboard to the pane shown (after switching to it).
+    pub fn focus_active(&mut self) {
+        match self.active {
+            Some(Pane::Term(id)) => {
+                if let Some(t) = self.terms.iter_mut().find(|t| t.id == id) {
+                    t.term.take_focus = true;
+                }
+            }
+            Some(Pane::Editor(id)) => {
+                if let Some(e) = self.editors.iter_mut().find(|e| e.id == id) {
+                    e.focus();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The next (or previous, with `step` -1) pane in tab order.
+    pub fn cycle_pane(&mut self, step: isize) {
+        let panes: Vec<Pane> = self.panes().into_iter().map(|(p, _)| p).collect();
+        if panes.is_empty() {
+            return;
+        }
+        let here = self.active.and_then(|a| panes.iter().position(|p| *p == a)).unwrap_or(0) as isize;
+        let to = panes[(here + step).rem_euclid(panes.len() as isize) as usize];
+        if self.split == Some(to) {
+            self.split = self.active;
+        }
+        self.active = Some(to);
+        self.focus_active();
+    }
+
+    /// Close the pane shown: a terminal, a followed log, or a file without
+    /// unsaved changes.
+    pub fn close_active(&mut self) {
+        match self.active {
+            Some(Pane::Term(id)) => self.close_terminal(id),
+            Some(Pane::Log(id)) => self.close_log(id),
+            Some(Pane::Editor(id)) => {
+                if self.editors.iter().any(|e| e.id == id && e.is_modified()) {
+                    self.notify("This file has unsaved changes. Save or reload it before closing.".to_string(), true);
+                } else {
+                    self.close_editor(id);
+                }
+            }
+            None => {}
+        }
+        self.focus_active();
     }
 
     /// Draw the active pane (terminal or editor).

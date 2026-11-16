@@ -25,6 +25,7 @@ mod replace_ui;
 mod restore;
 mod session;
 mod settings;
+mod shortcut;
 mod snippets;
 mod sudo;
 mod sync_ui;

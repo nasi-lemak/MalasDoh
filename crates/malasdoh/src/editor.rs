@@ -128,6 +128,11 @@ impl Editor {
         self.session.is_modified(&self.text)
     }
 
+    /// Put the keyboard in the text next frame.
+    pub fn focus(&mut self) {
+        self.focus_text = true;
+    }
+
     /// Start a save, through review if the user wants one.
     pub fn request_save(&mut self, review: bool) -> Option<EditorAction> {
         if !self.is_modified() {

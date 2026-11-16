@@ -8,6 +8,8 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use egui::RichText;
+
+use crate::listsel::KeyAction;
 use malasdoh_core::sftp::{Progress, human_size};
 use malasdoh_core::transfer::{Ended, Job, Way};
 
@@ -40,6 +42,8 @@ pub struct Transfer {
     external: bool,
     show_details: bool,
     speed: Speed,
+    /// Where its row was last frame, so a click on it selects it.
+    rect: egui::Rect,
 }
 
 impl Transfer {
@@ -107,6 +111,8 @@ pub enum Control {
 pub struct Queue {
     pub items: Vec<Transfer>,
     next_id: u64,
+    /// Rows picked for the keyboard: Delete cancels, Space pauses or continues.
+    sel: crate::listsel::Selection<u64>,
 }
 
 impl Queue {
@@ -123,6 +129,7 @@ impl Queue {
             external: false,
             show_details: false,
             speed: Speed::default(),
+            rect: egui::Rect::NOTHING,
         });
         self.next_id
     }
@@ -221,9 +228,37 @@ impl Queue {
         }
         let running = self.items.iter().filter(|t| t.is_active()).count();
         let title = if running > 0 { format!("Transfers ({running} running)") } else { "Transfers".to_string() };
-        egui::CollapsingHeader::new(title).id_salt(("queue", session)).default_open(true).show(ui, |ui| {
+        let order: Vec<u64> = self.items.iter().map(|t| t.id).collect();
+        let items = &self.items;
+        let (key, _) = self.sel.keys(ui.ctx(), &order, |id| {
+            items.iter().find(|t| t.id == *id).map(|t| t.label.clone()).unwrap_or_default()
+        });
+        for t in self.items.iter().filter(|t| self.sel.contains(&t.id)) {
+            match key {
+                Some(KeyAction::Delete) if t.is_unfinished() && !t.external => out.push(Control::Cancel(t.id)),
+                Some(KeyAction::Delete) if t.is_unfinished() => t.progress.cancel.store(true, Ordering::Relaxed),
+                Some(KeyAction::Toggle) if t.external => {}
+                Some(KeyAction::Toggle) if t.state == State::Running => out.push(Control::Pause(t.id)),
+                Some(KeyAction::Toggle) if matches!(t.state, State::Paused | State::Interrupted) => {
+                    out.push(Control::Resume(t.id))
+                }
+                _ => {}
+            }
+        }
+        let shown = egui::CollapsingHeader::new(title).id_salt(("queue", session)).default_open(true).show(ui, |ui| {
             for t in &mut self.items {
-                row(ui, t, &mut out);
+                // Behind the row's buttons: a click elsewhere on it selects it.
+                let bg = ui.interact(t.rect, egui::Id::new(("queue-row", session, t.id)), egui::Sense::click());
+                if bg.clicked() {
+                    let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
+                    self.sel.click(&order, &t.id, ctrl, shift);
+                }
+                let fill = if self.sel.contains(&t.id) {
+                    ui.visuals().selection.bg_fill.gamma_multiply(0.4)
+                } else {
+                    egui::Color32::TRANSPARENT
+                };
+                t.rect = egui::Frame::new().fill(fill).show(ui, |ui| row(ui, t, &mut out)).response.rect;
             }
             if self.items.iter().any(|t| !t.is_unfinished())
                 && ui.small_button("Clear finished").on_hover_text("Remove finished and cancelled rows").clicked()
@@ -231,6 +266,11 @@ impl Queue {
                 self.items.retain(Transfer::is_unfinished);
             }
         });
+        if let Some(body) = &shown.body_response {
+            self.sel.track_focus(ui, body.rect);
+        }
+        let items = &self.items;
+        self.sel.retain(|id| items.iter().any(|t| t.id == *id));
         if running > 0 {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }

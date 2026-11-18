@@ -40,11 +40,6 @@ jobs:
       # Platform-only code (registry import, Windows drives) is linted here.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --lib --bins
+      # Built but not uploaded: artifacts count against the account's storage
+      # quota, and releases carry the downloads.
       - run: cargo build --release -p malasdoh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: malasdoh-${{ matrix.os }}
-          path: |
-            target/release/malasdoh.exe
-            target/release/malasdoh
-          if-no-files-found: error

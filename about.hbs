@@ -1,0 +1,30 @@
+# Third-party notices
+
+MalasDoh is free software under the GNU General Public License, version 3
+or (at your option) any later version; see `LICENSE`. It is built with the
+open-source libraries below, each under its own licence, reproduced here.
+
+Generated with `cargo about generate about.hbs > THIRD-PARTY-NOTICES.md`.
+
+## Summary
+
+| Licence | Libraries |
+| --- | --- |
+{{#each overview}}
+| {{{name}}} | {{count}} |
+{{/each}}
+
+## Licences
+{{#each licenses}}
+
+### {{{name}}}
+
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+```
+{{{text}}}
+```
+{{/each}}

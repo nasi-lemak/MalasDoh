@@ -403,3 +403,22 @@ a connection and a checked transfer through each tunnel at the same time,
 and one tunnel ending while the other carries on.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is planned next.
+
+## Security
+
+Found a security problem? Please report it privately, as described in
+[SECURITY.md](SECURITY.md), not in a public issue.
+
+## Licence
+
+MalasDoh is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. It is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the details.
+
+The libraries it is built with, and their licences, are listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). To regenerate that file
+after changing dependencies: `cargo install cargo-about --features cli`,
+then `cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md`.

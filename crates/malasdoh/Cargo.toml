@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+license.workspace = true
 build = "build.rs"
 
 [package.metadata.deb]
@@ -21,6 +22,7 @@ assets = [
     ["../../assets/icon.png", "usr/share/icons/hicolor/512x512/apps/malasdoh.png", "644"],
     ["../../assets/icon-128.png", "usr/share/icons/hicolor/128x128/apps/malasdoh.png", "644"],
     ["../../README.md", "usr/share/doc/malasdoh/README.md", "644"],
+    ["../../THIRD-PARTY-NOTICES.md", "usr/share/doc/malasdoh/THIRD-PARTY-NOTICES.md", "644"],
 ]
 
 [dependencies]

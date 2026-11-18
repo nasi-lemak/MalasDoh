@@ -8,6 +8,7 @@ fn main() {
         res.set_icon("../../assets/icon.ico");
         res.set("ProductName", "MalasDoh");
         res.set("FileDescription", "MalasDoh SSH client");
+        res.set("LegalCopyright", "MalasDoh contributors. Free software under GPL-3.0-or-later.");
         if let Err(e) = res.compile() {
             println!("cargo:warning=no icon in the .exe: {e}");
         }

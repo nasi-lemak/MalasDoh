@@ -40,6 +40,11 @@ impl AppPaths {
         self.config_dir.join("profiles.toml")
     }
 
+    /// Themes of your own, one `.toml` file each.
+    pub fn themes_dir(&self) -> PathBuf {
+        self.config_dir.join("themes")
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.config_dir.join("settings.toml")
     }

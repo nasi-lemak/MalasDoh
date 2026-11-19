@@ -179,6 +179,26 @@ Paste `%APPDATA%\MalasDoh` into the Explorer address bar to open it.
   press **Save**: it says "Not saved" with the line number. Fix it, Save: it
   tests again, and connections using it still connect.
 
+## 7b. Appearance
+
+- [ ] 7.9 **Settings → Appearance → Theme**: try Dracula, then Solarized
+  Light. The whole window, the terminal and the editor's colours change at
+  once, and stay after restarting MalasDoh. Text, selected rows and the
+  red/green of a save's diff stay easy to read in each.
+- [ ] 7.10 Theme **Follow system**, dark theme Gruvbox Dark, light theme
+  Solarized Light. Switch Windows between dark and light (Settings →
+  Personalisation → Colours): MalasDoh follows within a second or two.
+- [ ] 7.11 **Accent colour → Your own**, pick orange: selection, the
+  pressed button and links turn orange. Untick it: back to the theme's.
+- [ ] 7.12 **Copy this theme to a new file**: Explorer opens the themes
+  folder with a new `.toml`. Change `accent` in it, save, press **Reload**:
+  the change shows. Put `text = "blue"` in it and Reload: it says what is
+  wrong instead of loading it.
+- [ ] 7.13 Notices (for example "Saved") appear as a card in the
+  bottom-right corner and go away by themselves or when clicked. The
+  bottom bar shows the connection you are looking at (user@host, connected),
+  and open connections have a coloured dot in the connection list.
+
 ## 8. Keyboard
 
 - [ ] 8.0a **F1** shows the list of keys; **Esc** closes it.

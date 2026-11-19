@@ -197,7 +197,7 @@ impl PatchWindow {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
             Some(Ok(files)) => {
-                let ok = egui::Color32::from_rgb(90, 190, 90);
+                let ok = crate::look::sem(ui.ctx()).good;
                 let warn = ui.visuals().warn_fg_color;
                 let err = ui.visuals().error_fg_color;
                 let mut toggle = None;

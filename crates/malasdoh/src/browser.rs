@@ -218,8 +218,8 @@ impl Browser {
             let label = if self.root {
                 RichText::new("root")
                     .strong()
-                    .color(egui::Color32::WHITE)
-                    .background_color(egui::Color32::from_rgb(0xa0, 0x30, 0x30))
+                    .color(crate::look::sem(ui.ctx()).on_danger)
+                    .background_color(crate::look::sem(ui.ctx()).danger)
             } else {
                 RichText::new("root")
             };
@@ -680,9 +680,7 @@ impl Browser {
                     }
                     ui.label("Folders are deleted with everything in them. This cannot be undone.");
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("Delete").color(ui.visuals().error_fg_color)).clicked()
-                            || crate::dlg::enter(ui, false)
-                        {
+                        if ui.add(crate::look::danger(ui, "Delete")).clicked() || crate::dlg::enter(ui, false) {
                             actions.push(Action::Delete(std::mem::take(paths)));
                             close = true;
                         }
@@ -884,7 +882,7 @@ pub(crate) fn name_dialog(ctx: &egui::Context, title: &str, value: &mut String) 
             result = Some(true);
         }
         ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
+            if ui.add(crate::look::primary(ui, "OK")).clicked() {
                 result = Some(true);
             }
             if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {

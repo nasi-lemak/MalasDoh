@@ -3,6 +3,7 @@
 
 use crate::listsel::KeyAction;
 
+mod appearance;
 mod backup;
 mod keys;
 mod rdp;
@@ -64,6 +65,10 @@ pub struct App {
     show_sidebar: bool,
     /// The list of keyboard shortcuts (F1).
     show_keys_help: bool,
+    /// Built-in themes, then those from the themes folder.
+    themes: Vec<crate::look::AppTheme>,
+    /// Theme files that could not be read, and why.
+    theme_errors: Vec<String>,
     last_local_dir: Option<std::path::PathBuf>,
     cross: Option<CrossCopy>,
     compares: Compares,
@@ -116,8 +121,52 @@ struct PendingSnippet {
 enum SettingsTab {
     #[default]
     General,
+    Appearance,
     Transfers,
     Checks,
+}
+
+/// The theme the settings ask for, in the form `look::apply` takes.
+fn look_choice(s: &Settings) -> crate::look::Choice<'_> {
+    crate::look::Choice {
+        theme: &s.ui_theme,
+        system_dark: &s.system_dark_theme,
+        system_light: &s.system_light_theme,
+        accent: &s.accent,
+        terminal: &s.terminal_theme,
+    }
+}
+
+/// A drop-down of themes; `filter` keeps only dark (`Some(true)`) or light ones.
+fn theme_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut String,
+    themes: &[crate::look::AppTheme],
+    filter: Option<bool>,
+    follow: bool,
+) {
+    egui::ComboBox::from_id_salt(id).selected_text(value.as_str()).width(200.0).height(480.0).show_ui(ui, |ui| {
+        let mut mine = false;
+        for t in themes.iter().filter(|t| filter.is_none_or(|d| t.dark == d)) {
+            if t.file.is_some() && !mine {
+                ui.separator();
+                ui.label(RichText::new("Your own").weak().small());
+                mine = true;
+            }
+            let label = if t.dark || t.name.to_lowercase().contains("light") {
+                t.name.clone()
+            } else {
+                format!("{} (light)", t.name)
+            };
+            ui.selectable_value(value, t.name.clone(), label);
+        }
+        if follow {
+            ui.separator();
+            ui.selectable_value(value, crate::look::FOLLOW_SYSTEM.to_string(), crate::look::FOLLOW_SYSTEM)
+                .on_hover_text("Dark or light with the system, each with a theme you choose");
+        }
+    });
 }
 
 /// Settings → Transfers.
@@ -269,9 +318,8 @@ impl App {
             .expect("tokio runtime");
         let (events, rx) = Events::new(cc.egui_ctx.clone());
         let settings = Settings::load(&paths.settings_file());
-        // The theme itself, not just its colours: egui otherwise follows the
-        // system theme, so on a light Windows desktop "Dark mode" was ignored.
-        cc.egui_ctx.set_theme(if settings.dark_mode { egui::Theme::Dark } else { egui::Theme::Light });
+        let (themes, theme_errors) = crate::look::load_all(&paths.themes_dir());
+        crate::look::apply(&cc.egui_ctx, &themes, &look_choice(&settings));
         let font_error = apply_fonts(&cc.egui_ctx, &settings.mono_font_file).err();
         let mut toast = font_error.map(|e| (format!("Could not use the terminal font: {e}"), true, Instant::now()));
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_else(|e| {
@@ -328,6 +376,8 @@ impl App {
             multi_edit: MultiEdit::default(),
             show_sidebar: true,
             show_keys_help: false,
+            themes,
+            theme_errors,
             last_local_dir: None,
             cross: None,
             compares: Compares::default(),
@@ -561,6 +611,10 @@ impl App {
 
     fn menu_ui(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
+            if ui.selectable_label(self.show_sidebar, "☰").on_hover_text("Show or hide the connection list").clicked()
+            {
+                self.show_sidebar = !self.show_sidebar;
+            }
             ui.menu_button("Connection", |ui| {
                 if ui.add(egui::Button::new("New connection…").shortcut_text("Ctrl+N")).clicked() {
                     self.form = Some(ProfileForm::new(Profile::default(), true));
@@ -631,10 +685,6 @@ impl App {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            if ui.selectable_label(self.show_sidebar, "☰").on_hover_text("Show or hide the connection list").clicked()
-            {
-                self.show_sidebar = !self.show_sidebar;
-            }
             ui.menu_button("Tools", |ui| {
                 if ui.button("Run on many hosts…").clicked() {
                     self.multi.open = true;
@@ -690,7 +740,7 @@ impl App {
                 let selected = self.active == Some(s.id);
                 let mut job = egui::text::LayoutJob::default();
                 let body = egui::TextStyle::Button.resolve(ui.style());
-                job.append("• ", 0.0, egui::TextFormat::simple(body.clone(), s.status_color()));
+                job.append("• ", 0.0, egui::TextFormat::simple(body.clone(), s.status_color(ui.ctx())));
                 let name =
                     if s.has_unsaved() { format!("{} *", s.profile.display_name()) } else { s.profile.display_name() };
                 job.append(&name, 0.0, egui::TextFormat::simple(body, ui.visuals().text_color()));
@@ -839,8 +889,17 @@ impl App {
                             format!("{}\n{}", p.destination(), p.auth.label())
                         };
                         order.push(p.id);
-                        let r = ui.selectable_label(self.side_sel.contains(&p.id), label).on_hover_text(format!(
-                            "{what}{}",
+                        // A dot in its status colour when it is open in a tab.
+                        let open = self.sessions.iter().find(|s| s.profile.id == p.id);
+                        let mut job = egui::text::LayoutJob::default();
+                        let body = egui::TextStyle::Button.resolve(ui.style());
+                        if let Some(s) = open {
+                            job.append("• ", 0.0, egui::TextFormat::simple(body.clone(), s.status_color(ui.ctx())));
+                        }
+                        job.append(&label, 0.0, egui::TextFormat::simple(body, ui.visuals().text_color()));
+                        let r = ui.selectable_label(self.side_sel.contains(&p.id), job).on_hover_text(format!(
+                            "{what}{}{}",
+                            if open.is_some() { "\nOpen in a tab" } else { "" },
                             if p.notes.is_empty() { String::new() } else { format!("\n{}", p.notes) }
                         ));
                         if r.clicked() || r.secondary_clicked() {
@@ -1007,6 +1066,10 @@ impl App {
             });
         }
         egui::Panel::left(egui::Id::new(("browser", s.id))).resizable(true).default_size(320.0).show(ui, |ui| {
+            // With this computer's files beside it, say which side is which.
+            if s.local.is_some() {
+                ui.label(RichText::new(format!("Server: {}", s.profile.display_name())).strong());
+            }
             let actions = s.browser.ui(ui, settings.confirm_delete);
             for a in actions {
                 s.browser_action(a, &shared);
@@ -1285,7 +1348,8 @@ impl App {
                 let filled: std::collections::HashMap<String, String> = p.values.iter().cloned().collect();
                 ui.label(RichText::new(snippets::fill(&p.snippet.command, &filled)).monospace().weak());
                 ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if ui.add(crate::look::primary(ui, "OK")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
                         result = Some(true);
                     }
                     if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
@@ -1308,9 +1372,9 @@ impl App {
     fn welcome_ui(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(60.0);
-            ui.heading("MalasDoh");
-            ui.label("SSH terminal, file browser and safe remote editing.");
-            ui.add_space(20.0);
+            ui.label(RichText::new("MalasDoh").size(28.0).strong());
+            ui.label(RichText::new("SSH terminal, file browser and safe remote editing.").weak());
+            ui.add_space(24.0);
             if !self.last.tabs.is_empty() {
                 let names: Vec<String> = self
                     .last
@@ -1319,7 +1383,7 @@ impl App {
                     .filter_map(|t| self.profiles.get(t.profile).map(|p| p.display_name()))
                     .collect();
                 if ui
-                    .button(RichText::new("Reopen last session").strong())
+                    .add(crate::look::primary(ui, "Reopen last session"))
                     .on_hover_text("Reconnect and reopen the folders, files and terminals you had open")
                     .clicked()
                 {
@@ -1334,11 +1398,26 @@ impl App {
             if ui.button("Import from ~/.ssh/config").clicked() {
                 self.import_ssh_config();
             }
-            ui.add_space(20.0);
+            ui.add_space(24.0);
             ui.label(
                 RichText::new("Every save shows a diff, checks nobody else changed the file, and keeps a backup.")
                     .weak(),
             );
+            ui.add_space(16.0);
+            // The hints as a centred block, keys lined up.
+            ui.allocate_ui_with_layout(egui::vec2(220.0, 0.0), Layout::top_down(Align::Min), |ui| {
+                egui::Grid::new("welcome-keys").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    for (k, what) in [
+                        ("Ctrl+K", "find a connection"),
+                        ("Ctrl+N", "new connection"),
+                        ("F1", "all keyboard shortcuts"),
+                    ] {
+                        ui.label(RichText::new(k).monospace().strong());
+                        ui.label(RichText::new(what).weak());
+                        ui.end_row();
+                    }
+                });
+            });
         });
     }
 
@@ -1415,7 +1494,7 @@ impl App {
                         done = Some(true);
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        if ui.add(crate::look::primary(ui, "OK")).clicked() {
                             done = Some(true);
                         }
                         if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
@@ -1438,7 +1517,7 @@ impl App {
                         }
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if ui.add(crate::look::primary(ui, "OK")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             done = Some(true);
                         }
                         if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
@@ -1464,7 +1543,7 @@ impl App {
                         done = Some(true);
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        if ui.add(crate::look::primary(ui, "OK")).clicked() {
                             done = Some(true);
                         }
                         if ui.button("Cancel").clicked() || crate::dlg::escape(ui) {
@@ -1765,7 +1844,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 let in_notes = ui.memory(|m| m.has_focus(egui::Id::new("profile-notes")));
-                if ui.button(if form.is_new { "Save" } else { "Save changes" }).clicked()
+                if ui.add(crate::look::primary(ui, if form.is_new { "Save" } else { "Save changes" })).clicked()
                     || (!in_notes && crate::dlg::enter(ui, false))
                 {
                     result = Some(true);
@@ -1917,7 +1996,7 @@ impl App {
                 ui.heading(format!("Delete “{name}”?"));
                 ui.label("The saved connection is removed. Nothing on the server is touched.");
                 ui.horizontal(|ui| {
-                    if ui.button("Delete").clicked() || crate::dlg::enter(ui, false) {
+                    if ui.add(crate::look::danger(ui, "Delete")).clicked() || crate::dlg::enter(ui, false) {
                         let orphaned = self.profiles.remove(id);
                         let secrets = self.shared.secrets.clone();
                         self.shared.rt.spawn_blocking(move || {
@@ -1988,6 +2067,7 @@ impl App {
         }
         let before = self.settings.clone();
         let mut open = true;
+        let mut theme_action: Option<appearance::ThemeAction> = None;
         let paths = self.shared.paths.clone();
         let tab = &mut self.settings_tab;
         let shown = egui::Window::new("Settings")
@@ -1998,6 +2078,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(tab, SettingsTab::General, "General");
+                    ui.selectable_value(tab, SettingsTab::Appearance, "Appearance");
                     ui.selectable_value(tab, SettingsTab::Transfers, "Transfers");
                     ui.selectable_value(tab, SettingsTab::Checks, "Config checks");
                 });
@@ -2005,43 +2086,11 @@ impl App {
                 let s = &mut self.settings;
                 match tab {
                     SettingsTab::General => {
-                        ui.add(egui::Slider::new(&mut s.terminal_font_size, 9.0..=28.0).text("Terminal font size"));
-                        ui.add(egui::Slider::new(&mut s.editor_font_size, 9.0..=28.0).text("Editor font size"));
                         ui.checkbox(&mut s.review_before_save, "Show changes and ask before saving a remote file");
                         ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
                         ui.checkbox(&mut s.reopen_on_start, "Reopen last session's connections and files on start");
-                        ui.checkbox(&mut s.dark_mode, "Dark mode");
-                        ui.separator();
+                        ui.add_space(8.0);
                         ui.label(RichText::new("Terminal").strong());
-                        ui.horizontal(|ui| {
-                            ui.label("Colours");
-                            egui::ComboBox::from_id_salt("term-theme").selected_text(&s.terminal_theme).show_ui(
-                                ui,
-                                |ui| {
-                                    for t in crate::themes::THEMES {
-                                        ui.selectable_value(&mut s.terminal_theme, t.name.to_string(), t.name);
-                                    }
-                                },
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Font file");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut s.mono_font_file)
-                                    .hint_text("built-in (Hack)")
-                                    .desired_width(260.0),
-                            )
-                            .on_hover_text("A monospace .ttf or .otf, used by terminals and the editor");
-                            if ui.button("Browse…").clicked()
-                                && let Some(f) =
-                                    rfd::FileDialog::new().add_filter("Fonts", &["ttf", "otf", "ttc"]).pick_file()
-                            {
-                                s.mono_font_file = f.display().to_string();
-                            }
-                            if !s.mono_font_file.is_empty() && ui.small_button("Reset").clicked() {
-                                s.mono_font_file.clear();
-                            }
-                        });
                         ui.checkbox(&mut s.copy_on_select, "Copy text as soon as it is selected");
                         ui.checkbox(&mut s.confirm_paste, "Ask before pasting several lines into a shell");
                         ui.label(
@@ -2052,10 +2101,11 @@ impl App {
                             .weak()
                             .small(),
                         );
-                        ui.separator();
-                        ui.label("External editor command ({file} = path; empty = system default):");
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("External editor").strong());
+                        ui.label("Command ({file} = path; empty = system default):");
                         ui.add(egui::TextEdit::singleline(&mut s.external_editor).hint_text("code --wait {file}"));
-                        ui.separator();
+                        ui.add_space(8.0);
                         ui.label(
                             RichText::new(format!("Settings and connections: {}", paths.config_dir.display()))
                                 .weak()
@@ -2065,6 +2115,9 @@ impl App {
                             RichText::new(format!("Local backups: {}", paths.backups_dir().display())).weak().small(),
                         );
                     }
+                    SettingsTab::Appearance => {
+                        appearance::appearance_ui(ui, s, &self.themes, &self.theme_errors, &mut theme_action);
+                    }
                     SettingsTab::Transfers => transfers_ui(ui, &mut s.transfer, &mut self.skip_text),
                     SettingsTab::Checks => checks_ui(ui, &mut s.validation_rules),
                 }
@@ -2073,8 +2126,11 @@ impl App {
             open = false;
         }
         self.show_settings = open;
+        if let Some(a) = theme_action {
+            self.theme_action(ctx, a);
+        }
         if self.settings != before {
-            ctx.set_theme(if self.settings.dark_mode { egui::Theme::Dark } else { egui::Theme::Light });
+            crate::look::apply(ctx, &self.themes, &look_choice(&self.settings));
             if self.settings.mono_font_file != before.mono_font_file
                 && let Err(e) = apply_fonts(ctx, &self.settings.mono_font_file)
             {
@@ -2087,21 +2143,80 @@ impl App {
         }
     }
 
+    /// The bottom bar: the connection shown and its transfers, on the left.
     fn status_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if let Some((msg, err, at)) = &self.toast {
-                if at.elapsed() > Duration::from_secs(if *err { 15 } else { 6 }) {
-                    self.toast = None;
-                } else {
-                    let color = if *err { ui.visuals().error_fg_color } else { ui.visuals().text_color() };
-                    ui.colored_label(color, msg);
-                    ui.ctx().request_repaint_after(Duration::from_secs(1));
+            match self.active.and_then(|id| self.sessions.iter().find(|s| s.id == id)) {
+                Some(s) => {
+                    ui.colored_label(s.status_color(ui.ctx()), "•");
+                    let p = &s.profile;
+                    let port = if p.port == 22 { String::new() } else { format!(":{}", p.port) };
+                    let who = if p.user.is_empty() {
+                        format!("{}{port}", p.host)
+                    } else {
+                        format!("{}@{}{port}", p.user, p.host)
+                    };
+                    ui.label(RichText::new(who).small());
+                    let state = match &s.state {
+                        ConnState::Connecting(_) => "connecting…",
+                        ConnState::Connected => "connected",
+                        ConnState::Failed { .. } => "connection failed",
+                        ConnState::Disconnected => "disconnected",
+                    };
+                    ui.label(RichText::new(state).small().weak());
+                    if s.browser.root {
+                        ui.label(RichText::new("· files as root").small().color(ui.visuals().warn_fg_color));
+                    }
+                    let busy = s.browser.transfers.items.iter().filter(|t| t.is_active()).count();
+                    if busy > 0 {
+                        ui.label(RichText::new(format!("· {busy} transfer(s) running")).small().weak());
+                    }
+                }
+                None => {
+                    ui.label(RichText::new("Not connected").small().weak());
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(format!("MalasDoh {}", env!("CARGO_PKG_VERSION"))).weak().small());
+                if ui.small_button("F1").on_hover_text("Keyboard shortcuts").clicked() {
+                    self.show_keys_help = true;
+                }
             });
         });
+    }
+
+    /// The latest notice, as a card in the bottom-right corner; it goes
+    /// away by itself, or when clicked.
+    fn toast_ui(&mut self, ctx: &egui::Context) {
+        let Some((msg, err, at)) = &self.toast else { return };
+        if at.elapsed() > Duration::from_secs(if *err { 15 } else { 6 }) {
+            self.toast = None;
+            return;
+        }
+        let sem = crate::look::sem(ctx);
+        let (icon, color) = if *err { ("⚠", sem.bad) } else { ("✔", sem.good) };
+        let mut close = false;
+        egui::Area::new(egui::Id::new("toast"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -34.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let r = egui::Frame::popup(ui.style())
+                    .stroke(egui::Stroke::new(1.0, color))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_max_width(440.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icon).color(color).strong());
+                            ui.add(egui::Label::new(msg.as_str()).wrap());
+                        });
+                    })
+                    .response;
+                close = r.interact(egui::Sense::click()).on_hover_text("Click to close").clicked();
+            });
+        if close {
+            self.toast = None;
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
     }
 }
 
@@ -2123,10 +2238,11 @@ impl App {
         let Some(set) = &mut self.broadcast else { return };
         let mut stop = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("⌨ Typing goes to:").strong().color(egui::Color32::WHITE));
+            let fg = crate::look::sem(ui.ctx()).on_danger;
+            ui.label(egui::RichText::new("⌨ Typing goes to:").strong().color(fg));
             for s in self.sessions.iter().filter(|s| s.state == ConnState::Connected) {
                 let mut on = set.contains(&s.id);
-                let name = egui::RichText::new(s.profile.display_name()).color(egui::Color32::WHITE);
+                let name = egui::RichText::new(s.profile.display_name()).color(fg);
                 if ui.checkbox(&mut on, name).changed() {
                     if on {
                         set.push(s.id);
@@ -2298,7 +2414,7 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
         if self.broadcast.is_some() {
             egui::Panel::top("broadcast")
-                .frame(egui::Frame::side_top_panel(ui.style()).fill(egui::Color32::from_rgb(0x6e, 0x1f, 0x1f)))
+                .frame(egui::Frame::side_top_panel(ui.style()).fill(crate::look::sem(ui.ctx()).danger))
                 .show(ui, |ui| self.broadcast_ui(ui));
         }
         if self.show_sidebar {
@@ -2314,6 +2430,7 @@ impl eframe::App for App {
         self.settings_ui(&ctx);
         self.snippet_windows_ui(&ctx);
         self.keys_help_ui(&ctx);
+        self.toast_ui(&ctx);
         self.multi.ui(&ctx, &self.profiles, &self.snippets, &self.shared);
         self.multi_edit.ui(&ctx, &self.profiles, &self.shared, &self.settings.validation_rules);
         if let Some((a, b)) = self.journal_win.ui(&ctx, &self.journal, &self.sessions) {

@@ -16,10 +16,21 @@ pub struct Settings {
     /// Command for "Open in external editor". `{file}` is replaced by the path;
     /// without it the path is appended. Empty means the system default.
     pub external_editor: String,
-    pub dark_mode: bool,
+    /// Colours of the whole app: a theme's name (see `look.rs`), or
+    /// "Follow system". Empty only in files from before themes, which had
+    /// `dark_mode` instead.
+    pub ui_theme: String,
+    /// With "Follow system": the themes for the system's dark and light mode.
+    pub system_dark_theme: String,
+    pub system_light_theme: String,
+    /// "#rrggbb" in place of the theme's accent colour; empty: the theme's.
+    pub accent: String,
+    /// Before themes: dark (true) or light. Read once, to choose a theme.
+    #[serde(skip_serializing)]
+    pub dark_mode: Option<bool>,
     /// Ask before deleting remote files.
     pub confirm_delete: bool,
-    /// Terminal colours, by name (see `themes.rs`).
+    /// Terminal colours, by name (see `themes.rs`), or "Same as the app".
     pub terminal_theme: String,
     /// A TTF/OTF file used for the terminal and editor. Empty: the built-in
     /// monospace font.
@@ -49,10 +60,14 @@ impl Default for Settings {
             editor_font_size: 14.0,
             review_before_save: true,
             external_editor: String::new(),
-            dark_mode: true,
+            ui_theme: "Dark".into(),
+            system_dark_theme: "Dark".into(),
+            system_light_theme: "Light".into(),
+            accent: String::new(),
+            dark_mode: None,
             confirm_delete: true,
             reopen_on_start: false,
-            terminal_theme: crate::themes::THEMES[0].name.to_string(),
+            terminal_theme: crate::look::SAME_AS_APP.into(),
             mono_font_file: String::new(),
             copy_on_select: false,
             confirm_paste: true,
@@ -73,7 +88,24 @@ impl Settings {
             Err(_) => Self::default(),
         };
         s.add_new_builtin_rules();
+        s.choose_theme_from_dark_mode();
         s
+    }
+
+    /// A settings file from before themes: its "Dark mode" becomes the Dark
+    /// or Light theme, and a dark terminal left at the old default follows
+    /// the app (which looks the same).
+    fn choose_theme_from_dark_mode(&mut self) {
+        if !self.ui_theme.is_empty() && self.dark_mode.is_none() {
+            return;
+        }
+        let dark = self.dark_mode.take().unwrap_or(true);
+        if self.ui_theme.is_empty() || self.ui_theme == "Dark" {
+            self.ui_theme = if dark { "Dark" } else { "Light" }.into();
+            if dark && self.terminal_theme == "Tomorrow Night" {
+                self.terminal_theme = crate::look::SAME_AS_APP.into();
+            }
+        }
     }
 
     /// Add built-in checks that are newer than this settings file.
@@ -131,5 +163,26 @@ mod tests {
         s.validation_rules.retain(|r| r.name != "PostgreSQL");
         s.add_new_builtin_rules();
         assert!(!s.validation_rules.iter().any(|r| r.name == "PostgreSQL"));
+    }
+
+    #[test]
+    fn dark_mode_from_before_themes_becomes_a_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let old = Settings { terminal_theme: "Tomorrow Night".into(), ..Default::default() };
+        let text = toml::to_string(&old).unwrap().replace("ui_theme = \"Dark\"\n", "");
+        // Dark, with the old default terminal: looks the same as before.
+        std::fs::write(&path, format!("dark_mode = true\n{text}")).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!((s.ui_theme.as_str(), s.terminal_theme.as_str()), ("Dark", crate::look::SAME_AS_APP));
+        // Light keeps its terminal colours.
+        std::fs::write(&path, format!("dark_mode = false\n{text}")).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!((s.ui_theme.as_str(), s.terminal_theme.as_str()), ("Light", "Tomorrow Night"));
+        // Saved again, the old key is gone and the theme stays.
+        s.save(&path).unwrap();
+        let again = std::fs::read_to_string(&path).unwrap();
+        assert!(!again.contains("dark_mode") && again.contains("ui_theme = \"Light\""), "{again}");
+        assert_eq!(Settings::load(&path).ui_theme, "Light");
     }
 }

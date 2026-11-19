@@ -273,7 +273,7 @@ impl MultiRun {
                         (format!("running {}s", t.elapsed().as_secs()), ui.visuals().warn_fg_color)
                     }
                     HostState::Done(o, d) if o.success() => {
-                        (format!("✔ ok in {:.1}s", d.as_secs_f32()), egui::Color32::from_rgb(0x5c, 0xb8, 0x5c))
+                        (format!("✔ ok in {:.1}s", d.as_secs_f32()), crate::look::sem(ui.ctx()).good)
                     }
                     HostState::Done(o, d) => (
                         format!(

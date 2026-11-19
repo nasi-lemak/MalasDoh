@@ -164,7 +164,7 @@ impl Forwards {
                             (Some(h), _) => {
                                 let s = &h.stats;
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(0x5c, 0xb8, 0x5c),
+                                    crate::look::sem(ui.ctx()).good,
                                     format!(
                                         "• listening on port {} · {} open · {} total · {}",
                                         h.port,

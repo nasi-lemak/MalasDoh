@@ -18,6 +18,10 @@ pub struct TermOptions {
 }
 
 /// What the widget wants the session to do after a frame.
+/// The terminal's inner margin, in points.
+const PAD_X: f32 = 6.0;
+const PAD_Y: f32 = 4.0;
+
 #[derive(Default)]
 pub struct TerminalOutput {
     pub send: Vec<u8>,
@@ -276,7 +280,7 @@ impl Terminal {
                         if ui.small_button("Stop logging").on_hover_text(&p).clicked() {
                             self.log = None;
                         }
-                        ui.label(egui::RichText::new("• logging").color(Color32::from_rgb(0xd0, 0x50, 0x50)))
+                        ui.label(egui::RichText::new("• logging").color(crate::look::sem(ui.ctx()).bad))
                             .on_hover_text(p);
                     }
                     None => {
@@ -305,14 +309,19 @@ impl Terminal {
         let font = FontId::monospace(self.font_size);
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let avail = ui.available_size();
-        let cols = ((avail.x / cell_w).floor() as u16).clamp(20, 500);
-        let rows = ((avail.y / cell_h).floor() as u16).clamp(5, 300);
+        // A margin inside the terminal's background, so text does not touch
+        // the pane's edges.
+        let pad = Vec2::new(PAD_X, PAD_Y);
+        let cols = (((avail.x - 2.0 * pad.x) / cell_w).floor() as u16).clamp(20, 500);
+        let rows = (((avail.y - 2.0 * pad.y) / cell_h).floor() as u16).clamp(5, 300);
         if (rows, cols) != self.parser.screen().size() {
             self.parser.screen_mut().set_size(rows, cols);
             out.resize = Some((cols, rows));
         }
 
-        let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+        let (outer, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+        ui.painter().rect_filled(outer, 0.0, self.theme.bg);
+        let rect = Rect::from_min_size(outer.min + pad, outer.size() - 2.0 * pad);
         let id = response.id;
         if response.clicked()
             || response.drag_started()
@@ -464,7 +473,7 @@ impl Terminal {
                 egui::Align2::RIGHT_TOP,
                 label,
                 FontId::proportional(12.0),
-                Color32::YELLOW,
+                self.theme.ansi[3],
             );
         }
         if let Some(msg) = &self.exited {
@@ -473,7 +482,7 @@ impl Terminal {
                 egui::Align2::CENTER_BOTTOM,
                 msg,
                 FontId::proportional(14.0),
-                Color32::from_rgb(255, 180, 80),
+                self.theme.ansi[3],
             );
         }
         out
@@ -645,9 +654,16 @@ impl Terminal {
                 if let Some(&(.., current)) =
                     hits.iter().find(|&&(l, c, n, _)| l == line && (col as usize) >= c && (col as usize) < c + n)
                 {
-                    bg =
-                        if current { Color32::from_rgb(0xe0, 0x9a, 0x30) } else { Color32::from_rgb(0x6a, 0x55, 0x20) };
-                    fg = Color32::BLACK;
+                    // The terminal theme's yellow: strong for the current
+                    // match, faint for the others, text readable on each.
+                    let yellow = th.ansi[3];
+                    if current {
+                        bg = yellow;
+                        fg = th.bg;
+                    } else {
+                        bg = crate::look::mix(th.bg, yellow, 0.4);
+                        fg = th.fg;
+                    }
                 }
                 let text = if cell.has_contents() { cell.contents() } else { " " };
                 let format = TextFormat {

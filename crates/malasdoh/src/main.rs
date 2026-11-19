@@ -16,6 +16,7 @@ mod keys_ui;
 mod listsel;
 mod local;
 mod logview;
+mod look;
 mod multiedit;
 mod multirun;
 mod patch_ui;

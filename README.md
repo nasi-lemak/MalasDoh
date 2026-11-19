@@ -114,8 +114,8 @@ remote-editing loop, where they are weakest:
   htop, less), scrollback, selection and copy, bracketed paste, several
   terminals per connection. Ctrl+C copies when text is selected and interrupts
   otherwise. Search the scrollback (Ctrl+Shift+F), and log a terminal to a
-  plain-text file. Colour themes (Tomorrow Night, Solarized dark and light,
-  Dracula, Gruvbox, Light) and your own monospace font file. Right click
+  plain-text file. Its colours follow the app theme (or any other terminal
+  palette), and you can use your own monospace font file. Right click
   copies a selection or pastes, middle click pastes, copy-on-select if you
   like; pasting several lines into a shell asks first. Ctrl+click opens
   links. Programs that use the mouse (htop, mc, vim) get it; Shift+drag still
@@ -162,6 +162,15 @@ remote-editing loop, where they are weakest:
   right-click menu (or F2 and Delete) renames and deletes your own files:
   Delete moves them to the Recycle Bin (the Trash on Linux and macOS), or
   for good if you choose so; a rename never replaces another file.
+- **Themes** (Settings → Appearance): one choice colours the whole window,
+  the terminal and the editor together: Dark, Light, Tomorrow Night,
+  Dracula, Gruvbox Dark, Solarized Dark and Solarized Light, or "Follow
+  system" to switch with the system's dark or light mode (with a theme of
+  your choice for each). Pick your own accent colour, or give the terminal
+  a different palette. Your own themes are small text files of colours in
+  the `themes` folder next to the settings: "Copy this theme to a new file"
+  writes the current one out to change, and Reload picks up your edits. A
+  file with a mistake is left out, with the reason shown.
 - **Keyboard**: F1 (or Tools → Keyboard shortcuts) lists every key.
   Ctrl+Tab and Ctrl+Shift+Tab switch connections, Ctrl+PgUp/PgDn switch
   terminal and file tabs, Ctrl+Shift+T opens a terminal and Ctrl+Shift+W

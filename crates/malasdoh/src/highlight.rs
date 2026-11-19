@@ -139,34 +139,25 @@ pub struct Palette {
     pub variable: Color32,
     pub keyword: Color32,
     pub literal: Color32,
+    pub find: Color32,
+    pub find_current: Color32,
 }
 
 impl Palette {
-    pub fn new(dark: bool, text: Color32) -> Self {
-        if dark {
-            Self {
-                text,
-                comment: Color32::from_rgb(0x7f, 0x8c, 0x8d),
-                string: Color32::from_rgb(0xb5, 0xbd, 0x68),
-                number: Color32::from_rgb(0xde, 0x93, 0x5f),
-                key: Color32::from_rgb(0x81, 0xa2, 0xbe),
-                section: Color32::from_rgb(0xf0, 0xc6, 0x74),
-                variable: Color32::from_rgb(0xb2, 0x94, 0xbb),
-                keyword: Color32::from_rgb(0xcc, 0x66, 0x66),
-                literal: Color32::from_rgb(0x8a, 0xbe, 0xb7),
-            }
-        } else {
-            Self {
-                text,
-                comment: Color32::from_rgb(0x6a, 0x73, 0x7d),
-                string: Color32::from_rgb(0x22, 0x86, 0x3a),
-                number: Color32::from_rgb(0xb3, 0x5a, 0x00),
-                key: Color32::from_rgb(0x00, 0x5c, 0xc5),
-                section: Color32::from_rgb(0x8a, 0x5a, 0x00),
-                variable: Color32::from_rgb(0x6f, 0x42, 0xc1),
-                keyword: Color32::from_rgb(0xd7, 0x3a, 0x49),
-                literal: Color32::from_rgb(0x00, 0x7a, 0x7a),
-            }
+    /// The editor's colours: `text` for plain text, the rest from the theme.
+    pub fn new(text: Color32, s: &crate::look::Syntax) -> Self {
+        Self {
+            text,
+            comment: s.comment,
+            string: s.string,
+            number: s.number,
+            key: s.key,
+            section: s.section,
+            variable: s.variable,
+            keyword: s.keyword,
+            literal: s.literal,
+            find: s.find,
+            find_current: s.find_current,
         }
     }
 
@@ -511,8 +502,7 @@ pub fn layout(
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     let fmt = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
-    let hit_bg = Color32::from_rgb(0x6a, 0x55, 0x20);
-    let current_bg = Color32::from_rgb(0xc8, 0x86, 0x1e);
+    let (hit_bg, current_bg) = (pal.find, pal.find_current);
     let mut m = 0;
     let mut st = LineState::default();
     let mut offset = 0;
@@ -620,7 +610,8 @@ mod tests {
 
     #[test]
     fn layout_covers_all_text() {
-        let pal = Palette::new(true, Color32::WHITE);
+        let t = &crate::look::builtin()[0];
+        let pal = Palette::new(Color32::WHITE, &crate::look::Semantic::new(t, &crate::look::visuals(t, None)).syntax);
         let text = "server {\n  listen 80; # x\n}\n";
         let hits: Vec<_> = text.match_indices("listen").map(|(i, m)| i..i + m.len()).collect();
         let job = layout(text, Lang::Directive, &hits, Some(0), &egui::FontId::monospace(12.0), &pal);

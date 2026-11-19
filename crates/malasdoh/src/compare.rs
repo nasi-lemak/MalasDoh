@@ -433,8 +433,8 @@ fn side_path(s: &Side) -> String {
 /// Returns true when the user asked to reload both sides.
 fn window_ui(ui: &mut egui::Ui, w: &mut Window) -> bool {
     let mut reload = false;
-    let remove = Color32::from_rgb(220, 90, 90);
-    let add = Color32::from_rgb(90, 190, 90);
+    let sem = crate::look::sem(ui.ctx());
+    let (remove, add) = (sem.bad, sem.good);
     egui::Grid::new(("compare-sides", w.id)).num_columns(2).show(ui, |ui| {
         for (sign, color, side) in [("-", remove, &w.left), ("+", add, &w.right)] {
             ui.label(RichText::new(sign).color(color).strong());
@@ -506,8 +506,8 @@ fn window_ui(ui: &mut egui::Ui, w: &mut Window) -> bool {
 }
 
 fn rows_ui(ui: &mut egui::Ui, rows: &[Row], id: u64) {
-    let add_bg = Color32::from_rgba_unmultiplied(60, 160, 60, 60);
-    let del_bg = Color32::from_rgba_unmultiplied(200, 60, 60, 60);
+    let sem = crate::look::sem(ui.ctx());
+    let (add_bg, del_bg) = (sem.add_bg, sem.del_bg);
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
     let weak = ui.visuals().weak_text_color();
     egui::ScrollArea::both().id_salt(("compare-rows", id)).auto_shrink([false, false]).show_rows(

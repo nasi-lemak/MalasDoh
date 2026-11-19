@@ -375,11 +375,12 @@ impl Session {
         self.next_id
     }
 
-    pub fn status_color(&self) -> egui::Color32 {
+    pub fn status_color(&self, ctx: &egui::Context) -> egui::Color32 {
+        let sem = crate::look::sem(ctx);
         match self.state {
-            ConnState::Connected => egui::Color32::from_rgb(0x5c, 0xb8, 0x5c),
-            ConnState::Connecting(_) => egui::Color32::from_rgb(0xe0, 0xb0, 0x40),
-            _ => egui::Color32::from_rgb(0xd0, 0x50, 0x50),
+            ConnState::Connected => sem.good,
+            ConnState::Connecting(_) => sem.warn,
+            _ => sem.bad,
         }
     }
 
@@ -2080,7 +2081,7 @@ impl Session {
                 let Some(t) = self.terms.iter_mut().find(|t| t.id == id) else { return };
                 t.term.set_font_size(settings.terminal_font_size);
                 let opts = crate::terminal::TermOptions {
-                    theme: crate::themes::theme(&settings.terminal_theme),
+                    theme: crate::look::terminal_theme(ui.ctx()),
                     copy_on_select: settings.copy_on_select,
                     confirm_paste: settings.confirm_paste,
                 };

@@ -3,6 +3,7 @@
 
 use egui::Color32;
 
+#[derive(Debug)]
 pub struct Theme {
     pub name: &'static str,
     pub bg: Color32,
@@ -171,10 +172,6 @@ pub const THEMES: &[Theme] = &[
     },
 ];
 
-pub fn theme(name: &str) -> &'static Theme {
-    THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0])
-}
-
 /// The URL in `line` covering character column `col`, if any, with its
 /// column span. Trailing punctuation that usually ends a sentence is not
 /// part of it.
@@ -305,6 +302,5 @@ mod tests {
         assert_eq!(encode_mouse(Left, Drag, 1, 1, true, false, true), b"\x1b[<48;2;2M");
         assert_eq!(encode_mouse(Left, Press, 0, 0, false, false, false), vec![0x1b, b'[', b'M', 32, 33, 33]);
         assert_eq!(encode_mouse(Right, Release, 0, 0, false, false, false), vec![0x1b, b'[', b'M', 35, 33, 33]);
-        assert_eq!(theme("nope").name, "Tomorrow Night");
     }
 }

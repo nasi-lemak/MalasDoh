@@ -322,7 +322,7 @@ impl LocalBrowser {
                     ui.horizontal(|ui| {
                         if error.is_none() {
                             if ui
-                                .button(RichText::new(format!("Move to the {BIN}")).strong())
+                                .add(crate::look::primary(ui, format!("Move to the {BIN}")))
                                 .on_hover_text("Enter")
                                 .clicked()
                                 || crate::dlg::enter(ui, false)
@@ -337,7 +337,7 @@ impl LocalBrowser {
                                 delete = Some((std::mem::take(paths), true));
                             }
                         } else if ui
-                            .button(RichText::new("Delete for good").color(ui.visuals().error_fg_color))
+                            .add(crate::look::danger(ui, "Delete for good"))
                             .on_hover_text("Cannot be undone")
                             .clicked()
                         {

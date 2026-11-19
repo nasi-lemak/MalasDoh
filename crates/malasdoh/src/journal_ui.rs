@@ -1,7 +1,7 @@
 //! The change journal window: every file saved from MalasDoh, searchable,
 //! with its patch.
 
-use egui::{Color32, RichText};
+use egui::RichText;
 use malasdoh_core::journal::{self, Entry, Journal};
 
 use crate::compare::Side;
@@ -96,8 +96,8 @@ impl JournalWindow {
         );
         ui.separator();
 
-        let add = Color32::from_rgb(90, 190, 90);
-        let remove = Color32::from_rgb(220, 90, 90);
+        let sem = crate::look::sem(ui.ctx());
+        let (add, remove) = (sem.good, sem.bad);
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         egui::ScrollArea::vertical().id_salt("journal-list").max_height(220.0).auto_shrink([false, true]).show_rows(
             ui,
@@ -199,8 +199,8 @@ impl JournalWindow {
 
 fn patch_ui(ui: &mut egui::Ui, patch: &str) {
     let lines: Vec<&str> = patch.lines().collect();
-    let add_bg = Color32::from_rgba_unmultiplied(60, 160, 60, 60);
-    let del_bg = Color32::from_rgba_unmultiplied(200, 60, 60, 60);
+    let sem = crate::look::sem(ui.ctx());
+    let (add_bg, del_bg) = (sem.add_bg, sem.del_bg);
     let weak = ui.visuals().weak_text_color();
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
     egui::ScrollArea::both().id_salt("journal-patch").auto_shrink([false, false]).show_rows(

@@ -549,7 +549,7 @@ impl MultiEdit {
             ui.label(RichText::new(hint).weak());
             return;
         }
-        let ok = egui::Color32::from_rgb(90, 190, 90);
+        let ok = crate::look::sem(ui.ctx()).good;
         let err = ui.visuals().error_fg_color;
         let weak = ui.visuals().weak_text_color();
         let warn = ui.visuals().warn_fg_color;

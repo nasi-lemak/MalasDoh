@@ -213,6 +213,14 @@ impl Editor {
                 }
                 ui.checkbox(&mut self.check_enabled, format!("Check: {}", rule.name)).on_hover_text(tip);
             }
+            // Always there (not only once the text has the cursor), so the
+            // editor does not jump down when you start typing.
+            let lines = self.text.lines().count();
+            let pos = match self.cursor_pos(ui.ctx()) {
+                Some((l, c)) => format!("Ln {l}, Col {c} · {lines} lines"),
+                None => format!("{lines} lines"),
+            };
+            ui.label(RichText::new(pos).weak());
         });
 
         if let Some((msg, is_err)) = &self.message {
@@ -236,9 +244,6 @@ impl Editor {
         self.find_ui(ui);
 
         self.pg_findings_ui(ui);
-        if let Some((l, c)) = self.cursor_pos(ui.ctx()) {
-            ui.label(RichText::new(format!("Ln {l}, Col {c} · {} lines", self.text.lines().count())).weak().small());
-        }
         ui.separator();
         let te_id = egui::Id::new(("editor-text", self.id));
         let editing = ui.memory(|m| m.has_focus(te_id));
@@ -274,13 +279,14 @@ impl Editor {
             let key = {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                (buf.as_str(), &matches, current, lang as u8, font.size.to_bits(), ui.visuals().dark_mode).hash(&mut h);
+                let theme = crate::look::sem(ui.ctx()).stamp;
+                (buf.as_str(), &matches, current, lang as u8, font.size.to_bits(), theme).hash(&mut h);
                 h.finish()
             };
             let job = match &cache {
                 Some((k, job)) if *k == key => job.clone(),
                 _ => {
-                    let pal = highlight::Palette::new(ui.visuals().dark_mode, ui.visuals().text_color());
+                    let pal = highlight::Palette::new(ui.visuals().text_color(), &crate::look::sem(ui.ctx()).syntax);
                     let job = highlight::layout(buf.as_str(), lang, &matches, current, &font, &pal);
                     cache = Some((key, job.clone()));
                     job
@@ -297,6 +303,8 @@ impl Editor {
             area = area.vertical_scroll_offset(y);
         }
         let marks = self.line_marks();
+        // As tall as the pane, so the text area reaches its bottom.
+        let fill_h = (ui.available_height() - 4.0).max(row_h * 10.0);
         area.show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 let lines = self.text.lines().count().max(1) + usize::from(self.text.ends_with('\n'));
@@ -318,7 +326,8 @@ impl Editor {
                         .code_editor()
                         .lock_focus(true)
                         .desired_width(f32::INFINITY)
-                        .desired_rows(30)
+                        .desired_rows(10)
+                        .min_size(egui::vec2(0.0, fill_h))
                         .layouter(&mut layouter),
                 );
             });
@@ -621,7 +630,7 @@ impl Editor {
                     ui.label(format!("+{} −{} lines", d.added, d.removed));
                     diff_ui(ui, d, egui::Id::new(("review-diff", self.id)));
                     ui.horizontal(|ui| {
-                        if ui.button("💾 Save").clicked() || crate::dlg::enter(ui, false) {
+                        if ui.add(crate::look::primary(ui, "💾 Save")).clicked() || crate::dlg::enter(ui, false) {
                             action = Some(EditorAction::Save { force: false, check: true });
                         }
                         if ui.button("Copy as patch").clicked() {
@@ -748,9 +757,8 @@ impl Editor {
 /// what was there before.
 fn gutter_ui(ui: &egui::Ui, (rect, resp): (egui::Rect, egui::Response), marks: &[diff::LineMark], row_h: f32) {
     use diff::MarkKind;
-    let added = Color32::from_rgb(80, 180, 90);
-    let changed = Color32::from_rgb(70, 140, 230);
-    let deleted = Color32::from_rgb(220, 70, 70);
+    let sem = crate::look::sem(ui.ctx());
+    let (added, changed, deleted) = (sem.good, sem.info, sem.bad);
     let painter = ui.painter_at(rect.expand2(egui::vec2(0.0, 4.0)));
     let y = |line: usize| rect.top() + line as f32 * row_h;
     for m in marks {
@@ -814,8 +822,8 @@ pub fn diff_ui_max(ui: &mut egui::Ui, d: &Diff, id: egui::Id, max_height: f32) {
         ui.label("No differences.");
         return;
     }
-    let add_bg = Color32::from_rgba_unmultiplied(60, 160, 60, 60);
-    let del_bg = Color32::from_rgba_unmultiplied(200, 60, 60, 60);
+    let sem = crate::look::sem(ui.ctx());
+    let (add_bg, del_bg) = (sem.add_bg, sem.del_bg);
     egui::ScrollArea::vertical().id_salt(id).max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
         for (i, h) in d.hunks.iter().enumerate() {
             if i > 0 {

@@ -77,7 +77,7 @@ fn test_ui(ui: &mut egui::Ui, slot: &TestSlot) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         return;
     };
-    let good = egui::Color32::from_rgb(0x5c, 0xb8, 0x5c);
+    let good = crate::look::sem(ui.ctx()).good;
     for s in &steps {
         let (mark, color) = match s.ok {
             Some(true) => ("OK", good),
@@ -290,7 +290,7 @@ impl WireGuardWindow {
                                 human_size(st.rx_bytes)
                             ))
                             .small()
-                            .color(egui::Color32::from_rgb(0x5c, 0xb8, 0x5c)),
+                            .color(crate::look::sem(ui.ctx()).good),
                         );
                     }
                     Some(_) => {

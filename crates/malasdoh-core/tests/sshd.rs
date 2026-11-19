@@ -1380,20 +1380,30 @@ async fn sftp_through_sudo_reaches_root_only_files() {
     }
     let work = env.scratch();
     let secret = format!("{work}/root-only");
-    conn.exec(
-        &format!("sudo mkdir -m 700 {secret} && echo top > {secret}/key && sudo chown -R root:root {secret}"),
-        None,
-    )
-    .await
-    .unwrap();
+    // Every step through sudo: run as an ordinary user (as on CI), a plain
+    // `echo > {secret}/key` could not write inside the root-only folder.
+    let made = conn
+        .exec(
+            &format!(
+                "sudo mkdir -m 700 {secret} && echo top | sudo tee {secret}/key >/dev/null \
+                 && sudo chown -R root:root {secret}"
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(made.success(), "{}", String::from_utf8_lossy(&made.stderr));
     let fs = conn.open_sftp_sudo(None).await.expect("sftp through sudo");
     let names: Vec<String> = fs.list(&secret).await.unwrap().into_iter().map(|e| e.name).collect();
     assert_eq!(names, ["key"]);
     assert_eq!(fs.read(&format!("{secret}/key"), 100).await.unwrap(), b"top\n");
     // The id the files are handled as is root's.
     fs.create_new(&format!("{secret}/new"), b"x", Some(0o600)).await.unwrap();
-    let uid = std::fs::metadata(format!("{secret}/new")).map(|m| std::os::unix::fs::MetadataExt::uid(&m)).unwrap();
-    assert_eq!(uid, 0);
+    // Asked through sudo too: the test may not be allowed to look inside.
+    let uid = conn.exec(&format!("sudo stat -c %u {secret}/new"), None).await.unwrap();
+    assert_eq!(uid.stdout, b"0\n", "{}", String::from_utf8_lossy(&uid.stderr));
+    // The scratch folder is cleaned up as the test user: hand it back.
+    conn.exec(&format!("sudo rm -rf {secret}"), None).await.unwrap();
 }
 
 #[tokio::test]

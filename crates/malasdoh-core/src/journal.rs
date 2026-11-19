@@ -293,8 +293,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let j = Journal::new(dir.path().join("journal.jsonl"));
         j.append(&entry("/old")).unwrap();
-        let f = std::fs::OpenOptions::new().append(true).open(j.path()).unwrap();
-        f.set_len(ROTATE_AT + 1).unwrap(); // pad with NULs: one unparsable line
+        // Pad with NULs: one unparsable line. Opened for writing (Windows
+        // does not let an append-only handle change the length) and closed
+        // before rotating (Windows does not rename an open file).
+        let f = std::fs::OpenOptions::new().write(true).open(j.path()).unwrap();
+        f.set_len(ROTATE_AT + 1).unwrap();
+        drop(f);
         j.append(&entry("/new")).unwrap();
         assert!(dir.path().join("journal.1.jsonl").exists());
         let all = j.read().unwrap();

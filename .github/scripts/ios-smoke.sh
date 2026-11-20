@@ -18,7 +18,9 @@ xcrun simctl boot "$udid"
 xcrun simctl bootstatus "$udid" -b
 xcrun simctl install "$udid" target/ios/simulator/MalasDoh.app
 out=$PWD/target/ios/out.log
-xcrun simctl launch --stdout="$out" --stderr="$out" "$udid" "$bundle"
+# SIMCTL_CHILD_ variables reach the app's environment.
+SIMCTL_CHILD_RUST_LOG=info SIMCTL_CHILD_RUST_BACKTRACE=1 \
+    xcrun simctl launch --stdout="$out" --stderr="$out" "$udid" "$bundle"
 sleep 20
 echo "--- output"
 tail -n 150 "$out" || true

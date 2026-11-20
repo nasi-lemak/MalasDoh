@@ -9,7 +9,9 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "malasdoh=info,malasdoh_core=info".into()),
+                // Warnings from everything: eframe reports why it could not
+                // start (and then quits) only in its log.
+                .unwrap_or_else(|_| "warn,malasdoh=info,malasdoh_core=info".into()),
         )
         .init();
 

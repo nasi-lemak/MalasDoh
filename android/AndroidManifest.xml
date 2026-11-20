@@ -15,7 +15,7 @@
         android:hasCode="false"
         android:allowBackup="false"
         android:extractNativeLibs="false"
-        android:theme="@style/AppTheme">
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <!-- configChanges: turning the device or plugging in a keyboard resizes
              the window instead of restarting the app (and its connections). -->
         <activity

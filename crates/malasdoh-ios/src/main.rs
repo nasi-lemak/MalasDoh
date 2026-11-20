@@ -66,7 +66,7 @@ impl eframe::App for Mobile {
             self.app.shutdown();
         }
         self.focused = focused;
-        self.app.frame(ui);
+        self.app.frame_in_safe_area(ui);
     }
 
     fn on_exit(&mut self) {

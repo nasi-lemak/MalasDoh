@@ -6,7 +6,9 @@
 #![cfg(target_os = "android")]
 
 use malasdoh::app::App;
-use winit::platform::android::activity::AndroidApp;
+use std::time::{Duration, Instant};
+
+use winit::platform::android::activity::{AndroidApp, Rect};
 
 /// Called by `android-activity` on the app's own thread once the activity
 /// has started.
@@ -34,7 +36,14 @@ fn android_main(android: AndroidApp) {
         "MalasDoh",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(Mobile { app: App::with_context(&cc.egui_ctx, paths), android, focused: true }))
+            Ok(Box::new(Mobile {
+                app: App::with_context(&cc.egui_ctx, paths),
+                android,
+                focused: true,
+                visible: Rect::default(),
+                keyboard: false,
+                settle_until: Instant::now() + SETTLE,
+            }))
         }),
     );
     if let Err(e) = result {
@@ -42,10 +51,21 @@ fn android_main(android: AndroidApp) {
     }
 }
 
+/// How long to keep looking for a new visible area after something that
+/// moves it (start, coming back, the keyboard showing or hiding).
+const SETTLE: Duration = Duration::from_secs(3);
+
 struct Mobile {
     app: App,
     android: AndroidApp,
     focused: bool,
+    /// The visible area last seen, to redraw when it changes.
+    visible: Rect,
+    /// Whether a text field had focus (the on-screen keyboard is up).
+    keyboard: bool,
+    /// Until when to look at the visible area again every quarter second:
+    /// Android changes it without an event that winit passes on.
+    settle_until: Instant,
 }
 
 impl eframe::App for Mobile {
@@ -69,12 +89,30 @@ impl eframe::App for Mobile {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Android may end a backgrounded app without warning, so save what
         // is open (and unsaved edits as drafts) whenever it is left.
-        let focused = ui.ctx().input(|i| i.viewport().focused.unwrap_or(true));
+        let ctx = ui.ctx().clone();
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.focused && !focused {
             self.app.shutdown();
         }
+        if focused && !self.focused {
+            self.settle_until = Instant::now() + SETTLE;
+        }
         self.focused = focused;
-        self.app.frame(ui);
+
+        self.app.frame_in_safe_area(ui);
+
+        let keyboard = ctx.egui_wants_keyboard_input();
+        if keyboard != self.keyboard {
+            self.keyboard = keyboard;
+            self.settle_until = Instant::now() + SETTLE;
+        }
+        let visible = self.android.content_rect();
+        if visible != self.visible {
+            self.visible = visible;
+            ctx.request_repaint();
+        } else if Instant::now() < self.settle_until {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

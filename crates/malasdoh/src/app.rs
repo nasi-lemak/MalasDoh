@@ -2412,6 +2412,16 @@ impl App {
         }
     }
 
+    /// [`Self::frame`] for phones and tablets: drawn inside the part of the
+    /// screen the system leaves free (egui's root covers all of it, under the
+    /// status bar and the notch too), with the rest in the panel colour.
+    pub fn frame_in_safe_area(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.painter().rect_filled(ctx.viewport_rect(), 0.0, ui.visuals().panel_fill);
+        let free = ctx.content_rect();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(free), |ui| self.frame(ui));
+    }
+
     /// One frame of the whole window, drawn into `ui` (the window's root).
     pub fn frame(&mut self, ui: &mut egui::Ui) {
         self.drain_events();

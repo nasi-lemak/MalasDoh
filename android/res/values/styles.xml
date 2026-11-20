@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- Android 15 draws apps under the status and navigation bars unless
-         they opt out; MalasDoh has no way yet to be told where the bars are
-         as they change, so it keeps its window between them. -->
-    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
-        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
-    </style>
-</resources>

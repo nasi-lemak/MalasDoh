@@ -25,3 +25,5 @@ winit = { version = "0.30", default-features = false, features = ["android-nativ
 tracing = { workspace = true, features = ["log"] }
 log = "0.4"
 android_logger = "0.15"
+# Reading the window insets from Java.
+jni = "0.21"

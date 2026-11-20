@@ -8,7 +8,7 @@
 use malasdoh::app::App;
 use std::time::{Duration, Instant};
 
-use winit::platform::android::activity::{AndroidApp, Rect};
+use winit::platform::android::activity::AndroidApp;
 
 /// Called by `android-activity` on the app's own thread once the activity
 /// has started.
@@ -40,7 +40,7 @@ fn android_main(android: AndroidApp) {
                 app: App::with_context(&cc.egui_ctx, paths),
                 android,
                 focused: true,
-                visible: Rect::default(),
+                insets: Insets::default(),
                 keyboard: false,
                 settle_until: Instant::now() + SETTLE,
             }))
@@ -51,38 +51,35 @@ fn android_main(android: AndroidApp) {
     }
 }
 
-/// How long to keep looking for a new visible area after something that
-/// moves it (start, coming back, the keyboard showing or hiding).
+/// How long to keep looking for new insets after something that moves them
+/// (start, coming back, the keyboard showing or hiding).
 const SETTLE: Duration = Duration::from_secs(3);
+
+/// Window edges covered by the status bar, the navigation bar, a display
+/// cutout or the on-screen keyboard, in pixels: left, top, right, bottom.
+type Insets = [i32; 4];
 
 struct Mobile {
     app: App,
     android: AndroidApp,
     focused: bool,
-    /// The visible area last seen, to redraw when it changes.
-    visible: Rect,
+    /// The covered edges last seen.
+    insets: Insets,
     /// Whether a text field had focus (the on-screen keyboard is up).
     keyboard: bool,
-    /// Until when to look at the visible area again every quarter second:
-    /// Android changes it without an event that winit passes on.
+    /// Until when to look at the insets again every quarter second: Android
+    /// changes them without an event that winit passes on.
     settle_until: Instant,
 }
 
 impl eframe::App for Mobile {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        // Android draws the status bar, the navigation bar and the on-screen
-        // keyboard over the window; keep the app in the part left visible.
-        let visible = self.android.content_rect();
+        // Android draws its bars and the keyboard over the window (always,
+        // from Android 15); keep the app in the part left visible.
         let ppp = ctx.pixels_per_point();
-        let screen = raw.screen_rect.unwrap_or_else(|| ctx.viewport_rect());
-        if visible.right > visible.left && visible.bottom > visible.top && ppp > 0.0 {
-            let (w, h) = (screen.width() * ppp, screen.height() * ppp);
-            raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
-                left: visible.left.max(0) as f32 / ppp,
-                top: visible.top.max(0) as f32 / ppp,
-                right: (w - visible.right as f32).max(0.0) / ppp,
-                bottom: (h - visible.bottom as f32).max(0.0) / ppp,
-            }));
+        if ppp > 0.0 {
+            let [left, top, right, bottom] = self.insets.map(|px| px.max(0) as f32 / ppp);
+            raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 { left, right, top, bottom }));
         }
     }
 
@@ -106,16 +103,67 @@ impl eframe::App for Mobile {
             self.keyboard = keyboard;
             self.settle_until = Instant::now() + SETTLE;
         }
-        let visible = self.android.content_rect();
-        if visible != self.visible {
-            self.visible = visible;
-            ctx.request_repaint();
-        } else if Instant::now() < self.settle_until {
-            ctx.request_repaint_after(Duration::from_millis(250));
+        if Instant::now() < self.settle_until {
+            match insets(&self.android) {
+                Ok(insets) if insets != self.insets => {
+                    log::info!("insets (left, top, right, bottom): {insets:?}");
+                    self.insets = insets;
+                    ctx.request_repaint();
+                }
+                Ok(_) => ctx.request_repaint_after(Duration::from_millis(250)),
+                Err(e) => {
+                    log::warn!("could not read the window insets: {e}");
+                    self.settle_until = Instant::now();
+                }
+            }
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.app.shutdown();
     }
+}
+
+/// The window's insets, from Java: `getWindow().getDecorView()
+/// .getRootWindowInsets()`, for the system bars, the display cutout and the
+/// keyboard (Android 11+), or the older system-window insets (Android 8-10).
+fn insets(android: &AndroidApp) -> Result<Insets, jni::errors::Error> {
+    use jni::objects::{JObject, JValue};
+
+    // SAFETY: android-activity keeps the VM and the activity alive for as long
+    // as the app runs; the activity is a global reference we only borrow.
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm_as_ptr().cast()) }?;
+    let mut env = vm.attach_current_thread_permanently()?;
+    let activity = unsafe { JObject::from_raw(android.activity_as_ptr().cast()) };
+    let result = env.with_local_frame(16, |env| -> Result<Insets, jni::errors::Error> {
+        let window = env.call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
+        let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
+        let all = env.call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?.l()?;
+        if all.is_null() {
+            // Not attached to a window yet.
+            return Ok(Insets::default());
+        }
+        if AndroidApp::sdk_version() >= 30 {
+            let mut types = 0;
+            for t in ["systemBars", "displayCutout", "ime"] {
+                types |= env.call_static_method("android/view/WindowInsets$Type", t, "()I", &[])?.i()?;
+            }
+            let i = env.call_method(&all, "getInsets", "(I)Landroid/graphics/Insets;", &[JValue::Int(types)])?.l()?;
+            let mut edge = |name: &str| env.get_field(&i, name, "I").and_then(|v| v.i());
+            Ok([edge("left")?, edge("top")?, edge("right")?, edge("bottom")?])
+        } else {
+            let mut edge = |name: &str| env.call_method(&all, name, "()I", &[]).and_then(|v| v.i());
+            Ok([
+                edge("getSystemWindowInsetLeft")?,
+                edge("getSystemWindowInsetTop")?,
+                edge("getSystemWindowInsetRight")?,
+                edge("getSystemWindowInsetBottom")?,
+            ])
+        }
+    });
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result
 }

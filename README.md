@@ -343,7 +343,9 @@ cargo build --release
 Linux needs the usual desktop libraries at run time (X11 or Wayland, OpenGL,
 `libxkbcommon`); every desktop distribution has them.
 
-HarmonyOS (PCs and tablets, early): see [docs/harmonyos.md](docs/harmonyos.md).
+Phones and tablets, all early: [Android](docs/android.md),
+[iPhone and iPad](docs/ios.md), [HarmonyOS](docs/harmonyos.md) (PCs and
+tablets).
 
 ## Where things are kept
 
@@ -372,6 +374,10 @@ them.
   library and the desktop program.
 - `crates/malasdoh-ohos` and `ohos/`: the HarmonyOS native module and the
   DevEco Studio project that loads it.
+- `crates/malasdoh-android` and `android/`: the Android native library and
+  the APK's manifest, icon and build script.
+- `crates/malasdoh-ios` and `ios/`: the iOS program and the app bundle's
+  Info.plist, icons and build script.
 
 ## Tests
 

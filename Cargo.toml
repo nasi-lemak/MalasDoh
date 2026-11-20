@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/malasdoh-core", "crates/malasdoh", "crates/malasdoh-ohos"]
+members = ["crates/malasdoh-core", "crates/malasdoh", "crates/malasdoh-ohos", "crates/malasdoh-android", "crates/malasdoh-ios"]
 
 [workspace.package]
 version = "0.2.0"
@@ -25,7 +25,7 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
 tempfile = "3"
 hmac = "0.12"
 sha1 = "0.10"

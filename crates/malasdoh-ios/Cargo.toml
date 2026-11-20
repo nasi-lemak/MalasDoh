@@ -1,0 +1,24 @@
+[package]
+name = "malasdoh-ios"
+description = "MalasDoh on iOS and iPadOS: the app's program, which ios/build-app.sh puts in an app bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "MalasDoh"
+path = "src/main.rs"
+
+# Only built for iOS; elsewhere the program just says so, so
+# `cargo build --workspace` keeps working on the desktop.
+[target.'cfg(target_os = "ios")'.dependencies]
+malasdoh = { path = "../malasdoh", default-features = false }
+malasdoh-core.workspace = true
+egui.workspace = true
+# Metal, through wgpu: iOS has no OpenGL that eframe can use.
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

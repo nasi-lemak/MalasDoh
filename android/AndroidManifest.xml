@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The whole app is the Rust library libmalasdoh_android.so
+     (crates/malasdoh-android), run by Android's own NativeActivity: there is
+     no Java or Kotlin code. build-apk.sh sets the version and
+     SDK levels. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.nasi_lemak.malasdoh">
+    <!-- SSH connections. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- allowBackup: profiles and known hosts stay on the device. -->
+    <application
+        android:label="MalasDoh"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="false"
+        android:allowBackup="false"
+        android:extractNativeLibs="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        <!-- configChanges: turning the device or plugging in a keyboard resizes
+             the window instead of restarting the app (and its connections). -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|fontScale">
+            <meta-data android:name="android.app.lib_name" android:value="malasdoh_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -309,18 +309,27 @@ struct ProfileForm {
 }
 
 impl App {
+    /// The app in eframe's desktop window.
+    #[cfg(feature = "desktop")]
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
+        Self::with_context(&cc.egui_ctx, paths)
+    }
+
+    /// The app drawing into `ctx`, for any window system: eframe on the
+    /// desktop, or a platform's own (HarmonyOS). Call [`App::frame`] each
+    /// frame and [`App::shutdown`] before it goes away.
+    pub fn with_context(egui_ctx: &egui::Context, paths: AppPaths) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .thread_name("malasdoh-net")
             .build()
             .expect("tokio runtime");
-        let (events, rx) = Events::new(cc.egui_ctx.clone());
+        let (events, rx) = Events::new(egui_ctx.clone());
         let settings = Settings::load(&paths.settings_file());
         let (themes, theme_errors) = crate::look::load_all(&paths.themes_dir());
-        crate::look::apply(&cc.egui_ctx, &themes, &look_choice(&settings));
-        let font_error = apply_fonts(&cc.egui_ctx, &settings.mono_font_file).err();
+        crate::look::apply(egui_ctx, &themes, &look_choice(&settings));
+        let font_error = apply_fonts(egui_ctx, &settings.mono_font_file).err();
         let mut toast = font_error.map(|e| (format!("Could not use the terminal font: {e}"), true, Instant::now()));
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_else(|e| {
             toast = Some((format!("Could not read saved connections: {e:#}"), true, Instant::now()));
@@ -644,7 +653,7 @@ impl App {
                     ui.close();
                 }
                 if ui.button("Import a WinSCP.ini file…").clicked() {
-                    if let Some(f) = rfd::FileDialog::new().add_filter("WinSCP.ini", &["ini"]).pick_file() {
+                    if let Some(f) = crate::dialogs::FileDialog::new().add_filter("WinSCP.ini", &["ini"]).pick_file() {
                         let found = std::fs::read_to_string(&f)
                             .map(|t| malasdoh_core::import::parse_winscp_ini(&t))
                             .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()));
@@ -1688,7 +1697,7 @@ impl App {
                                 );
                                 if ui.button("Browse…").clicked()
                                     && let Some(f) =
-                                        rfd::FileDialog::new().set_title("Choose a private key").pick_file()
+                                        crate::dialogs::FileDialog::new().set_title("Choose a private key").pick_file()
                                 {
                                     *path = f.display().to_string();
                                 }
@@ -2383,15 +2392,28 @@ fn apply_fonts(ctx: &egui::Context, file: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.frame(ui);
+    }
+}
+
+impl App {
+    /// Remember what is open, and keep unsaved edits as drafts.
+    pub fn shutdown(&mut self) {
         self.persist_session();
         for s in &mut self.sessions {
             s.autosave_drafts(&self.shared);
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// One frame of the whole window, drawn into `ui` (the window's root).
+    pub fn frame(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
         let ctx = ui.ctx().clone();
 

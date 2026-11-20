@@ -167,7 +167,7 @@ impl WireGuardWindow {
                     }
                 }
                 if ui.button("Replace from a .conf file…").clicked()
-                    && let Some(f) = rfd::FileDialog::new()
+                    && let Some(f) = crate::dialogs::FileDialog::new()
                         .add_filter("WireGuard", &["conf"])
                         .set_title("WireGuard configuration")
                         .pick_file()
@@ -340,7 +340,7 @@ impl WireGuardWindow {
                 ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("e.g. office").desired_width(160.0));
                 if ui.button("Open a .conf file…").clicked()
                     && let Some(f) =
-                        rfd::FileDialog::new().add_filter("WireGuard", &["conf"]).set_title("WireGuard configuration").pick_file()
+                        crate::dialogs::FileDialog::new().add_filter("WireGuard", &["conf"]).set_title("WireGuard configuration").pick_file()
                 {
                     match std::fs::read_to_string(&f) {
                         Ok(t) => {

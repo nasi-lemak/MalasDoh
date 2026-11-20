@@ -48,6 +48,21 @@ enum Dialog {
     },
 }
 
+/// Move `paths` to the bin; what went wrong, if anything.
+#[cfg(feature = "desktop")]
+fn to_bin(paths: &[PathBuf]) -> Vec<String> {
+    match trash::delete_all(paths) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!("Cannot move to the {BIN}: {e}")],
+    }
+}
+
+/// No bin here: the dialog then offers to delete for good.
+#[cfg(not(feature = "desktop"))]
+fn to_bin(_paths: &[PathBuf]) -> Vec<String> {
+    vec![format!("There is no {BIN} on this system")]
+}
+
 /// Where deleted files go, in this system's words.
 #[cfg(windows)]
 const BIN: &str = "Recycle Bin";
@@ -248,10 +263,7 @@ impl LocalBrowser {
                     })
                     .collect()
             } else {
-                match trash::delete_all(&paths) {
-                    Ok(()) => Vec::new(),
-                    Err(e) => vec![format!("Cannot move to the {BIN}: {e}")],
-                }
+                to_bin(&paths)
             };
             *slot.lock().unwrap() = Some(errors);
         });

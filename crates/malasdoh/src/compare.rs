@@ -359,7 +359,7 @@ impl Compares {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut p.local).desired_width(400.0));
                         if ui.button("Browse…").clicked()
-                            && let Some(f) = rfd::FileDialog::new().set_title("Compare with").pick_file()
+                            && let Some(f) = crate::dialogs::FileDialog::new().set_title("Compare with").pick_file()
                         {
                             p.local = f.display().to_string();
                         }

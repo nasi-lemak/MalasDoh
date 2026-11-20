@@ -34,7 +34,7 @@ impl App {
     }
 
     pub(super) fn start_import(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = crate::dialogs::FileDialog::new()
             .set_title("Import a MalasDoh export")
             .add_filter("MalasDoh export", &["malasdoh"])
             .pick_file()
@@ -99,7 +99,7 @@ impl App {
                     .then(|| std::fs::read_to_string(self.shared.paths.known_hosts_file()).unwrap_or_default()),
             };
             let result = export::seal(&bundle, &d.pass).and_then(|text| {
-                let Some(path) = rfd::FileDialog::new()
+                let Some(path) = crate::dialogs::FileDialog::new()
                     .set_title("Save the export")
                     .set_file_name("connections.malasdoh")
                     .save_file()

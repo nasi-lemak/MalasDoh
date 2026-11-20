@@ -100,7 +100,8 @@ impl SyncWindow {
                                     .hint_text("C:\\site or ~/site"),
                             );
                             if ui.button("Browse…").clicked()
-                                && let Some(d) = rfd::FileDialog::new().set_title("Local folder").pick_folder()
+                                && let Some(d) =
+                                    crate::dialogs::FileDialog::new().set_title("Local folder").pick_folder()
                             {
                                 self.local = d.display().to_string();
                             }

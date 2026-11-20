@@ -2,39 +2,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
-mod bridge;
-mod browser;
-mod compare;
-mod dlg;
-mod editor;
-mod find_ui;
-mod forwards;
-mod highlight;
-mod journal_ui;
-mod keys_ui;
-mod listsel;
-mod local;
-mod logview;
-mod look;
-mod multiedit;
-mod multirun;
-mod patch_ui;
-mod queue;
-mod rdp_ui;
-mod replace_ui;
-mod restore;
-mod session;
-mod settings;
-mod shortcut;
-mod snippets;
-mod sudo;
-mod sync_ui;
-mod teleport_ui;
-mod terminal;
-mod textops;
-mod themes;
-mod wireguard_ui;
+use malasdoh::app;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()

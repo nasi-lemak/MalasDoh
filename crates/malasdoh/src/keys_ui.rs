@@ -202,7 +202,8 @@ impl KeysWindow {
                         ui.horizontal(|ui| {
                             ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
                             if ui.button("Browse…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().set_title("Save the new key as").save_file()
+                                && let Some(p) =
+                                    crate::dialogs::FileDialog::new().set_title("Save the new key as").save_file()
                             {
                                 self.path = p.display().to_string();
                             }
@@ -288,7 +289,8 @@ impl KeysWindow {
                                 },
                             );
                             if ui.button("Browse…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().set_title("Key to install").pick_file()
+                                && let Some(p) =
+                                    crate::dialogs::FileDialog::new().set_title("Key to install").pick_file()
                             {
                                 self.install_key = p.display().to_string();
                             }

@@ -1,0 +1,10 @@
+/.hvigor
+/.idea
+/build
+/oh_modules
+/local.properties
+/entry/build
+/entry/oh_modules
+/entry/.preview
+# Built by build-native.sh, not kept in git.
+/entry/libs/arm64-v8a/*.so

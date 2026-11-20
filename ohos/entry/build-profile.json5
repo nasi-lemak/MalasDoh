@@ -1,0 +1,19 @@
+{
+  "apiType": "stageMode",
+  // No C++ to build here: the native module is Rust, built by ../build-native.sh
+  // into libs/arm64-v8a/, which DevEco Studio packs into the app as it is.
+  "buildOption": {},
+  "buildOptionSet": [
+    {
+      "name": "release",
+      "arkOptions": {
+        "obfuscation": {
+          "ruleOptions": { "enable": false }
+        }
+      }
+    }
+  ],
+  "targets": [
+    { "name": "default" }
+  ]
+}

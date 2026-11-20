@@ -1,0 +1,33 @@
+[package]
+name = "malasdoh-ohos"
+description = "MalasDoh on HarmonyOS: the native module an ArkTS app loads to show it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "malasdoh_ohos"
+crate-type = ["cdylib"]
+
+# Only built for HarmonyOS / OpenHarmony; elsewhere this is an empty library,
+# so `cargo build --workspace` keeps working on the desktop.
+[target.'cfg(target_env = "ohos")'.dependencies]
+malasdoh = { path = "../malasdoh", default-features = false }
+malasdoh-core.workspace = true
+egui.workspace = true
+egui_glow = "0.36"
+glow = "0.17"
+khronos-egl = { version = "6", features = ["static", "no-pkg-config"] }
+openharmony-ability = { version = "=1.0.0-beta.5", features = ["keyboard"] }
+openharmony-ability-derive = "=1.0.0-beta.5"
+napi-ohos = "1.2"
+napi-derive-ohos = "1.2"
+tracing.workspace = true
+# The #[ability] macro logs through `log`.
+log = "0.4"
+
+[build-dependencies]
+napi-build-ohos = "1.2"

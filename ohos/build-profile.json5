@@ -1,0 +1,37 @@
+{
+  "app": {
+    // DevEco Studio fills these in: File > Project Structure > Signing Configs,
+    // "Automatically generate signature". Keep your keys out of git.
+    "signingConfigs": [],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        // The native module is built against API 12 and newer interfaces.
+        // Raise targetSdkVersion to the newest SDK your DevEco Studio has.
+        "compatibleSdkVersion": "5.0.0(12)",
+        "targetSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      { "name": "debug" },
+      { "name": "release" }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        { "name": "default", "applyToProducts": ["default"] }
+      ]
+    }
+  ]
+}

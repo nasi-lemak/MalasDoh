@@ -46,6 +46,23 @@ fn android_main(android: AndroidApp) {
         })
     });
 
+    let sharer = android.clone();
+    malasdoh::share::set_sharer(move |path| {
+        with_activity(&sharer, |env, activity| {
+            let path = env.new_string(path.to_string_lossy())?;
+            let why = env.call_method(
+                activity,
+                "shareFile",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[JValue::Object(&path)],
+            )?;
+            let why = why.l()?;
+            if why.is_null() { Ok(None) } else { Ok(Some(env.get_string(&JString::from(why))?.into())) }
+        })
+        .map_err(|e| e.to_string())
+        .and_then(|why: Option<String>| why.map_or(Ok(()), Err))
+    });
+
     let picker = android.clone();
     malasdoh::dialogs::set_platform(malasdoh::dialogs::Platform {
         pick: Box::new(move |id, multiple| {

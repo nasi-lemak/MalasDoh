@@ -404,8 +404,18 @@ impl LocalBrowser {
     pub fn ui(&mut self, ui: &mut egui::Ui, session: crate::bridge::SessionId) -> Vec<LocalAction> {
         let mut actions = Vec::new();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("This computer").strong());
+            let here = if crate::share::available() { "This device" } else { "This computer" };
+            ui.label(RichText::new(here).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Phones: one file selected can go to another app.
+                if crate::share::available()
+                    && let [one] = self.sel.selected.as_slice()
+                    && one.is_file()
+                    && ui.button("Share…").on_hover_text("Send it to another app").clicked()
+                    && let Err(e) = crate::share::share(one)
+                {
+                    self.error = Some(format!("Could not share {}: {e}", one.display()));
+                }
                 if !self.sel.selected.is_empty()
                     && ui.button("Upload ⏵").on_hover_text("Upload the selected items to the server folder").clicked()
                 {
@@ -594,6 +604,13 @@ impl LocalBrowser {
                     }
                     if ui.button("Upload").clicked() {
                         actions.push(LocalAction::Upload(self.sel.selected.clone()));
+                        ui.close();
+                    }
+                    // Phones: hand the file to another app (mail, a viewer…).
+                    if !is_dir && n == 1 && crate::share::available() && ui.button("Share…").clicked() {
+                        if let Err(e) = crate::share::share(&path) {
+                            self.error = Some(format!("Could not share {}: {e}", path.display()));
+                        }
                         ui.close();
                     }
                     if ui.add(egui::Button::new("Copy path").shortcut_text("Ctrl+C")).clicked() {

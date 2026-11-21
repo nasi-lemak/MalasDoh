@@ -33,6 +33,7 @@ pub fn main() {
         // (UIFileSharingEnabled in Info.plist).
         documents: home.join("Documents"),
     });
+    malasdoh::share::set_sharer(share_file);
     malasdoh::clipboard::set_reader(|| {
         // SAFETY: UIPasteboard may be used from any thread.
         unsafe { UIPasteboard::generalPasteboard().string() }.map(|s| s.to_string())
@@ -290,4 +291,41 @@ fn pick_files(id: &'static str, multiple: bool) {
     };
     root.presentViewController_animated_completion(&picker, true, None);
     DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
+}
+
+/// UIKit's share sheet for a file (called on the main thread).
+fn share_file(path: &std::path::Path) -> Result<(), String> {
+    use objc2::MainThreadOnly as _;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_ui_kit::{UIActivityViewController, UIApplication};
+
+    let mtm = objc2::MainThreadMarker::new().ok_or("not on the main thread")?;
+    #[allow(deprecated)] // One window: the key window is the app's.
+    let root = UIApplication::sharedApplication(mtm)
+        .keyWindow()
+        .and_then(|w| w.rootViewController())
+        .ok_or("no window to show it over")?;
+    let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    let items = objc2_foundation::NSArray::from_retained_slice(&[Retained::into_super(Retained::into_super(url))]);
+    // SAFETY: an array of one file URL, which the share sheet accepts.
+    let sheet = unsafe {
+        UIActivityViewController::initWithActivityItems_applicationActivities(
+            UIActivityViewController::alloc(mtm),
+            &items,
+            None,
+        )
+    };
+    // On an iPad it opens as a popover, which needs somewhere to point to.
+    if let Some(popover) = sheet.popoverPresentationController()
+        && let Some(view) = root.view()
+    {
+        let b = view.bounds();
+        popover.setSourceView(Some(&view));
+        popover.setSourceRect(CGRect {
+            origin: CGPoint { x: b.size.width / 2.0, y: b.size.height / 2.0 },
+            size: CGSize { width: 1.0, height: 1.0 },
+        });
+    }
+    root.presentViewController_animated_completion(&sheet, true, None);
+    Ok(())
 }

@@ -140,6 +140,25 @@ public class MainActivity extends NativeActivity {
         });
     }
 
+    /** Called from Rust: hand a file to another app. Returns why not, or null. */
+    public String shareFile(final String path) {
+        final Uri uri;
+        try {
+            uri = FilesProvider.uriFor(this, new File(path));
+        } catch (java.io.IOException e) {
+            return e.getMessage();
+        }
+        runOnUiThread(() -> {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType(getContentResolver().getType(uri));
+            send.putExtra(Intent.EXTRA_STREAM, uri);
+            send.setClipData(ClipData.newRawUri(new File(path).getName(), uri));
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(send, null));
+        });
+        return null;
+    }
+
     /** Called from Rust: open the system's file picker. */
     public void pickFiles(final String id, final boolean multiple) {
         runOnUiThread(() -> {

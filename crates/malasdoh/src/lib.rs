@@ -28,6 +28,7 @@ mod replace_ui;
 mod restore;
 mod session;
 mod settings;
+pub mod share;
 mod shortcut;
 mod snippets;
 mod sudo;

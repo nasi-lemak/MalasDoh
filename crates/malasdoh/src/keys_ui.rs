@@ -1,6 +1,7 @@
 //! Tools → SSH keys: keys pasted into MalasDoh (from a password manager,
 //! say), making a key, and putting one on a server.
 
+use crate::dlg::FitScreen as _;
 use std::path::PathBuf;
 
 use egui::RichText;
@@ -188,8 +189,12 @@ impl KeysWindow {
             return out;
         }
         let mut open = self.open;
-        let shown =
-            egui::Window::new("SSH keys").open(&mut open).resizable(false).default_width(560.0).show(ctx, |ui| {
+        let shown = egui::Window::new("SSH keys")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(560.0)
+            .fit_to_screen(ctx)
+            .show(ctx, |ui| {
                 // As tall as the screen allows before it scrolls, so "Put on a
                 // server" can be seen filling in the section below.
                 let tall = ui.ctx().content_rect().height() - 120.0;
@@ -200,16 +205,26 @@ impl KeysWindow {
                     egui::Grid::new("keygen").num_columns(2).show(ui, |ui| {
                         ui.label("Save as");
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(360.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.path)
+                                    .desired_width(crate::dlg::field_width(ui, 360.0)),
+                            );
                             if ui.button("Browse…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().set_title("Save the new key as").save_file()
+                                && let Some(p) = crate::dialogs::FileDialog::new()
+                                    .id("key-save")
+                                    .set_file_name("id_ed25519")
+                                    .set_title("Save the new key as")
+                                    .save_file()
                             {
                                 self.path = p.display().to_string();
                             }
                         });
                         ui.end_row();
                         ui.label("Comment");
-                        ui.add(egui::TextEdit::singleline(&mut self.comment).desired_width(360.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.comment)
+                                .desired_width(crate::dlg::field_width(ui, 360.0)),
+                        );
                         ui.end_row();
                         ui.label("Passphrase");
                         ui.add(egui::TextEdit::singleline(&mut self.pass).password(true).desired_width(240.0))
@@ -275,7 +290,10 @@ impl KeysWindow {
                     egui::Grid::new("keyinstall").num_columns(2).show(ui, |ui| {
                         ui.label("Key");
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.install_key).desired_width(300.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.install_key)
+                                    .desired_width(300f32.min((ui.available_width() - 160.0).max(120.0))),
+                            );
                             egui::ComboBox::from_id_salt("known-keys").selected_text("…").width(30.0).show_ui(
                                 ui,
                                 |ui| {
@@ -287,8 +305,11 @@ impl KeysWindow {
                                     }
                                 },
                             );
-                            if ui.button("Browse…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().set_title("Key to install").pick_file()
+                            if (ui.button("Browse…").clicked() || crate::dialogs::ready("key-install"))
+                                && let Some(p) = crate::dialogs::FileDialog::new()
+                                    .id("key-install")
+                                    .set_title("Key to install")
+                                    .pick_file()
                             {
                                 self.install_key = p.display().to_string();
                             }
@@ -514,7 +535,7 @@ impl KeysWindow {
                         .font(egui::TextStyle::Monospace)
                         .password(!f.show)
                         .desired_rows(5)
-                        .desired_width(400.0)
+                        .desired_width(crate::dlg::field_width(ui, 400.0))
                         .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----\n…"),
                 );
                 ui.checkbox(&mut f.show, "Show");
@@ -529,7 +550,7 @@ impl KeysWindow {
             ui.add(
                 egui::TextEdit::singleline(&mut f.certificate)
                     .hint_text("optional: ssh-ed25519-cert-v01@openssh.com AAAA…")
-                    .desired_width(400.0),
+                    .desired_width(crate::dlg::field_width(ui, 400.0)),
             );
             ui.end_row();
         });

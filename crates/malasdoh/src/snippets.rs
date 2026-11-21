@@ -138,7 +138,7 @@ pub fn menu(ui: &mut egui::Ui, store: &SnippetStore, allow_terminal: bool) -> Op
             });
         });
     };
-    ui.set_min_width(340.0);
+    ui.set_min_width(crate::dlg::at_most(ui, 340.0));
     for folder in store.folders() {
         let items: Vec<&Snippet> = store.snippets.iter().filter(|s| s.folder == folder).collect();
         if folder.is_empty() {
@@ -147,7 +147,7 @@ pub fn menu(ui: &mut egui::Ui, store: &SnippetStore, allow_terminal: bool) -> Op
             }
         } else {
             ui.menu_button(&folder, |ui| {
-                ui.set_min_width(340.0);
+                ui.set_min_width(crate::dlg::at_most(ui, 340.0));
                 for sn in items {
                     row(ui, sn);
                 }
@@ -165,7 +165,38 @@ pub fn manager_ui(ui: &mut egui::Ui, store: &mut SnippetStore) -> bool {
     let before = store.clone();
     ui.label("Use {{name}} for a value asked for each time, e.g. systemctl restart {{service}}.");
     let mut remove = None;
-    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+    let narrow = crate::dlg::narrow(ui.ctx());
+    egui::ScrollArea::vertical().max_height(if narrow { f32::INFINITY } else { 420.0 }).show(ui, |ui| {
+        if narrow {
+            // A phone: each snippet's fields one under the other.
+            for (i, sn) in store.snippets.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut sn.name)
+                                .hint_text("Name")
+                                .desired_width(crate::dlg::field_width(ui, 400.0)),
+                        );
+                        if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut sn.folder)
+                            .hint_text("Folder")
+                            .desired_width(crate::dlg::field_width(ui, 400.0)),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut sn.command)
+                            .hint_text("Command")
+                            .desired_rows(1)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                });
+            }
+            return;
+        }
         egui::Grid::new("snippet-grid").striped(true).num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
             for h in ["Folder", "Name", "Command", ""] {
                 ui.label(RichText::new(h).strong());
@@ -175,7 +206,9 @@ pub fn manager_ui(ui: &mut egui::Ui, store: &mut SnippetStore) -> bool {
                 ui.add(egui::TextEdit::singleline(&mut sn.folder).desired_width(100.0));
                 ui.add(egui::TextEdit::singleline(&mut sn.name).desired_width(160.0));
                 ui.add(
-                    egui::TextEdit::singleline(&mut sn.command).desired_width(380.0).font(egui::TextStyle::Monospace),
+                    egui::TextEdit::singleline(&mut sn.command)
+                        .desired_width(crate::dlg::field_width(ui, 380.0))
+                        .font(egui::TextStyle::Monospace),
                 );
                 if ui.small_button("✖").clicked() {
                     remove = Some(i);

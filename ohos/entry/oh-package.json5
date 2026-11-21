@@ -1,0 +1,13 @@
+{
+  "name": "entry",
+  "version": "0.2.0",
+  "description": "MalasDoh: SSH client, file browser and safe editor",
+  "main": "",
+  "author": "",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    // Must be the same version as the openharmony-ability crate in
+    // crates/malasdoh-ohos/Cargo.toml: the two halves talk to each other.
+    "@ohos-rs/ability": "1.0.0-beta.5"
+  }
+}

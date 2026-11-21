@@ -2,6 +2,7 @@
 //! with what differs, the changes of a text file side by side, and a tick
 //! for each.
 
+use crate::dlg::FitScreen as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -75,6 +76,7 @@ impl Review {
             .default_width(760.0)
             .default_height(560.0)
             .collapsible(false)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 ui.label(
                     RichText::new(format!("{} file(s) are already in {}", self.replaced.len(), self.place)).strong(),

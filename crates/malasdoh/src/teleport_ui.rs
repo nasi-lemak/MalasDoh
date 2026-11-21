@@ -1,6 +1,7 @@
 //! The Teleport window: add a cluster, log in with a password and an
 //! authenticator code, find its servers and add them as connections.
 
+use crate::dlg::FitScreen as _;
 use std::collections::BTreeSet;
 
 use egui::RichText;
@@ -242,8 +243,12 @@ impl TeleportWindow {
             return actions;
         }
         let mut open = true;
-        let shown =
-            egui::Window::new("Teleport").open(&mut open).default_width(640.0).default_height(520.0).show(ctx, |ui| {
+        let shown = egui::Window::new("Teleport")
+            .open(&mut open)
+            .default_width(640.0)
+            .default_height(520.0)
+            .fit_to_screen(ctx)
+            .show(ctx, |ui| {
                 ui.label(
                     RichText::new(
                         "Log in to a Teleport cluster with your password and authenticator code, then use its servers \
@@ -310,7 +315,11 @@ impl TeleportWindow {
         egui::Grid::new("tp-add").num_columns(2).show(ui, |ui| {
             ui.label("Address");
             if ui
-                .add(egui::TextEdit::singleline(&mut f.address).hint_text("teleport.example.com").desired_width(300.0))
+                .add(
+                    egui::TextEdit::singleline(&mut f.address)
+                        .hint_text("teleport.example.com")
+                        .desired_width(crate::dlg::field_width(ui, 300.0)),
+                )
                 .changed()
             {
                 f.checked = None;

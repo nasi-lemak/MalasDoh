@@ -1,10 +1,12 @@
 //! The main window: connection list, session tabs, and the dialogs that answer
 //! a connection's questions.
 
+use crate::dlg::FitScreen as _;
 use crate::listsel::KeyAction;
 
 mod appearance;
 mod backup;
+mod compact;
 mod keys;
 mod rdp;
 mod shortcuts;
@@ -63,6 +65,16 @@ pub struct App {
     multi: MultiRun,
     multi_edit: MultiEdit,
     show_sidebar: bool,
+    /// The window is narrow (a phone): one thing at a time, not side by side.
+    compact: bool,
+    /// Text for the field with this id, from the touch-screen Paste button.
+    paste_into: Option<(egui::Id, String)>,
+    /// Locked (phones, with the setting on): only the lock screen shows.
+    locked: bool,
+    /// The system's unlock prompt is up.
+    unlock_asked: bool,
+    /// When the app went to the background.
+    away_since: Option<Instant>,
     /// The list of keyboard shortcuts (F1).
     show_keys_help: bool,
     /// Built-in themes, then those from the themes folder.
@@ -187,7 +199,11 @@ fn transfers_ui(ui: &mut egui::Ui, t: &mut malasdoh_core::transfer::TransferOpti
     ui.add_space(6.0);
     ui.label("Leave out of folder transfers (names or patterns, separated by commas):");
     if ui
-        .add(egui::TextEdit::singleline(skip_text).hint_text(".git, node_modules, *.tmp").desired_width(420.0))
+        .add(
+            egui::TextEdit::singleline(skip_text)
+                .hint_text(".git, node_modules, *.tmp")
+                .desired_width(crate::dlg::field_width(ui, 420.0)),
+        )
         .changed()
     {
         t.skip = skip_text.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -236,7 +252,11 @@ fn checks_ui(ui: &mut egui::Ui, rules: &mut Vec<ValidationRule>) {
                         .desired_width(170.0)
                         .hint_text("/etc/nginx/** or *.json"),
                 );
-                ui.add(egui::TextEdit::singleline(&mut r.check).desired_width(250.0).font(egui::TextStyle::Monospace));
+                ui.add(
+                    egui::TextEdit::singleline(&mut r.check)
+                        .desired_width(crate::dlg::field_width(ui, 250.0))
+                        .font(egui::TextStyle::Monospace),
+                );
                 egui::ComboBox::from_id_salt(("when", i))
                     .width(70.0)
                     .selected_text(match r.when {
@@ -306,21 +326,32 @@ struct ProfileForm {
     error: Option<String>,
     forget_password: bool,
     forget_sudo: bool,
+    /// Just opened: the cursor goes to Name (on a phone, with the keyboard).
+    focus_name: bool,
 }
 
 impl App {
+    /// The app in eframe's desktop window.
+    #[cfg(feature = "desktop")]
     pub fn new(cc: &eframe::CreationContext<'_>, paths: AppPaths) -> Self {
+        Self::with_context(&cc.egui_ctx, paths)
+    }
+
+    /// The app drawing into `ctx`, for any window system: eframe on the
+    /// desktop, or a platform's own (HarmonyOS). Call [`App::frame`] each
+    /// frame and [`App::shutdown`] before it goes away.
+    pub fn with_context(egui_ctx: &egui::Context, paths: AppPaths) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .thread_name("malasdoh-net")
             .build()
             .expect("tokio runtime");
-        let (events, rx) = Events::new(cc.egui_ctx.clone());
+        let (events, rx) = Events::new(egui_ctx.clone());
         let settings = Settings::load(&paths.settings_file());
         let (themes, theme_errors) = crate::look::load_all(&paths.themes_dir());
-        crate::look::apply(&cc.egui_ctx, &themes, &look_choice(&settings));
-        let font_error = apply_fonts(&cc.egui_ctx, &settings.mono_font_file).err();
+        crate::look::apply(egui_ctx, &themes, &look_choice(&settings));
+        let font_error = apply_fonts(egui_ctx, &settings.mono_font_file).err();
         let mut toast = font_error.map(|e| (format!("Could not use the terminal font: {e}"), true, Instant::now()));
         let profiles = ProfileStore::load(&paths.profiles_file()).unwrap_or_else(|e| {
             toast = Some((format!("Could not read saved connections: {e:#}"), true, Instant::now()));
@@ -375,6 +406,11 @@ impl App {
             multi: MultiRun::default(),
             multi_edit: MultiEdit::default(),
             show_sidebar: true,
+            compact: false,
+            paste_into: None,
+            locked: false,
+            unlock_asked: false,
+            away_since: None,
             show_keys_help: false,
             themes,
             theme_errors,
@@ -407,6 +443,8 @@ impl App {
         if app.settings.reopen_on_start {
             app.reopen_last();
         }
+        // Phones with the app lock on: locked from the start.
+        app.locked = app.settings.app_lock && crate::lock::available();
         app
     }
 
@@ -643,8 +681,12 @@ impl App {
                     self.add_imported(found, "WinSCP");
                     ui.close();
                 }
-                if ui.button("Import a WinSCP.ini file…").clicked() {
-                    if let Some(f) = rfd::FileDialog::new().add_filter("WinSCP.ini", &["ini"]).pick_file() {
+                if ui.button("Import a WinSCP.ini file…").clicked() || crate::dialogs::ready("winscp-ini") {
+                    if let Some(f) = crate::dialogs::FileDialog::new()
+                        .id("winscp-ini")
+                        .add_filter("WinSCP.ini", &["ini"])
+                        .pick_file()
+                    {
                         let found = std::fs::read_to_string(&f)
                             .map(|t| malasdoh_core::import::parse_winscp_ini(&t))
                             .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()));
@@ -906,7 +948,9 @@ impl App {
                             self.side_sel.only(&p.id);
                             self.side_sel.focused = true;
                         }
-                        if r.double_clicked() {
+                        // A touch screen has no double click: a tap opens it (a long
+                        // press shows the menu).
+                        if r.double_clicked() || (r.clicked() && crate::look::is_touch(ui.ctx())) {
                             connect = Some(p.id);
                         }
                         if self.side_scroll == Some(p.id) {
@@ -1012,6 +1056,10 @@ impl App {
         let mut forget = false;
         let s = &mut self.sessions[idx];
         s.check_alive();
+        // Files picked for an upload (on phones, the picker answers later).
+        if crate::dialogs::ready(crate::session::UPLOAD_ID) {
+            s.browser_action(crate::browser::Action::UploadPick, &shared);
+        }
         s.poll_external(&shared, &settings);
 
         // Connection status bar.
@@ -1060,187 +1108,229 @@ impl App {
             return;
         }
 
-        if s.local.is_some() {
-            egui::Panel::left(egui::Id::new(("local", s.id))).resizable(true).default_size(300.0).show(ui, |ui| {
-                s.local_ui(ui, &shared);
+        let compact = self.compact;
+        let mut chosen_snippet = None;
+        if compact {
+            // A phone: the server's files, this device's and the terminals
+            // take turns.
+            use crate::session::CompactView as V;
+            if s.local.is_none() && s.compact_view == V::Local {
+                s.compact_view = V::Files;
+            }
+            s.split = None;
+            // A file that opened (it arrives a moment after the tap): show it.
+            if s.active != s.compact_seen {
+                if matches!(s.active, Some(Pane::Editor(_))) {
+                    s.compact_view = V::Panes;
+                }
+                s.compact_seen = s.active;
+            }
+            // Typing in the terminal with the keyboard up: the terminal gets
+            // all the room there is.
+            let typing = s.compact_view == V::Panes && s.typing_in_terminal() && crate::look::keyboard_up(ui.ctx());
+            if !typing {
+                chosen_snippet = compact::bar(ui, s, &shared, &settings, &self.snippets, &mut self.last_local_dir);
+                ui.separator();
+            }
+            match s.compact_view {
+                V::Panes => s.pane_ui(ui, &shared, &settings),
+                V::Files => {
+                    let actions = s.browser.ui(ui, settings.confirm_delete);
+                    for a in actions {
+                        s.browser_action(a, &shared);
+                    }
+                }
+                V::Local => s.local_ui(ui, &shared),
+            }
+        } else {
+            if s.local.is_some() {
+                egui::Panel::left(egui::Id::new(("local", s.id))).resizable(true).default_size(300.0).show(ui, |ui| {
+                    s.local_ui(ui, &shared);
+                });
+            }
+            egui::Panel::left(egui::Id::new(("browser", s.id))).resizable(true).default_size(320.0).show(ui, |ui| {
+                // With this computer's files beside it, say which side is which.
+                if s.local.is_some() {
+                    ui.label(RichText::new(format!("Server: {}", s.profile.display_name())).strong());
+                }
+                let actions = s.browser.ui(ui, settings.confirm_delete);
+                for a in actions {
+                    s.browser_action(a, &shared);
+                }
             });
         }
-        egui::Panel::left(egui::Id::new(("browser", s.id))).resizable(true).default_size(320.0).show(ui, |ui| {
-            // With this computer's files beside it, say which side is which.
-            if s.local.is_some() {
-                ui.label(RichText::new(format!("Server: {}", s.profile.display_name())).strong());
-            }
-            let actions = s.browser.ui(ui, settings.confirm_delete);
-            for a in actions {
-                s.browser_action(a, &shared);
-            }
-        });
-
-        let mut chosen_snippet = None;
         // Pane tabs: terminals, then open files.
-        ui.horizontal_wrapped(|ui| {
-            let mut close_term = None;
-            let mut close_editor = None;
-            let mut activate = None;
-            for (n, t) in s.terms.iter().enumerate() {
-                let label = if t.lasting.is_some() {
-                    format!("⟳ Terminal {}", n + 1)
-                } else {
-                    format!("⌨ Terminal {}", n + 1)
-                };
-                let r = ui.selectable_label(s.active == Some(Pane::Term(t.id)), label);
-                let r = match &t.lasting {
-                    Some(name) => r.on_hover_text(format!(
-                        "Lasting terminal ({name}): it keeps running on the server if the connection drops, \
+        if !compact {
+            ui.horizontal_wrapped(|ui| {
+                let mut close_term = None;
+                let mut close_editor = None;
+                let mut activate = None;
+                for (n, t) in s.terms.iter().enumerate() {
+                    let label = if t.lasting.is_some() {
+                        format!("⟳ Terminal {}", n + 1)
+                    } else {
+                        format!("⌨ Terminal {}", n + 1)
+                    };
+                    let r = ui.selectable_label(s.active == Some(Pane::Term(t.id)), label);
+                    let r = match &t.lasting {
+                        Some(name) => r.on_hover_text(format!(
+                            "Lasting terminal ({name}): it keeps running on the server if the connection drops, \
                          and comes back on reconnect. In tmux, scroll back with Ctrl+B then [ (q to leave)."
-                    )),
-                    None => r,
-                };
-                if r.clicked() {
-                    activate = Some(Pane::Term(t.id));
+                        )),
+                        None => r,
+                    };
+                    if r.clicked() {
+                        activate = Some(Pane::Term(t.id));
+                    }
+                    if s.active == Some(Pane::Term(t.id))
+                        && ui.small_button("✖").on_hover_text("Close (Ctrl+Shift+W)").clicked()
+                    {
+                        close_term = Some(t.id);
+                    }
                 }
-                if s.active == Some(Pane::Term(t.id))
-                    && ui.small_button("✖").on_hover_text("Close (Ctrl+Shift+W)").clicked()
-                {
-                    close_term = Some(t.id);
-                }
-            }
-            let mut close_log = None;
-            for l in &s.logs {
-                if ui.selectable_label(s.active == Some(Pane::Log(l.id)), l.title()).on_hover_text(&l.path).clicked() {
-                    activate = Some(Pane::Log(l.id));
-                }
-                if s.active == Some(Pane::Log(l.id)) && ui.small_button("✖").on_hover_text("Stop following").clicked()
-                {
-                    close_log = Some(l.id);
-                }
-            }
-            if let Some(id) = close_log {
-                s.close_log(id);
-            }
-            for e in &s.editors {
-                if ui
-                    .selectable_label(s.active == Some(Pane::Editor(e.id)), format!("📝 {}", e.title()))
-                    .on_hover_text(&e.session.path)
-                    .clicked()
-                {
-                    activate = Some(Pane::Editor(e.id));
-                }
-                if s.active == Some(Pane::Editor(e.id))
-                    && ui.small_button("✖").on_hover_text("Close (Ctrl+Shift+W)").clicked()
-                {
-                    close_editor = Some(e.id);
-                }
-            }
-            // Clicking the pane shown on the split side swaps the two.
-            if let Some(p) = activate {
-                if s.split == Some(p) {
-                    s.split = s.active;
-                }
-                s.active = Some(p);
-            }
-            if ui
-                .selectable_label(s.split.is_some(), "Split")
-                .on_hover_text("Two panes side by side: terminals, files or logs")
-                .clicked()
-            {
-                s.toggle_split(&shared, &settings);
-            }
-            if ui
-                .selectable_label(s.local.is_some(), "🖥 Local files")
-                .on_hover_text("Show this computer's files beside the server's")
-                .clicked()
-            {
-                match s.local.take() {
-                    Some(l) => self.last_local_dir = Some(l.path),
-                    None => s.local = Some(crate::local::LocalBrowser::new(self.last_local_dir.clone())),
-                }
-            }
-            if s.state == ConnState::Connected {
-                if ui
-                    .button("+ Terminal")
-                    .on_hover_text("New terminal (Ctrl+Shift+T). Ctrl+PgUp / Ctrl+PgDn switch between tabs.")
-                    .clicked()
-                {
-                    s.open_terminal(&shared, &settings);
-                }
-                let menu = ui.menu_button("⏷", |ui| {
+                let mut close_log = None;
+                for l in &s.logs {
                     if ui
-                        .button("⟳ Lasting terminal")
-                        .on_hover_text(
-                            "Runs in tmux (or screen) on the server: long jobs like pg_upgrade, a dump or a \
-                             release upgrade keep going if the connection drops, and the tab goes back to them \
-                             when you reconnect, even after restarting MalasDoh.",
-                        )
+                        .selectable_label(s.active == Some(Pane::Log(l.id)), l.title())
+                        .on_hover_text(&l.path)
                         .clicked()
                     {
-                        s.open_lasting_terminal(None, &shared, &settings);
-                        ui.close();
+                        activate = Some(Pane::Log(l.id));
                     }
-                    ui.separator();
-                    match &s.lasting_list {
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("Looking for lasting terminals…");
-                            });
+                    if s.active == Some(Pane::Log(l.id))
+                        && ui.small_button("✖").on_hover_text("Stop following").clicked()
+                    {
+                        close_log = Some(l.id);
+                    }
+                }
+                if let Some(id) = close_log {
+                    s.close_log(id);
+                }
+                for e in &s.editors {
+                    if ui
+                        .selectable_label(s.active == Some(Pane::Editor(e.id)), format!("📝 {}", e.title()))
+                        .on_hover_text(&e.session.path)
+                        .clicked()
+                    {
+                        activate = Some(Pane::Editor(e.id));
+                    }
+                    if s.active == Some(Pane::Editor(e.id))
+                        && ui.small_button("✖").on_hover_text("Close (Ctrl+Shift+W)").clicked()
+                    {
+                        close_editor = Some(e.id);
+                    }
+                }
+                // Clicking the pane shown on the split side swaps the two.
+                if let Some(p) = activate {
+                    if s.split == Some(p) {
+                        s.split = s.active;
+                    }
+                    s.active = Some(p);
+                }
+                if !compact
+                    && ui
+                        .selectable_label(s.split.is_some(), "Split")
+                        .on_hover_text("Two panes side by side: terminals, files or logs")
+                        .clicked()
+                {
+                    s.toggle_split(&shared, &settings);
+                }
+                if ui
+                    .selectable_label(s.local.is_some(), "🖥 Local files")
+                    .on_hover_text("Show this computer's files beside the server's")
+                    .clicked()
+                {
+                    match s.local.take() {
+                        Some(l) => self.last_local_dir = Some(l.path),
+                        None => s.local = Some(crate::local::LocalBrowser::new(self.last_local_dir.clone())),
+                    }
+                }
+                if s.state == ConnState::Connected {
+                    if ui
+                        .button("+ Terminal")
+                        .on_hover_text("New terminal (Ctrl+Shift+T). Ctrl+PgUp / Ctrl+PgDn switch between tabs.")
+                        .clicked()
+                    {
+                        s.open_terminal(&shared, &settings);
+                    }
+                    let menu = ui.menu_button("⏷", |ui| {
+                        if ui
+                            .button("⟳ Lasting terminal")
+                            .on_hover_text(
+                                "Runs in tmux (or screen) on the server: long jobs like pg_upgrade, a dump or a \
+                             release upgrade keep going if the connection drops, and the tab goes back to them \
+                             when you reconnect, even after restarting MalasDoh.",
+                            )
+                            .clicked()
+                        {
+                            s.open_lasting_terminal(None, &shared, &settings);
+                            ui.close();
                         }
-                        Some(list) => {
-                            let open: Vec<&str> = s.terms.iter().filter_map(|t| t.lasting.as_deref()).collect();
-                            let others: Vec<&(String, bool)> =
-                                list.iter().filter(|(n, _)| !open.contains(&n.as_str())).collect();
-                            if others.is_empty() {
-                                ui.label(RichText::new("No other lasting terminals on this server").weak());
+                        ui.separator();
+                        match &s.lasting_list {
+                            None => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("Looking for lasting terminals…");
+                                });
                             }
-                            let mut pick = None;
-                            for (name, attached) in others {
-                                let label = if *attached {
-                                    format!("Reattach {name} (open elsewhere)")
-                                } else {
-                                    format!("Reattach {name}")
-                                };
-                                if ui.button(label).clicked() {
-                                    pick = Some(name.clone());
-                                    ui.close();
+                            Some(list) => {
+                                let open: Vec<&str> = s.terms.iter().filter_map(|t| t.lasting.as_deref()).collect();
+                                let others: Vec<&(String, bool)> =
+                                    list.iter().filter(|(n, _)| !open.contains(&n.as_str())).collect();
+                                if others.is_empty() {
+                                    ui.label(RichText::new("No other lasting terminals on this server").weak());
+                                }
+                                let mut pick = None;
+                                for (name, attached) in others {
+                                    let label = if *attached {
+                                        format!("Reattach {name} (open elsewhere)")
+                                    } else {
+                                        format!("Reattach {name}")
+                                    };
+                                    if ui.button(label).clicked() {
+                                        pick = Some(name.clone());
+                                        ui.close();
+                                    }
+                                }
+                                if let Some(name) = pick {
+                                    s.open_lasting_terminal(Some(name), &shared, &settings);
                                 }
                             }
-                            if let Some(name) = pick {
-                                s.open_lasting_terminal(Some(name), &shared, &settings);
-                            }
                         }
+                    });
+                    if menu.response.on_hover_text("More terminals: lasting, or reattach one").clicked() {
+                        s.list_lasting(&shared);
+                    }
+                }
+                let fw = format!("🔌 Forwards {}/{}", s.forwards.running(), s.forwards.len());
+                if ui.selectable_label(s.forwards.open, fw).on_hover_text("Port forwarding (-L, -R, SOCKS)").clicked() {
+                    s.forwards.open = !s.forwards.open;
+                }
+                ui.menu_button("☰ Snippets", |ui| {
+                    let can_type = s.terms.iter().any(|t| t.is_live());
+                    if let Some((sn, how)) = snippets::menu(ui, &self.snippets, can_type) {
+                        chosen_snippet = Some((sn, how));
                     }
                 });
-                if menu.response.on_hover_text("More terminals: lasting, or reattach one").clicked() {
-                    s.list_lasting(&shared);
+                if let Some(id) = close_term {
+                    s.close_terminal(id);
                 }
-            }
-            let fw = format!("🔌 Forwards {}/{}", s.forwards.running(), s.forwards.len());
-            if ui.selectable_label(s.forwards.open, fw).on_hover_text("Port forwarding (-L, -R, SOCKS)").clicked() {
-                s.forwards.open = !s.forwards.open;
-            }
-            ui.menu_button("☰ Snippets", |ui| {
-                let can_type = s.terms.iter().any(|t| t.is_live());
-                if let Some((sn, how)) = snippets::menu(ui, &self.snippets, can_type) {
-                    chosen_snippet = Some((sn, how));
+                if let Some(id) = close_editor {
+                    if s.editors.iter().any(|e| e.id == id && e.is_modified()) {
+                        s.toast = Some((
+                            "This file has unsaved changes. Save or reload it before closing.".into(),
+                            true,
+                            Instant::now(),
+                        ));
+                    } else {
+                        s.close_editor(id);
+                    }
                 }
             });
-            if let Some(id) = close_term {
-                s.close_terminal(id);
-            }
-            if let Some(id) = close_editor {
-                if s.editors.iter().any(|e| e.id == id && e.is_modified()) {
-                    s.toast = Some((
-                        "This file has unsaved changes. Save or reload it before closing.".into(),
-                        true,
-                        Instant::now(),
-                    ));
-                } else {
-                    s.close_editor(id);
-                }
-            }
-        });
-        ui.separator();
-        s.pane_ui(ui, &shared, &settings);
+            ui.separator();
+            s.pane_ui(ui, &shared, &settings);
+        }
         let save_forwards = s.forwards_ui(ui.ctx(), &shared).map(|specs| (s.profile.id, specs));
         let (sid, pid) = (s.id, s.profile.id);
 
@@ -1319,9 +1409,10 @@ impl App {
         if self.show_snippets {
             let mut open = true;
             let mut changed = false;
-            let shown = egui::Window::new("Snippets").open(&mut open).default_width(760.0).show(ctx, |ui| {
-                changed = snippets::manager_ui(ui, &mut self.snippets);
-            });
+            let shown =
+                egui::Window::new("Snippets").open(&mut open).default_width(760.0).fit_to_screen(ctx).show(ctx, |ui| {
+                    changed = snippets::manager_ui(ui, &mut self.snippets);
+                });
             if crate::dlg::closes(ctx, &shown) {
                 open = false;
             }
@@ -1333,6 +1424,7 @@ impl App {
         let mut result = None;
         if let Some(p) = &mut self.pending_snippet {
             egui::Modal::new("snippet-values".into()).show(ctx, |ui| {
+                crate::dlg::fit_modal(ui);
                 ui.heading(&p.snippet.name);
                 ui.monospace(&p.snippet.command);
                 egui::Grid::new("snippet-values-grid").num_columns(2).show(ui, |ui| {
@@ -1446,7 +1538,8 @@ impl App {
         let mut done: Option<bool> = None;
         let a = &mut self.answer;
         egui::Modal::new("question".into()).show(ctx, |ui| {
-            ui.set_max_width(520.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_max_width(crate::dlg::at_most(ui, 520.0));
             match q {
                 Question::HostKey(p, _) => {
                     ui.heading("New server");
@@ -1590,9 +1683,19 @@ impl App {
             .collect();
         let groups = self.profiles.groups();
         egui::Modal::new("profile-form".into()).show(ctx, |ui| {
-            ui.set_min_width(460.0);
+            crate::dlg::fit_modal(ui);
+            // On a phone: as wide as the screen, each label above its field.
+            let screen = ctx.content_rect();
+            let compact = screen.width() < COMPACT_WIDTH;
+            if compact {
+                ui.set_width(screen.width() - 40.0);
+            } else {
+                ui.set_min_width(crate::dlg::at_most(ui, 460.0));
+            }
             ui.heading(if form.is_new { "New connection" } else { "Edit connection" });
-            egui::Grid::new("profile-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            // Save and Cancel stay in view below the fields.
+            egui::ScrollArea::vertical().max_height((screen.height() - 160.0).max(200.0)).show(ui, |ui| {
+            let mut body = |ui: &mut egui::Ui| {
                 let p = &mut form.profile;
                 ui.label("Type");
                 ui.horizontal(|ui| {
@@ -1612,7 +1715,10 @@ impl App {
                 });
                 ui.end_row();
                 ui.label("Name");
-                ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("prod-web-1"));
+                let name = ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("prod-web-1"));
+                if std::mem::take(&mut form.focus_name) {
+                    name.request_focus();
+                }
                 ui.end_row();
                 ui.label("Host");
                 ui.add(egui::TextEdit::singleline(&mut p.host).hint_text("10.0.0.5 or web.example.com"));
@@ -1684,11 +1790,13 @@ impl App {
                                 ui.add(
                                     egui::TextEdit::singleline(path)
                                         .hint_text("~/.ssh/id_ed25519")
-                                        .desired_width(260.0),
+                                        .desired_width(crate::dlg::field_width(ui, 260.0)),
                                 );
-                                if ui.button("Browse…").clicked()
-                                    && let Some(f) =
-                                        rfd::FileDialog::new().set_title("Choose a private key").pick_file()
+                                if (ui.button("Browse…").clicked() || crate::dialogs::ready("profile-key"))
+                                    && let Some(f) = crate::dialogs::FileDialog::new()
+                                        .id("profile-key")
+                                        .set_title("Choose a private key")
+                                        .pick_file()
                                 {
                                     *path = f.display().to_string();
                                 }
@@ -1814,7 +1922,12 @@ impl App {
                 ui.label("Notes");
                 ui.add(egui::TextEdit::multiline(&mut p.notes).id(egui::Id::new("profile-notes")).desired_rows(2));
                 ui.end_row();
-            });
+            };
+            if compact {
+                body(ui);
+            } else {
+                egui::Grid::new("profile-grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| body(ui));
+            }
             let p = &mut form.profile;
             if p.rdp.is_none() {
             egui::CollapsingHeader::new(format!("Port forwards ({})", p.forwards.len())).show(ui, |ui| {
@@ -1839,6 +1952,7 @@ impl App {
                 }
             });
             }
+            });
             if let Some(e) = &form.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
@@ -1903,7 +2017,8 @@ impl App {
             .collect();
         let mut result = None;
         egui::Modal::new("cross-copy".into()).show(ctx, |ui| {
-            ui.set_min_width(460.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_min_width(crate::dlg::at_most(ui, 460.0));
             ui.heading("Copy to another server");
             for p in c.paths.iter().take(8) {
                 ui.monospace(p);
@@ -1922,7 +2037,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.label("Into folder");
-                ui.add(egui::TextEdit::singleline(&mut c.dest).desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut c.dest).desired_width(crate::dlg::field_width(ui, 320.0)));
             });
             ui.checkbox(&mut c.replace, "Replace items that already exist there");
             ui.label(RichText::new("Files pass through this computer (a private temporary folder), so both servers only need to reach you.").weak().small());
@@ -1993,6 +2108,7 @@ impl App {
             let name = self.profiles.get(id).map(|p| p.display_name()).unwrap_or_default();
             let mut close = false;
             egui::Modal::new("confirm-delete-profile".into()).show(ctx, |ui| {
+                crate::dlg::fit_modal(ui);
                 ui.heading(format!("Delete “{name}”?"));
                 ui.label("The saved connection is removed. Nothing on the server is touched.");
                 ui.horizontal(|ui| {
@@ -2027,6 +2143,7 @@ impl App {
         if let Some(id) = self.confirm_close {
             let mut result = None;
             egui::Modal::new("confirm-close".into()).show(ctx, |ui| {
+                crate::dlg::fit_modal(ui);
                 ui.heading("Unsaved changes");
                 ui.label("Some open files have changes that are not saved to the server.");
                 ui.horizontal(|ui| {
@@ -2075,6 +2192,7 @@ impl App {
             .collapsible(false)
             .resizable(true)
             .default_width(1040.0)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(tab, SettingsTab::General, "General");
@@ -2089,6 +2207,12 @@ impl App {
                         ui.checkbox(&mut s.review_before_save, "Show changes and ask before saving a remote file");
                         ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
                         ui.checkbox(&mut s.reopen_on_start, "Reopen last session's connections and files on start");
+                        if crate::lock::available() {
+                            ui.checkbox(&mut s.app_lock, "Lock with fingerprint, face or PIN").on_hover_text(
+                                "Asked when MalasDoh starts and when you come back to it after half a minute away. \
+                                 Open connections stay open meanwhile.",
+                            );
+                        }
                         ui.add_space(8.0);
                         ui.label(RichText::new("Terminal").strong());
                         ui.checkbox(&mut s.copy_on_select, "Copy text as soon as it is selected");
@@ -2204,7 +2328,7 @@ impl App {
                     .stroke(egui::Stroke::new(1.0, color))
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
-                        ui.set_max_width(440.0);
+                        ui.set_max_width(crate::dlg::at_most(ui, 440.0));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(icon).color(color).strong());
                             ui.add(egui::Label::new(msg.as_str()).wrap());
@@ -2229,6 +2353,7 @@ impl ProfileForm {
             error: None,
             forget_password: false,
             forget_sudo: false,
+            focus_name: true,
         }
     }
 }
@@ -2327,7 +2452,7 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy, tunn
                 });
             }
             Proxy::Command { command } => {
-                ui.add(egui::TextEdit::singleline(command).desired_width(320.0)).on_hover_text(
+                ui.add(egui::TextEdit::singleline(command).desired_width(crate::dlg::field_width(ui, 320.0))).on_hover_text(
                     "Run on this computer; its input and output carry the SSH connection. %h, %p, %r: host, port, user",
                 );
             }
@@ -2383,15 +2508,190 @@ fn apply_fonts(ctx: &egui::Context, file: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "desktop")]
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.frame(ui);
+    }
+}
+
+/// Narrower than this (in points), the window is a phone's: one part at a
+/// time instead of side by side.
+const COMPACT_WIDTH: f32 = crate::dlg::NARROW;
+
+impl App {
+    /// Sizes for a touch screen (phones, tablets): larger buttons and rows,
+    /// and on-screen keys over the terminal.
+    pub fn set_touch(&mut self, ctx: &egui::Context, touch: bool) {
+        crate::look::set_touch(ctx, touch);
+    }
+
+    /// The platform says whether the on-screen keyboard is showing: while it
+    /// is, typing in a terminal on a phone hides all but the terminal and its
+    /// keys.
+    pub fn set_keyboard_up(&self, ctx: &egui::Context, up: bool) {
+        crate::look::set_keyboard_up(ctx, up);
+    }
+
+    /// The platform says whether a hardware keyboard is attached: if so, the
+    /// terminal's row of extra keys goes.
+    pub fn set_hardware_keyboard(&self, ctx: &egui::Context, attached: bool) {
+        crate::look::set_hardware_keyboard(ctx, attached);
+    }
+
+    /// Connections open or opening: a phone keeps the app running for them.
+    pub fn open_connections(&self) -> usize {
+        self.sessions.iter().filter(|s| matches!(s.state, ConnState::Connected | ConnState::Connecting(_))).count()
+    }
+
+    /// Gone to the background (a phone): saves what is open, and starts the
+    /// clock for the app lock.
+    pub fn went_away(&mut self) {
+        for t in self.sessions.iter_mut().flat_map(|s| s.terms.iter_mut()) {
+            t.term.refocus = t.term.had_focus;
+        }
+        self.shutdown();
+        self.away_since = Some(Instant::now());
+    }
+
+    /// Back in front after time in the background (a phone): connect again
+    /// what dropped meanwhile. Lasting terminals come back as they were;
+    /// open files keep their edits. With the app lock on, after half a
+    /// minute away it asks to be unlocked first.
+    pub fn resumed(&mut self) {
+        if self.settings.app_lock
+            && crate::lock::available()
+            && self.away_since.take().is_some_and(|t| t.elapsed() > Duration::from_secs(30))
+        {
+            self.locked = true;
+            self.unlock_asked = false;
+        }
+        for t in self.sessions.iter_mut().flat_map(|s| s.terms.iter_mut()) {
+            t.term.take_focus |= std::mem::take(&mut t.term.refocus);
+        }
+        let shared = self.shared.clone();
+        for s in &mut self.sessions {
+            s.check_alive();
+            if s.state == ConnState::Disconnected && !s.disconnected_by_user {
+                s.connect(&shared);
+            }
+        }
+    }
+
+    /// Remember what is open, and keep unsaved edits as drafts.
+    pub fn shutdown(&mut self) {
         self.persist_session();
         for s in &mut self.sessions {
             s.autosave_drafts(&self.shared);
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// [`Self::frame`] for phones and tablets: drawn inside the part of the
+    /// screen the system leaves free (egui's root covers all of it, under the
+    /// status bar and the notch too), with the rest in the panel colour.
+    pub fn frame_in_safe_area(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        if self.lock_screen(ui) {
+            return;
+        }
+        if let Some((id, text)) = self.paste_into.take() {
+            // The Paste button below was tapped: the field has its focus back.
+            ctx.memory_mut(|m| m.request_focus(id));
+            ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
+        }
+        // Android's Back: closes a menu, a dialog or a window, like Escape;
+        // with none open, goes from a connection back to the list.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)) {
+            if egui::Popup::is_any_open(&ctx) {
+                let ev = |pressed| egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                ctx.input_mut(|i| i.events.extend([ev(true), ev(false)]));
+            } else {
+                crate::dlg::press_back(&ctx);
+            }
+        }
+        ui.painter().rect_filled(ctx.viewport_rect(), 0.0, ui.visuals().panel_fill);
+        let free = ctx.content_rect();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(free), |ui| self.frame(ui));
+        if crate::dlg::take_back(&ctx) && self.compact && !self.show_sidebar && self.active.is_some() {
+            self.show_sidebar = true;
+        }
+        self.paste_button(&ctx);
+    }
+
+    /// Locked: the lock screen, and nothing else, until the system's prompt
+    /// says so. Returns whether it is locked.
+    fn lock_screen(&mut self, ui: &mut egui::Ui) -> bool {
+        if !self.locked {
+            return false;
+        }
+        if let Some(ok) = crate::lock::take_answer() {
+            self.unlock_asked = false;
+            if ok {
+                self.locked = false;
+                return false;
+            }
+        }
+        if !self.unlock_asked {
+            // Ask straight away; the button asks again after a cancel.
+            self.unlock_asked = true;
+            crate::lock::ask();
+        }
+        let ctx = ui.ctx().clone();
+        ui.painter().rect_filled(ctx.viewport_rect(), 0.0, ui.visuals().panel_fill);
+        let free = ctx.content_rect();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(free), |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(free.height() / 3.0);
+                ui.heading("MalasDoh is locked");
+                ui.label(RichText::new("Open connections stay open.").weak());
+                ui.add_space(12.0);
+                if ui.add(crate::look::primary(ui, "Unlock")).clicked() {
+                    self.unlock_asked = true;
+                    crate::lock::ask();
+                }
+            });
+        });
+        // The answer arrives from another thread: look again soon.
+        ctx.request_repaint_after(Duration::from_millis(250));
+        true
+    }
+
+    /// A touch screen's keyboard may have no way to paste (the iPhone's
+    /// has none): a Paste button under the text field being typed in.
+    fn paste_button(&mut self, ctx: &egui::Context) {
+        if !crate::look::is_touch(ctx) || !crate::clipboard::available() {
+            return;
+        }
+        let Some(ime) = ctx.output(|o| o.ime) else { return };
+        let Some(field) = ctx.memory(|m| m.focused()) else { return };
+        if ime.purpose == egui::IMEPurpose::Terminal {
+            return; // The terminal has its own, in its row of keys.
+        }
+        egui::Area::new(egui::Id::new("paste-button"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(ime.rect.left_bottom() + egui::vec2(0.0, 4.0))
+            .show(ctx, |ui| {
+                if ui.button("Paste").clicked()
+                    && let Some(text) = crate::clipboard::read()
+                {
+                    self.paste_into = Some((field, text));
+                    ctx.request_repaint();
+                }
+            });
+    }
+
+    /// One frame of the whole window, drawn into `ui` (the window's root).
+    pub fn frame(&mut self, ui: &mut egui::Ui) {
         self.drain_events();
         let ctx = ui.ctx().clone();
 
@@ -2410,17 +2710,39 @@ impl eframe::App for App {
         }
 
         self.shortcuts(&ctx);
+        self.compact = ui.available_width() < COMPACT_WIDTH;
+        let typing = self.compact
+            && crate::look::keyboard_up(&ctx)
+            && self
+                .active
+                .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+                .is_some_and(|s| s.compact_view == crate::session::CompactView::Panes && s.typing_in_terminal());
+        // An export picked for import (on phones, the picker answers later).
+        if crate::dialogs::ready(backup::IMPORT_ID) {
+            self.start_import();
+        }
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
+        if !typing {
+            egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
+        }
         if self.broadcast.is_some() {
             egui::Panel::top("broadcast")
                 .frame(egui::Frame::side_top_panel(ui.style()).fill(crate::look::sem(ui.ctx()).danger))
                 .show(ui, |ui| self.broadcast_ui(ui));
         }
-        if self.show_sidebar {
-            egui::Panel::left("connections").resizable(true).default_size(230.0).show(ui, |ui| self.sidebar_ui(ui));
+        if self.compact && self.show_sidebar {
+            // A phone: the connection list fills the screen until one is picked.
+            let before = self.active;
+            egui::CentralPanel::default().show(ui, |ui| self.sidebar_ui(ui));
+            if self.active != before && self.active.is_some() {
+                self.show_sidebar = false;
+            }
+        } else {
+            if self.show_sidebar {
+                egui::Panel::left("connections").resizable(true).default_size(230.0).show(ui, |ui| self.sidebar_ui(ui));
+            }
+            egui::CentralPanel::default().show(ui, |ui| self.session_ui(ui));
         }
-        egui::CentralPanel::default().show(ui, |ui| self.session_ui(ui));
         self.send_broadcast();
 
         self.form_ui(&ctx);

@@ -1,0 +1,36 @@
+[package]
+name = "malasdoh-ios"
+description = "MalasDoh on iOS and iPadOS: the app's program, which ios/build-app.sh puts in an app bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "MalasDoh"
+path = "src/main.rs"
+
+# Only built for iOS; elsewhere the program just says so, so
+# `cargo build --workspace` keeps working on the desktop.
+[target.'cfg(target_os = "ios")'.dependencies]
+malasdoh = { path = "../malasdoh", default-features = false }
+malasdoh-core.workspace = true
+egui.workspace = true
+# Metal, through wgpu: iOS has no OpenGL that eframe can use.
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# The clipboard (UIPasteboard) and where the on-screen keyboard is.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSDictionary", "NSEnumerator", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL", "NSValue"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-uniform-type-identifiers", "UIActivity", "UIActivityViewController", "UIApplication", "UIDocumentPickerViewController", "UIPopoverPresentationController", "UIPresentationController", "UIGeometry", "UIPasteboard", "UIResponder", "UIView", "UIViewController", "UIWindow"] }
+# The file picker: which kinds of file it offers (all of them).
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTCoreTypes", "UTType"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+# Whether a hardware keyboard is attached (GCKeyboard).
+objc2-game-controller = { version = "0.3", default-features = false, features = ["std", "GCKeyboard", "GCDevice"] }
+# The app lock: Face ID, Touch ID or the passcode.
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext", "LAPublicDefines"] }

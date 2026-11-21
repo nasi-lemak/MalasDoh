@@ -49,3 +49,16 @@ tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+# Phones and tablets: keyring's simple Entry knows only the desktop
+# keychains, so secrets.rs picks the platform's store itself.
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+keyring-core = "1"
+
+# The iOS Keychain.
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["protected"] }
+
+# The Android Keystore.
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1"

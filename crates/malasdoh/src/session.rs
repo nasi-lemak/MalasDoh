@@ -260,6 +260,22 @@ struct ExternalEdit {
     mtime: Option<SystemTime>,
 }
 
+/// On a narrow screen (a phone), the parts shown side by side on a wide one
+/// take turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompactView {
+    /// Terminals and open files.
+    #[default]
+    Panes,
+    /// The server's files.
+    Files,
+    /// This device's files.
+    Local,
+}
+
+/// The upload's file dialog, whose answer may come later (phones).
+pub const UPLOAD_ID: &str = "upload";
+
 pub struct Session {
     pub id: SessionId,
     pub profile: Profile,
@@ -309,6 +325,12 @@ pub struct Session {
     pub bookmarks_changed: bool,
     /// The pane shown beside the active one.
     pub split: Option<Pane>,
+    /// Disconnected on purpose (not dropped): not reconnected by itself.
+    pub disconnected_by_user: bool,
+    /// On a narrow screen, which one of the side-by-side parts is shown.
+    pub compact_view: CompactView,
+    /// The active pane last frame: a file that opens is shown.
+    pub compact_seen: Option<Pane>,
     /// What was typed into terminals this frame (terminal id, bytes), for
     /// sending to other servers too.
     pub typed: Vec<(u64, Vec<u8>)>,
@@ -363,6 +385,9 @@ impl Session {
             find: FindWindow::default(),
             bookmarks_changed: false,
             split: None,
+            disconnected_by_user: false,
+            compact_view: CompactView::default(),
+            compact_seen: None,
             typed: Vec::new(),
             found_drafts: Vec::new(),
             fs_user: None,
@@ -393,6 +418,7 @@ impl Session {
     }
 
     pub fn connect(&mut self, shared: &Shared) {
+        self.disconnected_by_user = false;
         self.state = ConnState::Connecting("Connecting…".into());
         let chain = self.chain.clone();
         let shared2 = shared.clone();
@@ -457,6 +483,7 @@ impl Session {
         }
         self.forwards.on_disconnected();
         self.state = ConnState::Disconnected;
+        self.disconnected_by_user = true;
     }
 
     pub fn open_terminal(&mut self, shared: &Shared, settings: &Settings) {
@@ -1570,7 +1597,11 @@ impl Session {
                 // With the local pane open, download into its folder.
                 let dir = match &self.local {
                     Some(l) => l.path.clone(),
-                    None => match rfd::FileDialog::new().set_title("Download to folder").pick_folder() {
+                    None => match crate::dialogs::FileDialog::new()
+                        .id("download-to")
+                        .set_title("Download to folder")
+                        .pick_folder()
+                    {
                         Some(d) => d,
                         None => return,
                     },
@@ -1578,7 +1609,9 @@ impl Session {
                 self.download_to(paths, dir, shared);
             }
             A::UploadPick => {
-                if let Some(files) = rfd::FileDialog::new().set_title("Upload files").pick_files() {
+                if let Some(files) =
+                    crate::dialogs::FileDialog::new().id(UPLOAD_ID).set_title("Upload files").pick_files()
+                {
                     self.browser_action(A::Upload(files), shared);
                 }
             }
@@ -1903,6 +1936,11 @@ impl Session {
         }
     }
 
+    /// The terminal shown has the keyboard (on a phone, the rest makes room).
+    pub fn typing_in_terminal(&self) -> bool {
+        matches!(self.active, Some(Pane::Term(id)) if self.terms.iter().any(|t| t.id == id && t.term.had_focus))
+    }
+
     pub fn close_terminal(&mut self, id: u64) {
         if let Some(name) = self.terms.iter().find(|t| t.id == id && t.is_live()).and_then(|t| t.lasting.clone()) {
             self.notify(
@@ -2084,6 +2122,12 @@ impl Session {
                     theme: crate::look::terminal_theme(ui.ctx()),
                     copy_on_select: settings.copy_on_select,
                     confirm_paste: settings.confirm_paste,
+                    touch: crate::look::is_touch(ui.ctx()),
+                    // A hardware keyboard has the keys the row would add; but
+                    // an on-screen keyboard showing is typed on.
+                    on_screen_keys: crate::look::is_touch(ui.ctx())
+                        && (!crate::look::hardware_keyboard(ui.ctx()) || crate::look::keyboard_up(ui.ctx())),
+                    compact: crate::dlg::narrow(ui.ctx()),
                 };
                 let out = t.term.ui(ui, &opts);
                 if out.start_log {
@@ -2310,6 +2354,7 @@ impl Session {
         let mut restore = None;
         let mut compare = None;
         egui::Modal::new(egui::Id::new(("backups", self.id))).show(ctx, |ui| {
+            crate::dlg::fit_modal(ui);
             ui.heading(format!("Local backups of {path}"));
             ui.label(RichText::new("Newest first. Times are UTC.").weak());
             if list.is_empty() {

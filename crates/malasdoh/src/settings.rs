@@ -42,6 +42,9 @@ pub struct Settings {
     /// Reconnect to what was open last time when MalasDoh starts. Off: the
     /// start screen offers it instead.
     pub reopen_on_start: bool,
+    /// Phones: ask for the fingerprint, face or PIN on start and after a
+    /// while away.
+    pub app_lock: bool,
     /// Config checks run when saving matching files; first match wins.
     pub validation_rules: Vec<ValidationRule>,
     /// Names of the built-in checks this settings file has been offered, so
@@ -67,6 +70,7 @@ impl Default for Settings {
             dark_mode: None,
             confirm_delete: true,
             reopen_on_start: false,
+            app_lock: false,
             terminal_theme: crate::look::SAME_AS_APP.into(),
             mono_font_file: String::new(),
             copy_on_select: false,

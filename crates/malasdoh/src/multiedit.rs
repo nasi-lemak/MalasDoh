@@ -6,6 +6,7 @@
 //! differ per server are kept, and a server whose copy does not match around
 //! the change is left alone. "Same content" replaces the whole file.
 
+use crate::dlg::FitScreen as _;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -396,6 +397,7 @@ impl MultiEdit {
             .open(&mut open)
             .default_width(980.0)
             .default_height(640.0)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 let busy = self.busy();
                 egui::Panel::left("multi-edit-hosts").resizable(true).default_size(230.0).show(ui, |ui| {
@@ -414,7 +416,7 @@ impl MultiEdit {
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.path)
                                 .hint_text("/etc/nginx/nginx.conf")
-                                .desired_width(320.0),
+                                .desired_width(crate::dlg::field_width(ui, 320.0)),
                         );
                         if r.changed() {
                             self.reset();

@@ -354,7 +354,9 @@ impl Browser {
         // The date column only when there is room for it.
         let show_time = ui.available_width() > 430.0 || self.sort == SortBy::Modified;
 
-        let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        // Rows a finger can hit on a touch screen.
+        let pad = if crate::look::is_touch(ui.ctx()) { 18.0 } else { 4.0 };
+        let row_h = ui.text_style_height(&egui::TextStyle::Body) + pad;
         // The list's keys (once it was clicked): Ctrl+A, arrows, Enter, Delete, F2, Backspace.
         let order: Vec<String> = visible.iter().map(|e| e.path.clone()).collect();
         let (key, scroll_to) = self.sel.keys(ui.ctx(), &order, |p| sftp::file_name(p).to_string());
@@ -516,7 +518,8 @@ impl Browser {
             let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
             self.sel.click(order, &e.path, ctrl, shift);
         }
-        if resp.double_clicked() {
+        // A touch screen has no double click: a tap opens.
+        if resp.double_clicked() || (resp.clicked() && crate::look::is_touch(ui.ctx())) {
             if e.is_dir_like() {
                 actions.push(Action::Navigate(e.path.clone()));
             } else {
@@ -671,6 +674,7 @@ impl Browser {
             }
             Dialog::ConfirmDelete(paths) => {
                 egui::Modal::new("confirm-delete".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Delete from the server?");
                     for p in paths.iter().take(10) {
                         ui.monospace(p);
@@ -729,6 +733,7 @@ impl Browser {
             }
             Dialog::Owner { paths, owner, recursive, sudo, has_dir } => {
                 egui::Modal::new("owner-dialog".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Change owner");
                     for p in paths.iter().take(6) {
                         ui.monospace(p);
@@ -771,6 +776,7 @@ impl Browser {
             }
             Dialog::Symlink { name, target } => {
                 egui::Modal::new("symlink-dialog".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("New symlink");
                     egui::Grid::new("symlink-grid").num_columns(2).show(ui, |ui| {
                         ui.label("Name");
@@ -800,6 +806,7 @@ impl Browser {
             }
             Dialog::Compress { names, out, kind } => {
                 egui::Modal::new("compress-dialog".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Compress");
                     ui.label(format!("{} item(s) from {dir}", names.len()));
                     ui.horizontal(|ui| {
@@ -874,6 +881,7 @@ fn short_time(t: u32) -> String {
 pub(crate) fn name_dialog(ctx: &egui::Context, title: &str, value: &mut String) -> Option<bool> {
     let mut result = None;
     egui::Modal::new(egui::Id::new(("name-dialog", title))).show(ctx, |ui| {
+        crate::dlg::fit_modal(ui);
         ui.heading(title);
         let r = ui.text_edit_singleline(value);
         r.request_focus();

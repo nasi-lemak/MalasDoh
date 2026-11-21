@@ -1,6 +1,7 @@
 //! The change journal window: every file saved from MalasDoh, searchable,
 //! with its patch.
 
+use crate::dlg::FitScreen as _;
 use egui::RichText;
 use malasdoh_core::journal::{self, Entry, Journal};
 
@@ -49,6 +50,7 @@ impl JournalWindow {
             .open(&mut open)
             .default_size([980.0, 600.0])
             .resizable(true)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| compare = self.body(ui, journal, sessions));
         if crate::dlg::closes(ctx, &shown) {
             open = false;
@@ -63,7 +65,7 @@ impl JournalWindow {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
                     .hint_text("Search server, path or changed text")
-                    .desired_width(320.0),
+                    .desired_width(crate::dlg::field_width(ui, 320.0)),
             );
             if r.changed() {
                 self.selected = None;

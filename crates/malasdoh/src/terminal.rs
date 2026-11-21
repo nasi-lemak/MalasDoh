@@ -15,6 +15,15 @@ pub struct TermOptions {
     pub copy_on_select: bool,
     /// Ask before pasting several lines into a shell, where each would run.
     pub confirm_paste: bool,
+    /// A touch screen: a swipe scrolls, a long press selects, and the
+    /// on-screen keyboard is asked for while the terminal has focus.
+    pub touch: bool,
+    /// Typing on the on-screen keyboard: a row of the keys it lacks (Esc,
+    /// Tab, Ctrl, arrows).
+    pub on_screen_keys: bool,
+    /// A phone's screen: the keys in one row that scrolls sideways, and Find
+    /// and Log in the session's menu instead of a row of their own.
+    pub compact: bool,
 }
 
 /// What the widget wants the session to do after a frame.
@@ -41,6 +50,10 @@ struct Search {
 }
 
 pub struct Terminal {
+    /// The terminal's own widget id: the same whatever is shown above it
+    /// (the key row comes and goes with the on-screen keyboard), so it keeps
+    /// the focus.
+    widget_id: egui::Id,
     parser: vt100::Parser,
     font_size: f32,
     /// Selection in screen cells (row, col), anchor and current end.
@@ -63,11 +76,28 @@ pub struct Terminal {
     mouse_down: Option<(MouseButton, (u16, u16))>,
     /// Take the keyboard next frame (a new terminal, or one switched to).
     pub take_focus: bool,
+    /// The on-screen Ctrl key was tapped: the next key typed is sent with Ctrl.
+    ctrl_latched: bool,
+    /// Had the keyboard last frame (on a phone, the rest makes room).
+    pub had_focus: bool,
+    /// Had the focus when the app went to the background (a phone): takes
+    /// it back on return, where the keyboard Android brings back types.
+    pub refocus: bool,
+    /// Pinch (or Ctrl+scroll) zoom, on top of the font size in Settings.
+    zoom: f32,
+    /// Start logging, asked for from outside the terminal (the phone menu).
+    log_requested: bool,
+    /// On a touch screen, a long press started a selection: dragging now
+    /// extends it instead of scrolling.
+    touch_selecting: bool,
 }
 
 impl Terminal {
     pub fn new(font_size: f32) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
+            widget_id: egui::Id::new(("malasdoh-terminal", n)),
             parser: vt100::Parser::new(24, 80, SCROLLBACK),
             font_size,
             selection: None,
@@ -83,6 +113,12 @@ impl Terminal {
             pending_paste: None,
             mouse_down: None,
             take_focus: false,
+            ctrl_latched: false,
+            had_focus: false,
+            refocus: false,
+            zoom: 1.0,
+            log_requested: false,
+            touch_selecting: false,
         }
     }
 
@@ -214,6 +250,22 @@ impl Terminal {
         total_sb - off
     }
 
+    /// Open the search over the scrollback.
+    pub fn open_search(&mut self) {
+        if self.search.is_none() {
+            self.search = Some(Search::default());
+        }
+    }
+
+    /// Start logging to a file (the session picks the file).
+    pub fn request_log(&mut self) {
+        self.log_requested = true;
+    }
+
+    pub fn stop_log(&mut self) {
+        self.log = None;
+    }
+
     pub fn set_font_size(&mut self, size: f32) {
         self.font_size = size;
     }
@@ -302,11 +354,104 @@ impl Terminal {
         });
     }
 
+    /// Keys phone and tablet keyboards do not have, over the terminal.
+    fn key_row_ui(&mut self, ui: &mut egui::Ui, out: &mut TerminalOutput, compact: bool) {
+        let app_cursor = self.parser.screen().application_cursor();
+        let special = |k: Key| key_bytes(k, Modifiers::NONE, app_cursor).unwrap_or_default();
+        let keys: [(&str, Vec<u8>); 15] = [
+            ("Esc", b"\x1b".to_vec()),
+            ("Tab", b"\t".to_vec()),
+            ("⏴", special(Key::ArrowLeft)),
+            ("⏷", special(Key::ArrowDown)),
+            ("⏶", special(Key::ArrowUp)),
+            ("⏵", special(Key::ArrowRight)),
+            ("|", b"|".to_vec()),
+            ("~", b"~".to_vec()),
+            ("/", b"/".to_vec()),
+            ("-", b"-".to_vec()),
+            (":", b":".to_vec()),
+            ("Home", special(Key::Home)),
+            ("End", special(Key::End)),
+            ("PgUp", special(Key::PageUp)),
+            ("PgDn", special(Key::PageDown)),
+        ];
+        let mut tapped = false;
+        let selected = self.selected_text();
+        let mut copied = false;
+        let mut row = |ui: &mut egui::Ui| {
+            // Text selected with a long press: copy it.
+            if let Some(t) = &selected
+                && ui.button("Copy").clicked()
+            {
+                ui.ctx().copy_text(t.clone());
+                copied = true;
+                tapped = true;
+            }
+            for (n, (label, bytes)) in keys.iter().enumerate() {
+                if n == 2
+                    && ui
+                        .selectable_label(self.ctrl_latched, "Ctrl")
+                        .on_hover_text("The next key is sent with Ctrl")
+                        .clicked()
+                {
+                    self.ctrl_latched = !self.ctrl_latched;
+                    tapped = true;
+                }
+                if ui.button(*label).clicked() {
+                    out.send.extend_from_slice(bytes);
+                    tapped = true;
+                }
+            }
+            // No Ctrl+V on a phone: paste from the system clipboard.
+            if crate::clipboard::available()
+                && ui.button("Paste").clicked()
+                && let Some(text) = crate::clipboard::read()
+            {
+                // Handled below like a pasted Ctrl+V (asking first for
+                // several lines into a shell).
+                ui.ctx().input_mut(|i| i.events.push(Event::Paste(text)));
+                tapped = true;
+            }
+        };
+        if compact {
+            // One row, swiped sideways: the terminal keeps the height.
+            egui::ScrollArea::horizontal()
+                .id_salt("term-keys")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| ui.horizontal(|ui| row(ui)));
+        } else {
+            ui.horizontal_wrapped(|ui| row(ui));
+        }
+        if copied {
+            self.selection = None;
+        }
+        if tapped {
+            // Keep the keyboard up: the terminal takes the focus back.
+            self.take_focus = true;
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, opts: &TermOptions) -> TerminalOutput {
         let mut out = TerminalOutput::default();
         self.theme = opts.theme;
-        self.toolbar_ui(ui, &mut out);
-        let font = FontId::monospace(self.font_size);
+        // Pinch (or Ctrl+scroll) over the terminal: bigger or smaller text.
+        let area = ui.available_rect_before_wrap();
+        let (zoom, over) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos().is_some_and(|p| area.contains(p))));
+        if zoom != 1.0 && over {
+            self.zoom = (self.zoom * zoom).clamp(7.0 / self.font_size, 40.0 / self.font_size);
+        }
+        if opts.on_screen_keys {
+            self.key_row_ui(ui, &mut out, opts.compact);
+        }
+        // On a phone, Find and Log are in the session's menu; the search row
+        // shows only once opened.
+        if !opts.compact || self.search.is_some() {
+            self.toolbar_ui(ui, &mut out);
+        }
+        if std::mem::take(&mut self.log_requested) {
+            out.start_log = true;
+        }
+        let font = FontId::monospace(self.font_size * self.zoom);
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let avail = ui.available_size();
         // A margin inside the terminal's background, so text does not touch
@@ -319,7 +464,8 @@ impl Terminal {
             out.resize = Some((cols, rows));
         }
 
-        let (outer, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+        let (outer, _) = ui.allocate_exact_size(avail, Sense::hover());
+        let response = ui.interact(outer, self.widget_id, Sense::click_and_drag());
         ui.painter().rect_filled(outer, 0.0, self.theme.bg);
         let rect = Rect::from_min_size(outer.min + pad, outer.size() - 2.0 * pad);
         let id = response.id;
@@ -332,6 +478,7 @@ impl Terminal {
             response.request_focus();
         }
         let focused = response.has_focus();
+        self.had_focus = focused;
         if focused {
             // Tab, arrows and Escape belong to the remote program, not egui.
             ui.memory_mut(|m| {
@@ -340,6 +487,20 @@ impl Terminal {
                     egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
                 )
             });
+            if opts.touch {
+                // Ask for the on-screen keyboard, as a text field does (with
+                // a hardware keyboard, the system leaves it hidden).
+                let (row, col) = self.parser.screen().cursor_position();
+                let at = rect.min + Vec2::new(f32::from(col) * cell_w, f32::from(row) * cell_h);
+                ui.ctx().output_mut(|o| {
+                    o.ime = Some(egui::output::IMEOutput {
+                        purpose: egui::IMEPurpose::Terminal,
+                        rect: outer,
+                        cursor_rect: Rect::from_min_size(at, Vec2::new(1.0, cell_h)),
+                        should_interrupt_composition: false,
+                    })
+                });
+            }
         }
 
         let to_cell = |p: Pos2| -> (u16, u16) {
@@ -377,8 +538,45 @@ impl Terminal {
             handled_click = true;
         }
 
-        if reporting && focused {
-            self.report_mouse(ui, rect, &to_cell, mode, sgr, &mut out);
+        // On a touch screen a swipe scrolls (the scrollback, or the program
+        // with the mouse wheel), and a long press starts selecting text.
+        let touch = opts.touch;
+        let swiping = touch && !self.touch_selecting && (response.dragged() || response.drag_stopped());
+        let mut scroll = 0.0;
+        if response.hovered() || response.dragged() {
+            scroll += ui.input(|i| i.smooth_scroll_delta.y);
+        }
+        if swiping {
+            scroll += response.drag_delta().y;
+        }
+        if touch && response.secondary_clicked() && !handled_click {
+            // A long press selects the word under the finger; dragging on
+            // extends the selection.
+            if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) {
+                let (row, col) = to_cell(p);
+                let line: Vec<char> =
+                    self.parser.screen().rows(0, cols).nth(row as usize).unwrap_or_default().chars().collect();
+                let (start, end) = word_at(&line, col as usize);
+                self.selection = Some(((row, start as u16), (row, end as u16)));
+                self.touch_selecting = true;
+            }
+        } else if touch && self.touch_selecting {
+            if response.dragged()
+                && let (Some(p), Some((anchor, _))) = (response.interact_pointer_pos(), self.selection)
+            {
+                self.selection = Some((anchor, to_cell(p)));
+            }
+            if response.drag_stopped() || ui.input(|i| i.pointer.any_released()) {
+                self.touch_selecting = false;
+            }
+        } else if touch && !reporting {
+            if response.clicked() {
+                self.selection = None;
+            }
+        } else if reporting && focused {
+            if !swiping {
+                self.report_mouse(ui, rect, &to_cell, mode, sgr, &mut out);
+            }
         } else if !handled_click {
             // From where the button went down, not where the drag was noticed.
             if response.drag_started()
@@ -417,8 +615,8 @@ impl Terminal {
             }
         }
 
-        if response.hovered() && !reporting {
-            self.scroll_accum += ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 && !reporting {
+            self.scroll_accum += scroll;
             let lines = (self.scroll_accum / cell_h).trunc() as i64;
             if lines != 0 {
                 self.scroll_accum -= lines as f32 * cell_h;
@@ -436,12 +634,12 @@ impl Terminal {
             }
         }
 
-        if response.hovered() && reporting {
+        if scroll != 0.0 && reporting {
             // One wheel report per line scrolled, like a real mouse wheel.
-            self.scroll_accum += ui.input(|i| i.smooth_scroll_delta.y);
+            self.scroll_accum += scroll;
             let lines = (self.scroll_accum / cell_h).trunc() as i64;
             if lines != 0
-                && let Some(p) = response.hover_pos()
+                && let Some(p) = response.hover_pos().or(response.interact_pointer_pos())
             {
                 self.scroll_accum -= lines as f32 * cell_h;
                 let (r, c) = to_cell(p);
@@ -537,7 +735,8 @@ impl Terminal {
         let lines: Vec<&str> = text.lines().collect();
         let mut result = None;
         egui::Modal::new(id.with("paste")).show(ctx, |ui| {
-            ui.set_max_width(560.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_max_width(crate::dlg::at_most(ui, 560.0));
             ui.heading(format!("Paste {} lines?", lines.len()));
             ui.label("In a shell each line runs as a command as soon as it arrives.");
             egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
@@ -569,9 +768,27 @@ impl Terminal {
         let screen = self.parser.screen();
         let app_cursor = screen.application_cursor();
         let bracketed = screen.bracketed_paste();
+        // The on-screen Ctrl applied to a key press: the same key's text,
+        // which follows it, is not typed as well.
+        let mut ctrl_used = false;
         for ev in events {
             match ev {
-                Event::Text(t) => out.send.extend_from_slice(t.as_bytes()),
+                Event::Text(_) if std::mem::take(&mut ctrl_used) => {}
+                Event::Text(t) if std::mem::take(&mut self.ctrl_latched) => {
+                    let mut chars = t.chars();
+                    if let Some(c) = chars.next() {
+                        out.send.push(ctrl_byte(c).unwrap_or(c as u8));
+                    }
+                    out.send.extend_from_slice(chars.as_str().as_bytes());
+                }
+                Event::Key { key, pressed: true, modifiers, .. } if self.ctrl_latched => {
+                    if let Some(bytes) = key_bytes(key, modifiers | Modifiers::CTRL, app_cursor) {
+                        out.send.extend_from_slice(&bytes);
+                        self.ctrl_latched = false;
+                        ctrl_used = true;
+                    }
+                }
+                Event::Text(t) | Event::Ime(egui::ImeEvent::Commit(t)) => out.send.extend_from_slice(t.as_bytes()),
                 // Several lines into a plain shell: ask first. Programs that
                 // asked for bracketed paste (editors, modern shells) get it
                 // as text and do not run it.
@@ -793,6 +1010,40 @@ impl AnsiStrip {
 }
 
 /// Bytes xterm sends for a key press that does not produce text.
+/// The word (a run of non-blank characters) around column `col`: its first
+/// and last columns. On a blank, just that column.
+fn word_at(line: &[char], col: usize) -> (usize, usize) {
+    let blank = |i: usize| line.get(i).is_none_or(|c| c.is_whitespace());
+    if blank(col) {
+        return (col, col);
+    }
+    let mut start = col;
+    while start > 0 && !blank(start - 1) {
+        start -= 1;
+    }
+    let mut end = col;
+    while !blank(end + 1) {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// The byte Ctrl and `c` make in a terminal (Ctrl+C is 3), for the
+/// on-screen Ctrl key.
+fn ctrl_byte(c: char) -> Option<u8> {
+    match c {
+        'a'..='z' | 'A'..='Z' => Some(c.to_ascii_uppercase() as u8 & 0x1f),
+        '@' | ' ' | '2' => Some(0),
+        '[' | '3' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' => Some(0x1e),
+        '_' | '-' | '7' => Some(0x1f),
+        '?' | '8' => Some(0x7f),
+        _ => None,
+    }
+}
+
 pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     let csi_mod = |code: &str, final_: char| -> Vec<u8> {
         // Modifier parameter: 1 + shift + 2*alt + 4*ctrl.
@@ -976,6 +1227,23 @@ mod tests {
 
     const NONE: Modifiers = Modifiers::NONE;
     const CTRL: Modifiers = Modifiers::CTRL;
+
+    #[test]
+    fn long_press_selects_a_word() {
+        let line: Vec<char> = "ls -la /var/log  done".chars().collect();
+        assert_eq!(super::word_at(&line, 9), (7, 14));
+        assert_eq!(super::word_at(&line, 0), (0, 1));
+        assert_eq!(super::word_at(&line, 15), (15, 15));
+        assert_eq!(super::word_at(&line, 30), (30, 30));
+    }
+
+    #[test]
+    fn on_screen_ctrl() {
+        assert_eq!(super::ctrl_byte('c'), Some(3));
+        assert_eq!(super::ctrl_byte('D'), Some(4));
+        assert_eq!(super::ctrl_byte('['), Some(0x1b));
+        assert_eq!(super::ctrl_byte('é'), None);
+    }
 
     #[test]
     fn control_keys() {

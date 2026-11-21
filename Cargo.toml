@@ -1,9 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/malasdoh-core", "crates/malasdoh"]
+members = ["crates/malasdoh-core", "crates/malasdoh", "crates/malasdoh-ohos", "crates/malasdoh-android", "crates/malasdoh-ios"]
+exclude = ["third_party"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 repository = "https://github.com/nasi-lemak/MalasDoh"
@@ -25,7 +26,7 @@ hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
 tempfile = "3"
 hmac = "0.12"
 sha1 = "0.10"
@@ -40,3 +41,8 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# winit with Android's modifier keys (Ctrl, Alt, Shift) reported; see
+# third_party/winit/MALASDOH-PATCH.md.
+[patch.crates-io]
+winit = { path = "third_party/winit" }

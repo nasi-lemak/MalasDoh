@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app is the Rust library libmalasdoh_android.so
+     (crates/malasdoh-android), run by MainActivity: Android's own
+     NativeActivity with a little Java for the keyboard and the clipboard
+     (java/). build-apk.sh sets the version and SDK levels. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.nasi_lemak.malasdoh">
+    <!-- SSH connections. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Keeping open connections alive while the app is in the background,
+         with a notification saying so. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The app lock (Settings): fingerprint or face, or the device's PIN. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- allowBackup: profiles and known hosts stay on the device. -->
+    <application
+        android:label="MalasDoh"
+        android:icon="@mipmap/ic_launcher"
+        android:hasCode="true"
+        android:allowBackup="false"
+        android:extractNativeLibs="false"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+        <!-- configChanges, all of them: turning the device, plugging in a
+             keyboard, dark mode, wallpaper colours (assetsPaths) and the like
+             resize or redraw the window instead of restarting the activity,
+             which the Rust app (one per process) could not follow. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|fontScale|colorMode|layoutDirection|locale|touchscreen|mcc|mnc|fontWeightAdjustment|grammaticalGender|assetsPaths">
+            <meta-data android:name="android.app.lib_name" android:value="malasdoh_android" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- Files shared from "This device" (read only, per share). -->
+        <provider
+            android:name=".FilesProvider"
+            android:authorities="io.github.nasi_lemak.malasdoh.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's open SSH connections (terminals, file transfers) alive while the app is in the background." />
+        </service>
+    </application>
+</manifest>

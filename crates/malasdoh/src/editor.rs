@@ -625,7 +625,8 @@ impl Editor {
         match &self.state {
             State::Review(d) => {
                 egui::Modal::new(egui::Id::new(("review", self.id))).show(ctx, |ui| {
-                    ui.set_max_width(900.0);
+                    crate::dlg::fit_modal(ui);
+                    ui.set_max_width(crate::dlg::at_most(ui, 900.0));
                     ui.heading(format!("Save {}?", self.session.path));
                     ui.label(format!("+{} −{} lines", d.added, d.removed));
                     diff_ui(ui, d, egui::Id::new(("review-diff", self.id)));
@@ -654,7 +655,8 @@ impl Editor {
             State::Conflict { diff: d, theirs, merged } => {
                 let mut take_merge = false;
                 egui::Modal::new(egui::Id::new(("conflict", self.id))).show(ctx, |ui| {
-                    ui.set_max_width(900.0);
+                    crate::dlg::fit_modal(ui);
+                    ui.set_max_width(crate::dlg::at_most(ui, 900.0));
                     ui.heading("⚠ The file changed on the server");
                     ui.label("Someone else saved this file after you opened it. Below: their version (−) against yours (+).");
                     diff_ui(ui, d, egui::Id::new(("conflict-diff", self.id)));
@@ -700,6 +702,7 @@ impl Editor {
             State::NeedsSudo(err) => {
                 let err = err.clone();
                 egui::Modal::new(egui::Id::new(("sudo", self.id))).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Permission denied");
                     ui.label(err);
                     ui.label("Save through sudo instead? Your edits are kept either way.");
@@ -715,7 +718,8 @@ impl Editor {
             }
             State::CheckFailed { rule, output, rolled_back } => {
                 egui::Modal::new(egui::Id::new(("check-failed", self.id))).show(ctx, |ui| {
-                    ui.set_max_width(900.0);
+                    crate::dlg::fit_modal(ui);
+                    ui.set_max_width(crate::dlg::at_most(ui, 900.0));
                     ui.heading(format!("⚠ {rule} check failed"));
                     ui.label(if *rolled_back {
                         "Your version was written, failed the check, and the original has been put back. The server is as it was."

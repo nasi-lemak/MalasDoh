@@ -1,6 +1,7 @@
 //! Remote Desktop connections: the route each one found, the local port
 //! forwarded to the desktop, and the Remote Desktop program opened on it.
 
+use crate::dlg::FitScreen as _;
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
@@ -205,107 +206,111 @@ impl DesktopsWindow {
         let mut open = true;
         let mut close = None;
         let mut forget = None;
-        let shown = egui::Window::new("Remote Desktop").open(&mut open).default_width(520.0).show(ctx, |ui| {
-            for d in &mut self.items {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&d.name).strong());
-                    match &d.state {
-                        State::Starting(t) => {
-                            ui.spinner();
-                            ui.label(t);
+        let shown = egui::Window::new("Remote Desktop").open(&mut open).default_width(520.0).fit_to_screen(ctx).show(
+            ctx,
+            |ui| {
+                for d in &mut self.items {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&d.name).strong());
+                        match &d.state {
+                            State::Starting(t) => {
+                                ui.spinner();
+                                ui.label(t);
+                            }
+                            State::Open { via_name, .. } => {
+                                let via =
+                                    if via_name.is_empty() { String::new() } else { format!(" through {via_name}") };
+                                ui.label(format!("open{via}"));
+                                if ui
+                                    .small_button("Open again")
+                                    .on_hover_text("Open the Remote Desktop window again")
+                                    .clicked()
+                                {
+                                    launch(d, env);
+                                }
+                                if ui
+                                    .small_button("Close")
+                                    .on_hover_text("Close the forwarded port (ends the session)")
+                                    .clicked()
+                                {
+                                    close = Some(d.id);
+                                }
+                            }
+                            State::Closed(why) => {
+                                ui.label(RichText::new(why.lines().next().unwrap_or("")).weak());
+                                if ui.small_button("Connect again").clicked() {
+                                    out.push(RdpAction::Open(d.profile));
+                                }
+                                if ui.small_button("Dismiss").clicked() {
+                                    forget = Some(d.id);
+                                }
+                            }
                         }
-                        State::Open { via_name, .. } => {
-                            let via = if via_name.is_empty() { String::new() } else { format!(" through {via_name}") };
-                            ui.label(format!("open{via}"));
-                            if ui
-                                .small_button("Open again")
-                                .on_hover_text("Open the Remote Desktop window again")
-                                .clicked()
+                    });
+                    match &d.state {
+                        State::Open { addr, client, .. } => {
+                            let who = if d.user.is_empty() { String::new() } else { format!(" as {}", d.user) };
+                            let prog = client.map(|c| format!("{c} opened on ")).unwrap_or_default();
+                            ui.label(RichText::new(format!("{prog}{addr}{who}")).weak().small());
+                            if let Some(n) = &d.note {
+                                ui.label(RichText::new(n).small().color(ui.visuals().warn_fg_color));
+                            }
+                            let mut go = false;
+                            if let Some(a) = &mut d.asking {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("Windows password for {}", d.user));
+                                    let r = ui.add(
+                                        egui::TextEdit::singleline(&mut a.password).password(true).desired_width(160.0),
+                                    );
+                                    ui.checkbox(&mut a.remember, "Remember in the system keychain");
+                                    go = ui.button("Open").clicked()
+                                        || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                                });
+                                ui.label(
+                                    RichText::new(
+                                        "FreeRDP has no login window of its own, so MalasDoh passes the password to it \
+                                     (not on its command line).",
+                                    )
+                                    .weak()
+                                    .small(),
+                                );
+                            } else if client.is_some_and(malasdoh_core::rdp::wants_password)
+                                && ui.small_button("Forget the saved password").clicked()
                             {
+                                env.secrets.delete(&SecretKey::RdpPassword(d.profile));
+                            }
+                            if go && let Some(a) = d.asking.take() {
+                                if a.remember
+                                    && let Err(e) = env.secrets.set(&SecretKey::RdpPassword(d.profile), &a.password)
+                                {
+                                    d.note = Some(format!("The password was not saved: {e}"));
+                                }
+                                d.typed = Some(a.password);
                                 launch(d, env);
                             }
-                            if ui
-                                .small_button("Close")
-                                .on_hover_text("Close the forwarded port (ends the session)")
-                                .clicked()
-                            {
-                                close = Some(d.id);
-                            }
                         }
-                        State::Closed(why) => {
-                            ui.label(RichText::new(why.lines().next().unwrap_or("")).weak());
-                            if ui.small_button("Connect again").clicked() {
-                                out.push(RdpAction::Open(d.profile));
-                            }
-                            if ui.small_button("Dismiss").clicked() {
-                                forget = Some(d.id);
-                            }
+                        State::Closed(why) if why.lines().count() > 1 || why.len() > 60 => {
+                            ui.label(RichText::new(why).small().color(ui.visuals().warn_fg_color));
                         }
+                        _ => {}
                     }
-                });
-                match &d.state {
-                    State::Open { addr, client, .. } => {
-                        let who = if d.user.is_empty() { String::new() } else { format!(" as {}", d.user) };
-                        let prog = client.map(|c| format!("{c} opened on ")).unwrap_or_default();
-                        ui.label(RichText::new(format!("{prog}{addr}{who}")).weak().small());
-                        if let Some(n) = &d.note {
-                            ui.label(RichText::new(n).small().color(ui.visuals().warn_fg_color));
-                        }
-                        let mut go = false;
-                        if let Some(a) = &mut d.asking {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("Windows password for {}", d.user));
-                                let r = ui.add(
-                                    egui::TextEdit::singleline(&mut a.password).password(true).desired_width(160.0),
-                                );
-                                ui.checkbox(&mut a.remember, "Remember in the system keychain");
-                                go = ui.button("Open").clicked()
-                                    || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                            });
-                            ui.label(
-                                RichText::new(
-                                    "FreeRDP has no login window of its own, so MalasDoh passes the password to it \
-                                     (not on its command line).",
-                                )
-                                .weak()
-                                .small(),
-                            );
-                        } else if client.is_some_and(malasdoh_core::rdp::wants_password)
-                            && ui.small_button("Forget the saved password").clicked()
-                        {
-                            env.secrets.delete(&SecretKey::RdpPassword(d.profile));
-                        }
-                        if go && let Some(a) = d.asking.take() {
-                            if a.remember
-                                && let Err(e) = env.secrets.set(&SecretKey::RdpPassword(d.profile), &a.password)
-                            {
-                                d.note = Some(format!("The password was not saved: {e}"));
-                            }
-                            d.typed = Some(a.password);
-                            launch(d, env);
-                        }
-                    }
-                    State::Closed(why) if why.lines().count() > 1 || why.len() > 60 => {
-                        ui.label(RichText::new(why).small().color(ui.visuals().warn_fg_color));
-                    }
-                    _ => {}
+                    ui.separator();
                 }
-                ui.separator();
-            }
-            ui.label(
-                RichText::new(
-                    "Your own Remote Desktop program does the drawing (that is what keeps it smooth); MalasDoh \
+                ui.label(
+                    RichText::new(
+                        "Your own Remote Desktop program does the drawing (that is what keeps it smooth); MalasDoh \
                      only carries its connection. Closing it here ends the session.",
-                )
-                .weak()
-                .small(),
-            );
-            if self.items.iter().any(|d| matches!(d.state, State::Starting(_))) {
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
-            } else {
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
-            }
-        });
+                    )
+                    .weak()
+                    .small(),
+                );
+                if self.items.iter().any(|d| matches!(d.state, State::Starting(_))) {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+                } else {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
+                }
+            },
+        );
         if let Some(id) = close
             && let Some(d) = self.items.iter_mut().find(|d| d.id == id)
         {

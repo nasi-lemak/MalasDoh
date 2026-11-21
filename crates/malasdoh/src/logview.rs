@@ -99,7 +99,7 @@ impl LogView {
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
                     .hint_text("Show only lines containing…")
-                    .desired_width(260.0),
+                    .desired_width(crate::dlg::field_width(ui, 260.0)),
             );
             ui.toggle_value(&mut self.paused, "Pause").on_hover_text("Stop scrolling; lines are still collected");
             ui.checkbox(&mut self.wrap, "Wrap");

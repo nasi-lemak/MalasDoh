@@ -48,6 +48,21 @@ enum Dialog {
     },
 }
 
+/// Move `paths` to the bin; what went wrong, if anything.
+#[cfg(feature = "desktop")]
+fn to_bin(paths: &[PathBuf]) -> Vec<String> {
+    match trash::delete_all(paths) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!("Cannot move to the {BIN}: {e}")],
+    }
+}
+
+/// No bin here: the dialog then offers to delete for good.
+#[cfg(not(feature = "desktop"))]
+fn to_bin(_paths: &[PathBuf]) -> Vec<String> {
+    vec![format!("There is no {BIN} on this system")]
+}
+
 /// Where deleted files go, in this system's words.
 #[cfg(windows)]
 const BIN: &str = "Recycle Bin";
@@ -94,8 +109,10 @@ fn without_verbatim(p: PathBuf) -> PathBuf {
     }
 }
 
+/// Where browsing starts: the home folder, or on a phone the app's own
+/// documents folder (all it may see).
 fn home() -> PathBuf {
-    malasdoh_core::paths::expand_tilde("~")
+    crate::dialogs::documents().unwrap_or_else(|| malasdoh_core::paths::expand_tilde("~"))
 }
 
 impl LocalBrowser {
@@ -248,10 +265,7 @@ impl LocalBrowser {
                     })
                     .collect()
             } else {
-                match trash::delete_all(&paths) {
-                    Ok(()) => Vec::new(),
-                    Err(e) => vec![format!("Cannot move to the {BIN}: {e}")],
-                }
+                to_bin(&paths)
             };
             *slot.lock().unwrap() = Some(errors);
         });
@@ -301,7 +315,8 @@ impl LocalBrowser {
             }
             Dialog::Delete { paths, error } => {
                 egui::Modal::new("local-delete".into()).show(ctx, |ui| {
-                    ui.set_max_width(520.0);
+                    crate::dlg::fit_modal(ui);
+                    ui.set_max_width(crate::dlg::at_most(ui, 520.0));
                     ui.heading(if error.is_some() {
                         "Delete for good?".to_string()
                     } else {
@@ -389,8 +404,18 @@ impl LocalBrowser {
     pub fn ui(&mut self, ui: &mut egui::Ui, session: crate::bridge::SessionId) -> Vec<LocalAction> {
         let mut actions = Vec::new();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("This computer").strong());
+            let here = if crate::share::available() { "This device" } else { "This computer" };
+            ui.label(RichText::new(here).strong());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Phones: one file selected can go to another app.
+                if crate::share::available()
+                    && let [one] = self.sel.selected.as_slice()
+                    && one.is_file()
+                    && ui.button("Share…").on_hover_text("Send it to another app").clicked()
+                    && let Err(e) = crate::share::share(one)
+                {
+                    self.error = Some(format!("Could not share {}: {e}", one.display()));
+                }
                 if !self.sel.selected.is_empty()
                     && ui.button("Upload ⏵").on_hover_text("Upload the selected items to the server folder").clicked()
                 {
@@ -464,7 +489,9 @@ impl LocalBrowser {
                     && (filter.is_empty() || e.name.to_lowercase().contains(&filter))
             })
             .collect();
-        let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        // Rows a finger can hit on a touch screen.
+        let pad = if crate::look::is_touch(ui.ctx()) { 18.0 } else { 4.0 };
+        let row_h = ui.text_style_height(&egui::TextStyle::Body) + pad;
         let mut open_dir = None;
         // The list's keys (once it was clicked): Ctrl+A, arrows, Enter on a folder, Backspace.
         let order: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).collect();
@@ -551,7 +578,8 @@ impl LocalBrowser {
                     let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
                     self.sel.click(&order, &e.path, ctrl, shift);
                 }
-                if resp.double_clicked() && e.is_dir {
+                // A touch screen has no double click: a tap opens.
+                if (resp.double_clicked() || (resp.clicked() && crate::look::is_touch(ui.ctx()))) && e.is_dir {
                     open_dir = Some(e.path.clone());
                 }
                 if resp.drag_started() && !selected {
@@ -576,6 +604,13 @@ impl LocalBrowser {
                     }
                     if ui.button("Upload").clicked() {
                         actions.push(LocalAction::Upload(self.sel.selected.clone()));
+                        ui.close();
+                    }
+                    // Phones: hand the file to another app (mail, a viewer…).
+                    if !is_dir && n == 1 && crate::share::available() && ui.button("Share…").clicked() {
+                        if let Err(e) = crate::share::share(&path) {
+                            self.error = Some(format!("Could not share {}: {e}", path.display()));
+                        }
                         ui.close();
                     }
                     if ui.add(egui::Button::new("Copy path").shortcut_text("Ctrl+C")).clicked() {

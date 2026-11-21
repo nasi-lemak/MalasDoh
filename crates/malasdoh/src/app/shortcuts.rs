@@ -3,6 +3,7 @@
 //! Ctrl ones (Ctrl+N, Ctrl+K) only while you are not typing in a terminal or
 //! a text box, where the shell or the box has a use for them.
 
+use crate::dlg::FitScreen as _;
 use egui::{Key, Modifiers};
 use malasdoh_core::profile::Profile;
 
@@ -139,21 +140,26 @@ impl App {
             return;
         }
         let mut open = true;
-        let shown = egui::Window::new("Keyboard shortcuts").open(&mut open).default_width(560.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (place, keys) in HELP {
-                    ui.label(egui::RichText::new(*place).strong());
-                    egui::Grid::new(("keys-help", *place)).num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
-                        for (k, what) in *keys {
-                            ui.monospace(*k);
-                            ui.label(*what);
-                            ui.end_row();
-                        }
-                    });
-                    ui.add_space(6.0);
-                }
+        let shown = egui::Window::new("Keyboard shortcuts")
+            .open(&mut open)
+            .default_width(560.0)
+            .fit_to_screen(ctx)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (place, keys) in HELP {
+                        ui.label(egui::RichText::new(*place).strong());
+                        egui::Grid::new(("keys-help", *place)).num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
+                            for (k, what) in *keys {
+                                ui.monospace(*k);
+                                // Wraps on a narrow screen.
+                                ui.add(egui::Label::new(*what).wrap());
+                                ui.end_row();
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
             });
-        });
         if crate::dlg::closes(ctx, &shown) {
             open = false;
         }

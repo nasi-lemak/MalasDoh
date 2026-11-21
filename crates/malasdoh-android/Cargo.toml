@@ -1,0 +1,29 @@
+[package]
+name = "malasdoh-android"
+description = "MalasDoh on Android: the native library the app's NativeActivity loads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "malasdoh_android"
+crate-type = ["cdylib"]
+
+# Only built for Android; elsewhere this is an empty library, so
+# `cargo build --workspace` keeps working on the desktop.
+[target.'cfg(target_os = "android")'.dependencies]
+malasdoh = { path = "../malasdoh", default-features = false }
+malasdoh-core.workspace = true
+egui.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "android-native-activity"] }
+# The same winit as eframe's, for the AndroidApp handle it is started with.
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+# With "log", tracing's events reach android_logger and so logcat.
+tracing = { workspace = true, features = ["log"] }
+log = "0.4"
+android_logger = "0.15"
+# Reading the window insets from Java.
+jni = "0.21"

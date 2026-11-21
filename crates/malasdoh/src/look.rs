@@ -148,12 +148,76 @@ pub fn visuals(theme: &AppTheme, accent: Option<Color32>) -> Visuals {
 }
 
 /// Room inside and between widgets: a little more than egui's defaults,
-/// which feel cramped at the sizes MalasDoh uses.
-pub fn spacing(style: &mut egui::Style) {
+/// which feel cramped at the sizes MalasDoh uses. On a touch screen, room
+/// enough for a finger.
+pub fn spacing(style: &mut egui::Style, touch: bool) {
     style.spacing.button_padding = egui::vec2(6.0, 3.0);
     style.spacing.item_spacing = egui::vec2(8.0, 4.0);
     style.spacing.menu_margin = egui::Margin::same(6);
     style.spacing.window_margin = egui::Margin::same(10);
+    if touch {
+        style.spacing.button_padding = egui::vec2(10.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.interact_size.y = 36.0;
+        style.spacing.text_edit_width = 240.0;
+        style.spacing.icon_width = 20.0;
+        style.spacing.icon_width_inner = 12.0;
+        style.spacing.scroll = egui::style::ScrollStyle::solid();
+        style.spacing.scroll.bar_width = 10.0;
+        // Text a little larger than egui's desktop sizes, as phones use.
+        use egui::{FontId, TextStyle};
+        style.text_styles.insert(TextStyle::Body, FontId::proportional(14.5));
+        style.text_styles.insert(TextStyle::Button, FontId::proportional(14.5));
+        style.text_styles.insert(TextStyle::Small, FontId::proportional(12.5));
+        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.5));
+        style.text_styles.insert(TextStyle::Heading, FontId::proportional(20.0));
+        // Holding a finger on a control shows what it does, a little sooner.
+        style.interaction.tooltip_delay = 0.3;
+    }
+}
+
+fn touch_id() -> egui::Id {
+    egui::Id::new("malasdoh-touch")
+}
+
+/// Use the touch-screen sizes: larger buttons, rows and scroll bars, and
+/// on-screen keys over the terminal.
+pub fn set_touch(ctx: &egui::Context, touch: bool) {
+    ctx.data_mut(|d| d.insert_temp(touch_id(), touch));
+    ctx.all_styles_mut(|s| spacing(s, touch));
+}
+
+fn keyboard_id() -> egui::Id {
+    egui::Id::new("malasdoh-hardware-keyboard")
+}
+
+/// A hardware keyboard is attached (a tablet's): the terminal's row of
+/// extra keys is not needed.
+pub fn set_hardware_keyboard(ctx: &egui::Context, attached: bool) {
+    ctx.data_mut(|d| d.insert_temp(keyboard_id(), attached));
+}
+
+pub fn hardware_keyboard(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(keyboard_id())).unwrap_or(false)
+}
+
+fn keyboard_up_id() -> egui::Id {
+    egui::Id::new("malasdoh-keyboard-up")
+}
+
+/// The platform says whether the on-screen keyboard is showing.
+pub fn set_keyboard_up(ctx: &egui::Context, up: bool) {
+    ctx.data_mut(|d| d.insert_temp(keyboard_up_id(), up));
+}
+
+/// Whether the on-screen keyboard is showing (as the platform said).
+pub fn keyboard_up(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(keyboard_up_id())).unwrap_or(false)
+}
+
+/// Whether [`set_touch`] asked for touch-screen sizes.
+pub fn is_touch(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(touch_id())).unwrap_or(false)
 }
 
 /// The main button of a dialog (Save, Connect…): in the accent colour.
@@ -361,7 +425,8 @@ pub fn apply(ctx: &egui::Context, themes: &[AppTheme], choice: &Choice) {
         }
     }
     ctx.set_theme(pref);
-    ctx.all_styles_mut(spacing);
+    let touch = is_touch(ctx);
+    ctx.all_styles_mut(|s| spacing(s, touch));
 }
 
 /// Every terminal palette to choose from: the built-in ones, then those of

@@ -2362,8 +2362,8 @@ insights.
 ### GNU General Public License v3.0 or later
 
 Used by:
-- malasdoh 0.1.0 (https://github.com/nasi-lemak/MalasDoh)
-- malasdoh-core 0.1.0 (https://github.com/nasi-lemak/MalasDoh)
+- malasdoh 0.2.0 (https://github.com/nasi-lemak/MalasDoh)
+- malasdoh-core 0.2.0 (https://github.com/nasi-lemak/MalasDoh)
 
 ```
 GNU GENERAL PUBLIC LICENSE

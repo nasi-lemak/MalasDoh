@@ -1,6 +1,7 @@
 //! Passwords and key passphrases, kept in the OS keychain (Windows Credential
-//! Manager, macOS Keychain, Secret Service on Linux) and never in MalasDoh's
-//! own files. Only stored when the user ticks "remember".
+//! Manager, macOS Keychain, Secret Service on Linux, the iOS Keychain, the
+//! Android Keystore) and never in MalasDoh's own files. Only stored when the
+//! user ticks "remember".
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -60,20 +61,52 @@ pub struct OsKeychain;
 
 impl SecretStore for OsKeychain {
     fn get(&self, key: &SecretKey) -> Option<String> {
-        keyring::Entry::new(SERVICE, &key.account()).ok()?.get_password().ok()
+        entry(&key.account()).ok()?.get_password().ok()
     }
 
     fn set(&self, key: &SecretKey, secret: &str) -> Result<(), String> {
-        keyring::Entry::new(SERVICE, &key.account())
+        entry(&key.account())
             .and_then(|e| e.set_password(secret))
             .map_err(|e| format!("could not save to the system keychain: {e}"))
     }
 
     fn delete(&self, key: &SecretKey) {
-        if let Ok(e) = keyring::Entry::new(SERVICE, &key.account()) {
+        if let Ok(e) = entry(&key.account()) {
             let _ = e.delete_credential();
         }
     }
+}
+
+/// The keychain entry for `account`, on the desktop.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn entry(account: &str) -> keyring::Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, account)
+}
+
+/// The keychain entry for `account`, on iOS and Android, whose stores
+/// keyring's desktop `Entry` does not know: chosen here, once.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn entry(account: &str) -> keyring_core::Result<keyring_core::Entry> {
+    static STORE: std::sync::LazyLock<Result<(), String>> = std::sync::LazyLock::new(|| {
+        #[cfg(target_os = "ios")]
+        let store = apple_native_keyring_store::protected::Store::new();
+        #[cfg(target_os = "android")]
+        let store = android_native_keyring_store::Store::new();
+        match store {
+            Ok(store) => {
+                keyring_core::set_default_store(store);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("no keychain, so nothing is remembered: {e}");
+                Err(e.to_string())
+            }
+        }
+    });
+    if STORE.is_err() {
+        return Err(keyring_core::Error::NoDefaultStore);
+    }
+    keyring_core::Entry::new(SERVICE, account)
 }
 
 /// For tests, and for "don't remember anything" mode.

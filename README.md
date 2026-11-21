@@ -343,6 +343,10 @@ cargo build --release
 Linux needs the usual desktop libraries at run time (X11 or Wayland, OpenGL,
 `libxkbcommon`); every desktop distribution has them.
 
+Phones and tablets, all early: [Android](docs/android.md),
+[iPhone and iPad](docs/ios.md), [HarmonyOS](docs/harmonyos.md) (PCs and
+tablets).
+
 ## Where things are kept
 
 | What | Where |
@@ -366,7 +370,14 @@ them.
   Profiles, `known_hosts`, SSH connect/auth (on [`russh`](https://github.com/warp-tech/russh),
   pure Rust), SFTP and the shell fallback, port forwarding, folder sync, config
   checks, the safe-edit logic, diff and three-way merge. No GUI code.
-- `crates/malasdoh`: the [egui](https://github.com/emilk/egui) desktop app.
+- `crates/malasdoh`: the [egui](https://github.com/emilk/egui) app, as a
+  library and the desktop program.
+- `crates/malasdoh-ohos` and `ohos/`: the HarmonyOS native module and the
+  DevEco Studio project that loads it.
+- `crates/malasdoh-android` and `android/`: the Android native library and
+  the APK's manifest, icon and build script.
+- `crates/malasdoh-ios` and `ios/`: the iOS program and the app bundle's
+  Info.plist, icons and build script.
 
 ## Tests
 

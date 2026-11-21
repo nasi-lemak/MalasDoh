@@ -28,13 +28,17 @@ impl Default for ExportDialog {
     }
 }
 
+/// The import's file dialog, whose answer may come later (phones).
+pub(super) const IMPORT_ID: &str = "export-import";
+
 impl App {
     pub(super) fn start_export(&mut self) {
         self.export_dlg = Some(ExportDialog::default());
     }
 
     pub(super) fn start_import(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = crate::dialogs::FileDialog::new()
+            .id(IMPORT_ID)
             .set_title("Import a MalasDoh export")
             .add_filter("MalasDoh export", &["malasdoh"])
             .pick_file()
@@ -53,7 +57,8 @@ impl App {
         let mut go = false;
         let mut close = false;
         egui::Modal::new("export-dialog".into()).show(ctx, |ui| {
-            ui.set_max_width(460.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_max_width(crate::dlg::at_most(ui, 460.0));
             ui.heading("Export connections");
             ui.label(format!("{} saved connection(s), encrypted with a passphrase.", self.profiles.profiles.len()));
             ui.checkbox(&mut d.snippets, "Include snippets");
@@ -99,7 +104,8 @@ impl App {
                     .then(|| std::fs::read_to_string(self.shared.paths.known_hosts_file()).unwrap_or_default()),
             };
             let result = export::seal(&bundle, &d.pass).and_then(|text| {
-                let Some(path) = rfd::FileDialog::new()
+                let Some(path) = crate::dialogs::FileDialog::new()
+                    .id("export-save")
                     .set_title("Save the export")
                     .set_file_name("connections.malasdoh")
                     .save_file()
@@ -127,7 +133,8 @@ impl App {
         let mut go = false;
         let mut close = false;
         egui::Modal::new("import-dialog".into()).show(ctx, |ui| {
-            ui.set_max_width(460.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_max_width(crate::dlg::at_most(ui, 460.0));
             ui.heading("Import connections");
             ui.monospace(d.path.display().to_string());
             ui.horizontal(|ui| {

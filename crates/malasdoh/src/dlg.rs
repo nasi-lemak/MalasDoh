@@ -21,8 +21,7 @@ pub fn escape(ui: &egui::Ui) -> bool {
 }
 
 fn escape_ctx(ctx: &egui::Context) -> bool {
-    !egui::Popup::is_any_open(ctx)
-        && (ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) || take_back(ctx))
+    !egui::Popup::is_any_open(ctx) && (ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) || take_back(ctx))
 }
 
 fn back_id() -> egui::Id {

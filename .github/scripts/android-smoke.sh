@@ -82,12 +82,41 @@ expect_file() {
     exit 1
 }
 text() { adb shell input text "$1"; sleep 1; }
+# Whether the app has a connection open to the SSH server on this machine.
+connected_to_server() {
+    for _ in $(seq 1 15); do
+        if ss -tn state established '( sport = :2222 )' | grep -q 2222; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
 end_to_end() {
     echo "=== end to end"
+    # A fresh emulator can still be showing a system dialog (a launcher
+    # "isn't responding"): close them, and bring the app back to the front.
+    adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
+    adb shell am start -n "$package/.MainActivity" >/dev/null
+    sleep 3
     # The connection was put in place before the app started (seed below):
-    # find it, and Enter connects to it.
-    tap 120 "$search_y"; text ci; key 66
-    sleep 4
+    # find it, and Enter connects to it. Once more if a stray dialog ate it.
+    for attempt in 1 2; do
+        tap 120 "$search_y"; text ci; key 66
+        if connected_to_server; then
+            echo "ok: the app opened a connection to the server"
+            break
+        fi
+        shot "e2e-not-connected-$attempt"
+        if [ "$attempt" = 2 ]; then
+            echo "FAILED: the app did not connect to the server"
+            diagnose
+            exit 1
+        fi
+        adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
+        key 4; key 4
+    done
+    sleep 2
     shot e2e-hostkey
     key 61; key 66            # Tab to Trust and connect, Enter
     sleep 4

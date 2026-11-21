@@ -349,7 +349,7 @@ impl Terminal {
                 }
                 // No Ctrl+V on a phone: paste from the system clipboard.
                 if crate::clipboard::available()
-                    && ui.button("📋 Paste").clicked()
+                    && ui.button("Paste").clicked()
                     && let Some(text) = crate::clipboard::read()
                 {
                     // Handled below like a pasted Ctrl+V (asking first for

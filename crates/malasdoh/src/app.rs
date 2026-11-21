@@ -2531,7 +2531,7 @@ impl App {
             .order(egui::Order::Tooltip)
             .fixed_pos(ime.rect.left_bottom() + egui::vec2(0.0, 4.0))
             .show(ctx, |ui| {
-                if ui.button("📋 Paste").clicked()
+                if ui.button("Paste").clicked()
                     && let Some(text) = crate::clipboard::read()
                 {
                     self.paste_into = Some((field, text));

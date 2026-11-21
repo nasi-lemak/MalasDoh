@@ -36,8 +36,10 @@ fn android_main(android: AndroidApp) {
         "MalasDoh",
         options,
         Box::new(move |cc| {
+            let mut app = App::with_context(&cc.egui_ctx, paths);
+            app.set_touch(&cc.egui_ctx, true);
             Ok(Box::new(Mobile {
-                app: App::with_context(&cc.egui_ctx, paths),
+                app,
                 android,
                 focused: true,
                 insets: Insets::default(),

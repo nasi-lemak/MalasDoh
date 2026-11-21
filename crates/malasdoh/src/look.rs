@@ -148,12 +148,39 @@ pub fn visuals(theme: &AppTheme, accent: Option<Color32>) -> Visuals {
 }
 
 /// Room inside and between widgets: a little more than egui's defaults,
-/// which feel cramped at the sizes MalasDoh uses.
-pub fn spacing(style: &mut egui::Style) {
+/// which feel cramped at the sizes MalasDoh uses. On a touch screen, room
+/// enough for a finger.
+pub fn spacing(style: &mut egui::Style, touch: bool) {
     style.spacing.button_padding = egui::vec2(6.0, 3.0);
     style.spacing.item_spacing = egui::vec2(8.0, 4.0);
     style.spacing.menu_margin = egui::Margin::same(6);
     style.spacing.window_margin = egui::Margin::same(10);
+    if touch {
+        style.spacing.button_padding = egui::vec2(10.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.interact_size.y = 36.0;
+        style.spacing.text_edit_width = 320.0;
+        style.spacing.icon_width = 20.0;
+        style.spacing.icon_width_inner = 12.0;
+        style.spacing.scroll = egui::style::ScrollStyle::solid();
+        style.spacing.scroll.bar_width = 10.0;
+    }
+}
+
+fn touch_id() -> egui::Id {
+    egui::Id::new("malasdoh-touch")
+}
+
+/// Use the touch-screen sizes: larger buttons, rows and scroll bars, and
+/// on-screen keys over the terminal.
+pub fn set_touch(ctx: &egui::Context, touch: bool) {
+    ctx.data_mut(|d| d.insert_temp(touch_id(), touch));
+    ctx.all_styles_mut(|s| spacing(s, touch));
+}
+
+/// Whether [`set_touch`] asked for touch-screen sizes.
+pub fn is_touch(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(touch_id())).unwrap_or(false)
 }
 
 /// The main button of a dialog (Save, Connect…): in the accent colour.
@@ -361,7 +388,8 @@ pub fn apply(ctx: &egui::Context, themes: &[AppTheme], choice: &Choice) {
         }
     }
     ctx.set_theme(pref);
-    ctx.all_styles_mut(spacing);
+    let touch = is_touch(ctx);
+    ctx.all_styles_mut(|s| spacing(s, touch));
 }
 
 /// Every terminal palette to choose from: the built-in ones, then those of

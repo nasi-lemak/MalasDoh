@@ -476,7 +476,9 @@ impl LocalBrowser {
                     && (filter.is_empty() || e.name.to_lowercase().contains(&filter))
             })
             .collect();
-        let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        // Rows a finger can hit on a touch screen.
+        let pad = if crate::look::is_touch(ui.ctx()) { 18.0 } else { 4.0 };
+        let row_h = ui.text_style_height(&egui::TextStyle::Body) + pad;
         let mut open_dir = None;
         // The list's keys (once it was clicked): Ctrl+A, arrows, Enter on a folder, Backspace.
         let order: Vec<PathBuf> = visible.iter().map(|&i| self.entries[i].path.clone()).collect();
@@ -563,7 +565,8 @@ impl LocalBrowser {
                     let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
                     self.sel.click(&order, &e.path, ctrl, shift);
                 }
-                if resp.double_clicked() && e.is_dir {
+                // A touch screen has no double click: a tap opens.
+                if (resp.double_clicked() || (resp.clicked() && crate::look::is_touch(ui.ctx()))) && e.is_dir {
                     open_dir = Some(e.path.clone());
                 }
                 if resp.drag_started() && !selected {

@@ -354,7 +354,9 @@ impl Browser {
         // The date column only when there is room for it.
         let show_time = ui.available_width() > 430.0 || self.sort == SortBy::Modified;
 
-        let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        // Rows a finger can hit on a touch screen.
+        let pad = if crate::look::is_touch(ui.ctx()) { 18.0 } else { 4.0 };
+        let row_h = ui.text_style_height(&egui::TextStyle::Body) + pad;
         // The list's keys (once it was clicked): Ctrl+A, arrows, Enter, Delete, F2, Backspace.
         let order: Vec<String> = visible.iter().map(|e| e.path.clone()).collect();
         let (key, scroll_to) = self.sel.keys(ui.ctx(), &order, |p| sftp::file_name(p).to_string());
@@ -516,7 +518,8 @@ impl Browser {
             let (ctrl, shift) = ui.input(|i| (i.modifiers.command || i.modifiers.ctrl, i.modifiers.shift));
             self.sel.click(order, &e.path, ctrl, shift);
         }
-        if resp.double_clicked() {
+        // A touch screen has no double click: a tap opens.
+        if resp.double_clicked() || (resp.clicked() && crate::look::is_touch(ui.ctx())) {
             if e.is_dir_like() {
                 actions.push(Action::Navigate(e.path.clone()));
             } else {

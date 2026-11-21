@@ -260,6 +260,19 @@ struct ExternalEdit {
     mtime: Option<SystemTime>,
 }
 
+/// On a narrow screen (a phone), the parts shown side by side on a wide one
+/// take turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompactView {
+    /// Terminals and open files.
+    #[default]
+    Panes,
+    /// The server's files.
+    Files,
+    /// This device's files.
+    Local,
+}
+
 pub struct Session {
     pub id: SessionId,
     pub profile: Profile,
@@ -309,6 +322,10 @@ pub struct Session {
     pub bookmarks_changed: bool,
     /// The pane shown beside the active one.
     pub split: Option<Pane>,
+    /// On a narrow screen, which one of the side-by-side parts is shown.
+    pub compact_view: CompactView,
+    /// The active pane last frame: a file that opens is shown.
+    pub compact_seen: Option<Pane>,
     /// What was typed into terminals this frame (terminal id, bytes), for
     /// sending to other servers too.
     pub typed: Vec<(u64, Vec<u8>)>,
@@ -363,6 +380,8 @@ impl Session {
             find: FindWindow::default(),
             bookmarks_changed: false,
             split: None,
+            compact_view: CompactView::default(),
+            compact_seen: None,
             typed: Vec::new(),
             found_drafts: Vec::new(),
             fs_user: None,
@@ -2084,6 +2103,7 @@ impl Session {
                     theme: crate::look::terminal_theme(ui.ctx()),
                     copy_on_select: settings.copy_on_select,
                     confirm_paste: settings.confirm_paste,
+                    touch: crate::look::is_touch(ui.ctx()),
                 };
                 let out = t.term.ui(ui, &opts);
                 if out.start_log {

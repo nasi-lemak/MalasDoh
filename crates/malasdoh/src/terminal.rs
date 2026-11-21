@@ -15,6 +15,9 @@ pub struct TermOptions {
     pub copy_on_select: bool,
     /// Ask before pasting several lines into a shell, where each would run.
     pub confirm_paste: bool,
+    /// A touch screen: a row of keys phone keyboards lack (Esc, Tab, Ctrl,
+    /// arrows), and the on-screen keyboard while the terminal has focus.
+    pub touch: bool,
 }
 
 /// What the widget wants the session to do after a frame.
@@ -63,6 +66,8 @@ pub struct Terminal {
     mouse_down: Option<(MouseButton, (u16, u16))>,
     /// Take the keyboard next frame (a new terminal, or one switched to).
     pub take_focus: bool,
+    /// The on-screen Ctrl key was tapped: the next key typed is sent with Ctrl.
+    ctrl_latched: bool,
 }
 
 impl Terminal {
@@ -83,6 +88,7 @@ impl Terminal {
             pending_paste: None,
             mouse_down: None,
             take_focus: false,
+            ctrl_latched: false,
         }
     }
 
@@ -302,9 +308,59 @@ impl Terminal {
         });
     }
 
+    /// Keys phone and tablet keyboards do not have, over the terminal.
+    fn key_row_ui(&mut self, ui: &mut egui::Ui, out: &mut TerminalOutput) {
+        let app_cursor = self.parser.screen().application_cursor();
+        let special = |k: Key| key_bytes(k, Modifiers::NONE, app_cursor).unwrap_or_default();
+        let keys: [(&str, Vec<u8>); 15] = [
+            ("Esc", b"\x1b".to_vec()),
+            ("Tab", b"\t".to_vec()),
+            ("⏴", special(Key::ArrowLeft)),
+            ("⏷", special(Key::ArrowDown)),
+            ("⏶", special(Key::ArrowUp)),
+            ("⏵", special(Key::ArrowRight)),
+            ("|", b"|".to_vec()),
+            ("~", b"~".to_vec()),
+            ("/", b"/".to_vec()),
+            ("-", b"-".to_vec()),
+            (":", b":".to_vec()),
+            ("Home", special(Key::Home)),
+            ("End", special(Key::End)),
+            ("PgUp", special(Key::PageUp)),
+            ("PgDn", special(Key::PageDown)),
+        ];
+        let mut tapped = false;
+        {
+            ui.horizontal_wrapped(|ui| {
+                for (n, (label, bytes)) in keys.iter().enumerate() {
+                    if n == 2
+                        && ui
+                            .selectable_label(self.ctrl_latched, "Ctrl")
+                            .on_hover_text("The next key is sent with Ctrl")
+                            .clicked()
+                    {
+                        self.ctrl_latched = !self.ctrl_latched;
+                        tapped = true;
+                    }
+                    if ui.button(*label).clicked() {
+                        out.send.extend_from_slice(bytes);
+                        tapped = true;
+                    }
+                }
+            });
+        }
+        if tapped {
+            // Keep the keyboard up: the terminal takes the focus back.
+            self.take_focus = true;
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, opts: &TermOptions) -> TerminalOutput {
         let mut out = TerminalOutput::default();
         self.theme = opts.theme;
+        if opts.touch {
+            self.key_row_ui(ui, &mut out);
+        }
         self.toolbar_ui(ui, &mut out);
         let font = FontId::monospace(self.font_size);
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
@@ -340,6 +396,19 @@ impl Terminal {
                     egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
                 )
             });
+            if opts.touch {
+                // Ask for the on-screen keyboard, as a text field does.
+                let (row, col) = self.parser.screen().cursor_position();
+                let at = rect.min + Vec2::new(f32::from(col) * cell_w, f32::from(row) * cell_h);
+                ui.ctx().output_mut(|o| {
+                    o.ime = Some(egui::output::IMEOutput {
+                        purpose: egui::IMEPurpose::Terminal,
+                        rect: outer,
+                        cursor_rect: Rect::from_min_size(at, Vec2::new(1.0, cell_h)),
+                        should_interrupt_composition: false,
+                    })
+                });
+            }
         }
 
         let to_cell = |p: Pos2| -> (u16, u16) {
@@ -569,8 +638,26 @@ impl Terminal {
         let screen = self.parser.screen();
         let app_cursor = screen.application_cursor();
         let bracketed = screen.bracketed_paste();
+        // The on-screen Ctrl applied to a key press: the same key's text,
+        // which follows it, is not typed as well.
+        let mut ctrl_used = false;
         for ev in events {
             match ev {
+                Event::Text(_) if std::mem::take(&mut ctrl_used) => {}
+                Event::Text(t) if std::mem::take(&mut self.ctrl_latched) => {
+                    let mut chars = t.chars();
+                    if let Some(c) = chars.next() {
+                        out.send.push(ctrl_byte(c).unwrap_or(c as u8));
+                    }
+                    out.send.extend_from_slice(chars.as_str().as_bytes());
+                }
+                Event::Key { key, pressed: true, modifiers, .. } if self.ctrl_latched => {
+                    if let Some(bytes) = key_bytes(key, modifiers | Modifiers::CTRL, app_cursor) {
+                        out.send.extend_from_slice(&bytes);
+                        self.ctrl_latched = false;
+                        ctrl_used = true;
+                    }
+                }
                 Event::Text(t) => out.send.extend_from_slice(t.as_bytes()),
                 // Several lines into a plain shell: ask first. Programs that
                 // asked for bracketed paste (editors, modern shells) get it
@@ -793,6 +880,22 @@ impl AnsiStrip {
 }
 
 /// Bytes xterm sends for a key press that does not produce text.
+/// The byte Ctrl and `c` make in a terminal (Ctrl+C is 3), for the
+/// on-screen Ctrl key.
+fn ctrl_byte(c: char) -> Option<u8> {
+    match c {
+        'a'..='z' | 'A'..='Z' => Some(c.to_ascii_uppercase() as u8 & 0x1f),
+        '@' | ' ' | '2' => Some(0),
+        '[' | '3' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' => Some(0x1e),
+        '_' | '-' | '7' => Some(0x1f),
+        '?' | '8' => Some(0x7f),
+        _ => None,
+    }
+}
+
 pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     let csi_mod = |code: &str, final_: char| -> Vec<u8> {
         // Modifier parameter: 1 + shift + 2*alt + 4*ctrl.
@@ -976,6 +1079,14 @@ mod tests {
 
     const NONE: Modifiers = Modifiers::NONE;
     const CTRL: Modifiers = Modifiers::CTRL;
+
+    #[test]
+    fn on_screen_ctrl() {
+        assert_eq!(super::ctrl_byte('c'), Some(3));
+        assert_eq!(super::ctrl_byte('D'), Some(4));
+        assert_eq!(super::ctrl_byte('['), Some(0x1b));
+        assert_eq!(super::ctrl_byte('é'), None);
+    }
 
     #[test]
     fn control_keys() {

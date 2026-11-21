@@ -26,7 +26,11 @@ fn main() {
     let result = eframe::run_native(
         "MalasDoh",
         options,
-        Box::new(move |cc| Ok(Box::new(Mobile { app: App::with_context(&cc.egui_ctx, paths), focused: true }))),
+        Box::new(move |cc| {
+            let mut app = App::with_context(&cc.egui_ctx, paths);
+            app.set_touch(&cc.egui_ctx, true);
+            Ok(Box::new(Mobile { app, focused: true }))
+        }),
     );
     if let Err(e) = result {
         eprintln!("MalasDoh could not start: {e}");

@@ -24,7 +24,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("MalasDoh")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([720.0, 420.0])
+            // Narrow windows get the phone layout.
+            .with_min_inner_size([360.0, 420.0])
             .with_drag_and_drop(true)
             .with_app_id("malasdoh")
             .with_icon(
@@ -32,7 +33,18 @@ fn main() -> eframe::Result<()> {
             ),
         ..Default::default()
     };
-    let result = eframe::run_native("MalasDoh", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, paths)))));
+    let result = eframe::run_native(
+        "MalasDoh",
+        options,
+        Box::new(move |cc| {
+            let mut app = app::App::new(cc, paths);
+            // Touch-screen sizes, for a touch-screen laptop or tablet.
+            if std::env::var_os("MALASDOH_TOUCH").is_some_and(|v| v != "0") {
+                app.set_touch(&cc.egui_ctx, true);
+            }
+            Ok(Box::new(app))
+        }),
+    );
     if let Err(e) = &result {
         // Usually no usable OpenGL (a VM, a remote desktop, an old driver).
         let msg = format!(

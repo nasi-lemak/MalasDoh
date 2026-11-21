@@ -54,6 +54,9 @@ public class MainActivity extends NativeActivity {
     /** The keyboard's select all, cut, copy or paste (android.R.id.…). */
     static native void nativeAction(int id);
 
+    /** The window's insets changed: the keyboard or the system bars moved. */
+    static native void nativeInsetsChanged();
+
     /** The files picked for the dialog with this id (none: cancelled). */
     static native void nativePicked(String id, String[] paths);
 
@@ -67,6 +70,11 @@ public class MainActivity extends NativeActivity {
         super.onCreate(state);
         input = new InputView(this);
         addContentView(input, new ViewGroup.LayoutParams(1, 1));
+        // Tell the app when the keyboard shows or hides, whoever asked.
+        getWindow().getDecorView().setOnApplyWindowInsetsListener((view, insets) -> {
+            nativeInsetsChanged();
+            return view.onApplyWindowInsets(insets);
+        });
     }
 
     @Override

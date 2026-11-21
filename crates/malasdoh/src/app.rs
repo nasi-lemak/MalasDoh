@@ -1127,7 +1127,7 @@ impl App {
             }
             // Typing in the terminal with the keyboard up: the terminal gets
             // all the room there is.
-            let typing = s.compact_view == V::Panes && s.typing_in_terminal() && keyboard_up(ui.ctx());
+            let typing = s.compact_view == V::Panes && s.typing_in_terminal() && crate::look::keyboard_up(ui.ctx());
             if !typing {
                 chosen_snippet = compact::bar(ui, s, &shared, &settings, &self.snippets, &mut self.last_local_dir);
                 ui.separator();
@@ -2519,15 +2519,6 @@ impl eframe::App for App {
     }
 }
 
-fn keyboard_up_id() -> egui::Id {
-    egui::Id::new("malasdoh-keyboard-up")
-}
-
-/// Whether the on-screen keyboard is showing (as the platform said).
-fn keyboard_up(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp(keyboard_up_id())).unwrap_or(false)
-}
-
 /// Narrower than this (in points), the window is a phone's: one part at a
 /// time instead of side by side.
 const COMPACT_WIDTH: f32 = crate::dlg::NARROW;
@@ -2543,7 +2534,7 @@ impl App {
     /// is, typing in a terminal on a phone hides all but the terminal and its
     /// keys.
     pub fn set_keyboard_up(&self, ctx: &egui::Context, up: bool) {
-        ctx.data_mut(|d| d.insert_temp(keyboard_up_id(), up));
+        crate::look::set_keyboard_up(ctx, up);
     }
 
     /// The platform says whether a hardware keyboard is attached: if so, the
@@ -2560,6 +2551,9 @@ impl App {
     /// Gone to the background (a phone): saves what is open, and starts the
     /// clock for the app lock.
     pub fn went_away(&mut self) {
+        for t in self.sessions.iter_mut().flat_map(|s| s.terms.iter_mut()) {
+            t.term.refocus = t.term.had_focus;
+        }
         self.shutdown();
         self.away_since = Some(Instant::now());
     }
@@ -2575,6 +2569,9 @@ impl App {
         {
             self.locked = true;
             self.unlock_asked = false;
+        }
+        for t in self.sessions.iter_mut().flat_map(|s| s.terms.iter_mut()) {
+            t.term.take_focus |= std::mem::take(&mut t.term.refocus);
         }
         let shared = self.shared.clone();
         for s in &mut self.sessions {
@@ -2715,7 +2712,7 @@ impl App {
         self.shortcuts(&ctx);
         self.compact = ui.available_width() < COMPACT_WIDTH;
         let typing = self.compact
-            && keyboard_up(&ctx)
+            && crate::look::keyboard_up(&ctx)
             && self
                 .active
                 .and_then(|id| self.sessions.iter().find(|s| s.id == id))

@@ -201,6 +201,20 @@ pub fn hardware_keyboard(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp(keyboard_id())).unwrap_or(false)
 }
 
+fn keyboard_up_id() -> egui::Id {
+    egui::Id::new("malasdoh-keyboard-up")
+}
+
+/// The platform says whether the on-screen keyboard is showing.
+pub fn set_keyboard_up(ctx: &egui::Context, up: bool) {
+    ctx.data_mut(|d| d.insert_temp(keyboard_up_id(), up));
+}
+
+/// Whether the on-screen keyboard is showing (as the platform said).
+pub fn keyboard_up(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(keyboard_up_id())).unwrap_or(false)
+}
+
 /// Whether [`set_touch`] asked for touch-screen sizes.
 pub fn is_touch(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp(touch_id())).unwrap_or(false)

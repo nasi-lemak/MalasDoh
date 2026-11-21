@@ -133,6 +133,13 @@ end_to_end() {
     text 'seq%s1%s200'; key 66
     sleep 2
     shot e2e-terminal
+    if adb logcat -d -s malasdoh:I | grep -q "keyboard showing: Some(true)"; then
+        echo "ok: the on-screen keyboard came up for the terminal"
+    else
+        echo "FAILED: the on-screen keyboard did not come up for the terminal"
+        diagnose
+        exit 1
+    fi
     # A swipe down the terminal goes back through what scrolled away.
     adb shell input swipe 540 1000 540 1900 500; sleep 2
     shot e2e-swiped
@@ -151,7 +158,7 @@ end_to_end() {
     fi
     adb shell am start -n "$package/.MainActivity" >/dev/null
     sleep 5
-    adb shell input tap 540 1500; sleep 1   # the terminal, to type into it
+    # No tap: the terminal typed in before has the focus again.
     text 'touch%se2e-still-connected'; key 66
     expect_file e2e-still-connected "the same connection after 45 seconds in the background"
     shot e2e-back

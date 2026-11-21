@@ -5,6 +5,7 @@
 //! composing input methods) and the clipboard.
 #![cfg(target_os = "android")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -112,6 +113,7 @@ fn android_main(android: AndroidApp) {
                 android,
                 focused: true,
                 insets: Insets::default(),
+                ime_visible: None,
                 keyboard: None,
                 settle_until: Instant::now() + SETTLE,
                 last_look: Instant::now() - SETTLE,
@@ -146,6 +148,8 @@ struct Mobile {
     focused: bool,
     /// The covered edges last seen.
     insets: Insets,
+    /// Whether the on-screen keyboard is showing, as Android says (11+).
+    ime_visible: Option<bool>,
     /// The on-screen keyboard as last asked for: up, in which mode.
     keyboard: Option<i32>,
     /// Until when to look at the insets again every quarter second: Android
@@ -188,6 +192,9 @@ impl eframe::App for Mobile {
             self.settle_until = Instant::now() + SETTLE;
             // Back from the background: connect again what dropped.
             self.app.resumed();
+            // Android may bring the keyboard back by itself: show or hide it
+            // as the app wants, in the next frame.
+            self.keyboard = Some(-1);
         }
         self.focused = focused;
 
@@ -211,14 +218,23 @@ impl eframe::App for Mobile {
         // Look at the insets for a while after something moved them, and
         // twice a second while the keyboard is wanted (Back puts it away
         // without telling the app).
+        if INSETS_CHANGED.swap(false, Ordering::Relaxed) {
+            self.settle_until = Instant::now() + SETTLE;
+        }
         let wanted = self.keyboard.is_some();
         if (Instant::now() < self.settle_until || wanted) && self.last_look.elapsed() >= Duration::from_millis(200) {
             self.last_look = Instant::now();
             match insets(&self.android) {
-                Ok(insets) if insets != self.insets => {
-                    log::info!("insets (left, top, right, bottom): {insets:?}");
+                Ok((insets, ime)) if (insets, ime) != (self.insets, self.ime_visible) => {
+                    log::info!("insets (left, top, right, bottom): {insets:?}, keyboard showing: {ime:?}");
                     self.insets = insets;
+                    self.ime_visible = ime;
                     ctx.request_repaint();
+                    if ime == Some(true) && !wanted {
+                        // Shown without the app asking: nothing would take
+                        // what is typed on it.
+                        self.show_keyboard(None);
+                    }
                 }
                 Ok(_) => ctx.request_repaint_after(Duration::from_millis(if wanted { 500 } else { 250 })),
                 Err(e) => {
@@ -227,12 +243,12 @@ impl eframe::App for Mobile {
                 }
             }
         }
-        // The keyboard is up when the bottom inset is well above the
-        // navigation bar's alone.
+        // Whether the keyboard is up: Android says (11+); before, when the
+        // bottom inset is well above the navigation bar's alone.
         if !wanted {
             self.bar_bottom = self.insets[3];
         }
-        let up = wanted && self.insets[3] > self.bar_bottom + 100;
+        let up = self.ime_visible.unwrap_or(wanted && self.insets[3] > self.bar_bottom + 100);
         if up != self.keyboard_up {
             self.keyboard_up = up;
             self.app.set_keyboard_up(&ctx, up);
@@ -263,14 +279,19 @@ impl Mobile {
                 self.settle_until = Instant::now() + SETTLE;
             }
             self.keyboard = wanted;
-            let shown = with_activity(&self.android, |env, activity| {
-                let (show, mode) = (wanted.is_some(), wanted.unwrap_or(TEXT));
-                env.call_method(activity, "showKeyboard", "(ZI)V", &[JValue::Bool(show.into()), JValue::Int(mode)])?;
-                Ok(())
-            });
-            if let Err(e) = shown {
-                log::warn!("could not show or hide the keyboard: {e}");
-            }
+            self.show_keyboard(wanted);
+        }
+    }
+
+    /// Show the keyboard in this mode, or hide it.
+    fn show_keyboard(&self, mode: Option<i32>) {
+        let shown = with_activity(&self.android, |env, activity| {
+            let (show, mode) = (mode.is_some(), mode.unwrap_or(TEXT));
+            env.call_method(activity, "showKeyboard", "(ZI)V", &[JValue::Bool(show.into()), JValue::Int(mode)])?;
+            Ok(())
+        });
+        if let Err(e) = shown {
+            log::warn!("could not show or hide the keyboard: {e}");
         }
     }
 
@@ -324,6 +345,20 @@ impl Mobile {
 static TYPED: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
 /// To wake the app up when the keyboard typed something.
 static CTX: OnceLock<egui::Context> = OnceLock::new();
+
+/// The window's insets changed (Java's listener): look at them again.
+static INSETS_CHANGED: AtomicBool = AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeInsetsChanged(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    INSETS_CHANGED.store(true, Ordering::Relaxed);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
 
 fn typed(events: impl IntoIterator<Item = egui::Event>) {
     TYPED.lock().unwrap_or_else(|e| e.into_inner()).extend(events);
@@ -488,31 +523,37 @@ fn with_activity<T>(
 /// The window's insets, from Java: `getWindow().getDecorView()
 /// .getRootWindowInsets()`, for the system bars, the display cutout and the
 /// keyboard (Android 11+), or the older system-window insets (Android 8-10).
-fn insets(android: &AndroidApp) -> Result<Insets, jni::errors::Error> {
+/// Also whether the keyboard is showing, where Android says (11+).
+fn insets(android: &AndroidApp) -> Result<(Insets, Option<bool>), jni::errors::Error> {
     with_activity(android, |env, activity| {
         let window = env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
         let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
         let all = env.call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?.l()?;
         if all.is_null() {
             // Not attached to a window yet.
-            return Ok(Insets::default());
+            return Ok((Insets::default(), None));
         }
         if AndroidApp::sdk_version() >= 30 {
             let mut types = 0;
             for t in ["systemBars", "displayCutout", "ime"] {
                 types |= env.call_static_method("android/view/WindowInsets$Type", t, "()I", &[])?.i()?;
             }
+            let ime = env.call_static_method("android/view/WindowInsets$Type", "ime", "()I", &[])?.i()?;
+            let showing = env.call_method(&all, "isVisible", "(I)Z", &[JValue::Int(ime)])?.z()?;
             let i = env.call_method(&all, "getInsets", "(I)Landroid/graphics/Insets;", &[JValue::Int(types)])?.l()?;
             let mut edge = |name: &str| env.get_field(&i, name, "I").and_then(|v| v.i());
-            Ok([edge("left")?, edge("top")?, edge("right")?, edge("bottom")?])
+            Ok(([edge("left")?, edge("top")?, edge("right")?, edge("bottom")?], Some(showing)))
         } else {
             let mut edge = |name: &str| env.call_method(&all, name, "()I", &[]).and_then(|v| v.i());
-            Ok([
-                edge("getSystemWindowInsetLeft")?,
-                edge("getSystemWindowInsetTop")?,
-                edge("getSystemWindowInsetRight")?,
-                edge("getSystemWindowInsetBottom")?,
-            ])
+            Ok((
+                [
+                    edge("getSystemWindowInsetLeft")?,
+                    edge("getSystemWindowInsetTop")?,
+                    edge("getSystemWindowInsetRight")?,
+                    edge("getSystemWindowInsetBottom")?,
+                ],
+                None,
+            ))
         }
     })
 }

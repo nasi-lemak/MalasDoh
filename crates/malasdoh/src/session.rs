@@ -2123,8 +2123,10 @@ impl Session {
                     copy_on_select: settings.copy_on_select,
                     confirm_paste: settings.confirm_paste,
                     touch: crate::look::is_touch(ui.ctx()),
-                    // A hardware keyboard has the keys the row would add.
-                    on_screen_keys: crate::look::is_touch(ui.ctx()) && !crate::look::hardware_keyboard(ui.ctx()),
+                    // A hardware keyboard has the keys the row would add; but
+                    // an on-screen keyboard showing is typed on.
+                    on_screen_keys: crate::look::is_touch(ui.ctx())
+                        && (!crate::look::hardware_keyboard(ui.ctx()) || crate::look::keyboard_up(ui.ctx())),
                     compact: crate::dlg::narrow(ui.ctx()),
                 };
                 let out = t.term.ui(ui, &opts);

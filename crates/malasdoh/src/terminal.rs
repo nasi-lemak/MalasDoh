@@ -736,7 +736,7 @@ impl Terminal {
         let mut result = None;
         egui::Modal::new(id.with("paste")).show(ctx, |ui| {
             crate::dlg::fit_modal(ui);
-            ui.set_max_width(560.0);
+            ui.set_max_width(crate::dlg::at_most(ui, 560.0));
             ui.heading(format!("Paste {} lines?", lines.len()));
             ui.label("In a shell each line runs as a command as soon as it arrives.");
             egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {

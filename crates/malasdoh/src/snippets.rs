@@ -138,7 +138,7 @@ pub fn menu(ui: &mut egui::Ui, store: &SnippetStore, allow_terminal: bool) -> Op
             });
         });
     };
-    ui.set_min_width(340.0);
+    ui.set_min_width(crate::dlg::at_most(ui, 340.0));
     for folder in store.folders() {
         let items: Vec<&Snippet> = store.snippets.iter().filter(|s| s.folder == folder).collect();
         if folder.is_empty() {
@@ -147,7 +147,7 @@ pub fn menu(ui: &mut egui::Ui, store: &SnippetStore, allow_terminal: bool) -> Op
             }
         } else {
             ui.menu_button(&folder, |ui| {
-                ui.set_min_width(340.0);
+                ui.set_min_width(crate::dlg::at_most(ui, 340.0));
                 for sn in items {
                     row(ui, sn);
                 }

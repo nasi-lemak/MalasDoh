@@ -1538,8 +1538,8 @@ impl App {
         let mut done: Option<bool> = None;
         let a = &mut self.answer;
         egui::Modal::new("question".into()).show(ctx, |ui| {
-crate::dlg::fit_modal(ui);
-            ui.set_max_width(520.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_max_width(crate::dlg::at_most(ui, 520.0));
             match q {
                 Question::HostKey(p, _) => {
                     ui.heading("New server");
@@ -1683,14 +1683,14 @@ crate::dlg::fit_modal(ui);
             .collect();
         let groups = self.profiles.groups();
         egui::Modal::new("profile-form".into()).show(ctx, |ui| {
-crate::dlg::fit_modal(ui);
+            crate::dlg::fit_modal(ui);
             // On a phone: as wide as the screen, each label above its field.
             let screen = ctx.content_rect();
             let compact = screen.width() < COMPACT_WIDTH;
             if compact {
                 ui.set_width(screen.width() - 40.0);
             } else {
-                ui.set_min_width(460.0);
+                ui.set_min_width(crate::dlg::at_most(ui, 460.0));
             }
             ui.heading(if form.is_new { "New connection" } else { "Edit connection" });
             // Save and Cancel stay in view below the fields.
@@ -2017,8 +2017,8 @@ crate::dlg::fit_modal(ui);
             .collect();
         let mut result = None;
         egui::Modal::new("cross-copy".into()).show(ctx, |ui| {
-crate::dlg::fit_modal(ui);
-            ui.set_min_width(460.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_min_width(crate::dlg::at_most(ui, 460.0));
             ui.heading("Copy to another server");
             for p in c.paths.iter().take(8) {
                 ui.monospace(p);
@@ -2328,7 +2328,7 @@ crate::dlg::fit_modal(ui);
                     .stroke(egui::Stroke::new(1.0, color))
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
-                        ui.set_max_width(440.0);
+                        ui.set_max_width(crate::dlg::at_most(ui, 440.0));
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(icon).color(color).strong());
                             ui.add(egui::Label::new(msg.as_str()).wrap());

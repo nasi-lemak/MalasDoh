@@ -65,6 +65,17 @@ public class MainActivity extends NativeActivity {
         addContentView(input, new ViewGroup.LayoutParams(1, 1));
     }
 
+    @Override
+    protected void onDestroy() {
+        android.util.Log.i("malasdoh", "activity destroyed (finishing: " + isFinishing() + ", changing configuration: "
+                + isChangingConfigurations() + ")");
+        super.onDestroy();
+        // The Rust app runs once per process: a new activity in this one would
+        // have no app behind it (and Android would call it not responding).
+        // What was open has been saved, as it is whenever the app is left.
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
     /** Called from Rust, on its thread. */
     public void showKeyboard(final boolean show, final int mode) {
         runOnUiThread(() -> {

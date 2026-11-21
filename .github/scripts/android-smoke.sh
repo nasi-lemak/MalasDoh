@@ -23,6 +23,12 @@ alive() {
         adb logcat -d -s malasdoh:V RustStdoutStderr:V AndroidRuntime:E DEBUG:V libc:F | tail -n 150
         exit 1
     fi
+    if adb logcat -d | grep -q "ANR in $package"; then
+        echo "MalasDoh stopped responding (ANR)."
+        adb logcat -d | grep -A 20 "ANR in $package" | head -n 40
+        adb logcat -d -s malasdoh:V | tail -n 60
+        exit 1
+    fi
 }
 
 alive

@@ -78,6 +78,10 @@ expect_file() {
         sleep 1
     done
     echo "FAILED: no $1 on the server ($2)"
+    echo "--- connections to the server"
+    ss -tn '( sport = :2222 )' || true
+    adb exec-out screencap -p > "target/android/failed.png"
+    python3 .github/scripts/show-screenshot.py "target/android/failed.png" failed || true
     diagnose
     exit 1
 }

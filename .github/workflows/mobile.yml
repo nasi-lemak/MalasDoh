@@ -56,6 +56,9 @@ jobs:
           target: google_apis
           profile: ${{ matrix.device }}
           disable-animations: true
+          # A phone has no hardware keyboard (the emulator's profiles add one):
+          # test the app as people will use it, typing on the screen.
+          pre-emulator-launch-script: ${{ matrix.device == 'pixel_7' && 'for f in $HOME/.android/avd/*.avd/config.ini; do sed -i "/^hw.keyboard[ =]/d" "$f"; echo "hw.keyboard = no" >> "$f"; grep -H "^hw.keyboard" "$f"; done' || 'true' }}
           script: E2E=${{ matrix.device == 'pixel_7' && '1' || '0' }} sh .github/scripts/android-smoke.sh
 
   ios:

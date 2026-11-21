@@ -15,9 +15,12 @@ pub struct TermOptions {
     pub copy_on_select: bool,
     /// Ask before pasting several lines into a shell, where each would run.
     pub confirm_paste: bool,
-    /// A touch screen: a row of keys phone keyboards lack (Esc, Tab, Ctrl,
-    /// arrows), and the on-screen keyboard while the terminal has focus.
+    /// A touch screen: a swipe scrolls, a long press selects.
     pub touch: bool,
+    /// Typing on the on-screen keyboard (a touch screen without a hardware
+    /// keyboard): a row of the keys it lacks (Esc, Tab, Ctrl, arrows), and
+    /// the keyboard shown while the terminal has focus.
+    pub on_screen_keys: bool,
     /// A phone's screen: the keys in one row that scrolls sideways, and Find
     /// and Log in the session's menu instead of a row of their own.
     pub compact: bool,
@@ -426,7 +429,7 @@ impl Terminal {
         if zoom != 1.0 && over {
             self.zoom = (self.zoom * zoom).clamp(7.0 / self.font_size, 40.0 / self.font_size);
         }
-        if opts.touch {
+        if opts.on_screen_keys {
             self.key_row_ui(ui, &mut out, opts.compact);
         }
         // On a phone, Find and Log are in the session's menu; the search row
@@ -472,7 +475,7 @@ impl Terminal {
                     egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
                 )
             });
-            if opts.touch {
+            if opts.on_screen_keys {
                 // Ask for the on-screen keyboard, as a text field does.
                 let (row, col) = self.parser.screen().cursor_position();
                 let at = rect.min + Vec2::new(f32::from(col) * cell_w, f32::from(row) * cell_h);

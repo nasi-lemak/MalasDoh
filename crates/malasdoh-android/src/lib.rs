@@ -204,6 +204,7 @@ impl eframe::App for Mobile {
         let attached = config.keyboard() == Keyboard::Qwerty && config.keys_hidden() == KeysHidden::No;
         if attached != self.hardware_keyboard {
             self.hardware_keyboard = attached;
+            log::info!("hardware keyboard: {attached}");
             self.app.set_hardware_keyboard(&ctx, attached);
         }
 

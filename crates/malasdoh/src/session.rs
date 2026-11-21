@@ -2122,8 +2122,9 @@ impl Session {
                     theme: crate::look::terminal_theme(ui.ctx()),
                     copy_on_select: settings.copy_on_select,
                     confirm_paste: settings.confirm_paste,
+                    touch: crate::look::is_touch(ui.ctx()),
                     // A hardware keyboard has the keys the row would add.
-                    touch: crate::look::is_touch(ui.ctx()) && !crate::look::hardware_keyboard(ui.ctx()),
+                    on_screen_keys: crate::look::is_touch(ui.ctx()) && !crate::look::hardware_keyboard(ui.ctx()),
                     compact: crate::dlg::narrow(ui.ctx()),
                 };
                 let out = t.term.ui(ui, &opts);

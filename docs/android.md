@@ -59,6 +59,17 @@ own key: `MALASDOH_KEYSTORE`, `MALASDOH_KEYSTORE_PASS` and
 
 Logs: `adb logcat -s malasdoh`.
 
+## Lock, share, hardware keyboard
+
+- **App lock:** Settings → General → "Lock with fingerprint, face or PIN".
+  MalasDoh then asks when it starts and when you come back after half a
+  minute away; open connections stay open behind the lock.
+- **Share:** in "This device", Share… on a file hands it to another app
+  (mail, a viewer, a chat).
+- **Back** (Android) closes a menu, dialog or window, and from a connection
+  goes back to the list. It never quits the app.
+- **A hardware keyboard** (a tablet's) hides the terminal's row of extra keys.
+
 ## How it fits together
 
 - `crates/malasdoh-android`: the native library, `libmalasdoh_android.so`:

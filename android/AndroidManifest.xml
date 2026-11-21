@@ -12,6 +12,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The app lock (Settings): fingerprint or face, or the device's PIN. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
 
     <!-- allowBackup: profiles and known hosts stay on the device. -->
     <application

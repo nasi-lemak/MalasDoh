@@ -65,6 +65,9 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!-- The app lock (Settings). -->
+	<key>NSFaceIDUsageDescription</key>
+	<string>MalasDoh can lock itself with Face ID, so no one else can use your saved connections.</string>
 	<!-- Mouse and trackpad on iPad. -->
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>

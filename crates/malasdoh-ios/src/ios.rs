@@ -34,6 +34,7 @@ pub fn main() {
         documents: home.join("Documents"),
     });
     malasdoh::share::set_sharer(share_file);
+    malasdoh::lock::set_asker(ask_to_unlock);
     malasdoh::clipboard::set_reader(|| {
         // SAFETY: UIPasteboard may be used from any thread.
         unsafe { UIPasteboard::generalPasteboard().string() }.map(|s| s.to_string())
@@ -116,7 +117,7 @@ impl eframe::App for Mobile {
         let ctx = ui.ctx().clone();
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.focused && !focused {
-            self.app.shutdown();
+            self.app.went_away();
         }
         if focused && !self.focused {
             // Back from the background, where iOS stops apps' connections:
@@ -328,4 +329,28 @@ fn share_file(path: &std::path::Path) -> Result<(), String> {
     }
     root.presentViewController_animated_completion(&sheet, true, None);
     Ok(())
+}
+
+/// The app lock: Face ID, Touch ID or the passcode. A device with no
+/// passcode at all is let through: there is nothing to check against.
+fn ask_to_unlock() {
+    use objc2_local_authentication::{LAContext, LAPolicy};
+
+    let context = unsafe { LAContext::new() };
+    let policy = LAPolicy::DeviceOwnerAuthentication;
+    // SAFETY: plain calls on a fresh context; the reply block only touches
+    // the lock's answer and egui's thread-safe context.
+    unsafe {
+        if context.canEvaluatePolicy_error(policy).is_err() {
+            malasdoh::lock::answer(true);
+            return;
+        }
+        let reply = RcBlock::new(|ok: objc2::runtime::Bool, _error: *mut objc2_foundation::NSError| {
+            malasdoh::lock::answer(ok.as_bool());
+            if let Some(ctx) = CTX.get() {
+                ctx.request_repaint();
+            }
+        });
+        context.evaluatePolicy_localizedReason_reply(policy, &NSString::from_str("Unlock MalasDoh"), &reply);
+    }
 }

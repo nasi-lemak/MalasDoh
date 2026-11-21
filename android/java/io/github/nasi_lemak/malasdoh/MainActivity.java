@@ -159,6 +159,66 @@ public class MainActivity extends NativeActivity {
         return null;
     }
 
+    static native void nativeUnlocked(boolean ok);
+
+    private static final int UNLOCK = 4712;
+
+    /**
+     * Called from Rust: ask for the fingerprint, face or the device's PIN
+     * (the app lock). A device with no screen lock at all is let through:
+     * there is nothing to check against.
+     */
+    public void unlock() {
+        runOnUiThread(() -> {
+            String title = "Unlock MalasDoh";
+            if (Build.VERSION.SDK_INT >= 30) {
+                int how = android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG
+                        | android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL;
+                android.hardware.biometrics.BiometricManager bm =
+                        getSystemService(android.hardware.biometrics.BiometricManager.class);
+                if (bm.canAuthenticate(how) != android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS) {
+                    nativeUnlocked(true);
+                    return;
+                }
+                new android.hardware.biometrics.BiometricPrompt.Builder(this).setTitle(title)
+                        .setAllowedAuthenticators(how).build()
+                        .authenticate(new android.os.CancellationSignal(), getMainExecutor(), prompt());
+            } else if (Build.VERSION.SDK_INT >= 29) {
+                android.app.KeyguardManager km = getSystemService(android.app.KeyguardManager.class);
+                if (!km.isDeviceSecure()) {
+                    nativeUnlocked(true);
+                    return;
+                }
+                new android.hardware.biometrics.BiometricPrompt.Builder(this).setTitle(title)
+                        .setDeviceCredentialAllowed(true).build()
+                        .authenticate(new android.os.CancellationSignal(), getMainExecutor(), prompt());
+            } else {
+                android.app.KeyguardManager km =
+                        (android.app.KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                Intent ask = km.createConfirmDeviceCredentialIntent(title, null);
+                if (ask == null) {
+                    nativeUnlocked(true);
+                } else {
+                    startActivityForResult(ask, UNLOCK);
+                }
+            }
+        });
+    }
+
+    private android.hardware.biometrics.BiometricPrompt.AuthenticationCallback prompt() {
+        return new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+            @Override
+            public void onAuthenticationSucceeded(android.hardware.biometrics.BiometricPrompt.AuthenticationResult r) {
+                nativeUnlocked(true);
+            }
+
+            @Override
+            public void onAuthenticationError(int code, CharSequence message) {
+                nativeUnlocked(false);
+            }
+        };
+    }
+
     /** Called from Rust: open the system's file picker. */
     public void pickFiles(final String id, final boolean multiple) {
         runOnUiThread(() -> {
@@ -178,6 +238,10 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == UNLOCK) {
+            nativeUnlocked(result == RESULT_OK);
+            return;
+        }
         if (request != PICK || pickId == null) return;
         final String id = pickId;
         pickId = null;

@@ -17,6 +17,7 @@ mod journal_ui;
 mod keys_ui;
 mod listsel;
 mod local;
+pub mod lock;
 mod logview;
 mod look;
 mod multiedit;

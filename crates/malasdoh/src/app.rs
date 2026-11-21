@@ -69,6 +69,12 @@ pub struct App {
     compact: bool,
     /// Text for the field with this id, from the touch-screen Paste button.
     paste_into: Option<(egui::Id, String)>,
+    /// Locked (phones, with the setting on): only the lock screen shows.
+    locked: bool,
+    /// The system's unlock prompt is up.
+    unlock_asked: bool,
+    /// When the app went to the background.
+    away_since: Option<Instant>,
     /// The list of keyboard shortcuts (F1).
     show_keys_help: bool,
     /// Built-in themes, then those from the themes folder.
@@ -402,6 +408,9 @@ impl App {
             show_sidebar: true,
             compact: false,
             paste_into: None,
+            locked: false,
+            unlock_asked: false,
+            away_since: None,
             show_keys_help: false,
             themes,
             theme_errors,
@@ -434,6 +443,8 @@ impl App {
         if app.settings.reopen_on_start {
             app.reopen_last();
         }
+        // Phones with the app lock on: locked from the start.
+        app.locked = app.settings.app_lock && crate::lock::available();
         app
     }
 
@@ -2196,6 +2207,12 @@ crate::dlg::fit_modal(ui);
                         ui.checkbox(&mut s.review_before_save, "Show changes and ask before saving a remote file");
                         ui.checkbox(&mut s.confirm_delete, "Ask before deleting remote files");
                         ui.checkbox(&mut s.reopen_on_start, "Reopen last session's connections and files on start");
+                        if crate::lock::available() {
+                            ui.checkbox(&mut s.app_lock, "Lock with fingerprint, face or PIN").on_hover_text(
+                                "Asked when MalasDoh starts and when you come back to it after half a minute away. \
+                                 Open connections stay open meanwhile.",
+                            );
+                        }
                         ui.add_space(8.0);
                         ui.label(RichText::new("Terminal").strong());
                         ui.checkbox(&mut s.copy_on_select, "Copy text as soon as it is selected");
@@ -2540,10 +2557,25 @@ impl App {
         self.sessions.iter().filter(|s| matches!(s.state, ConnState::Connected | ConnState::Connecting(_))).count()
     }
 
+    /// Gone to the background (a phone): saves what is open, and starts the
+    /// clock for the app lock.
+    pub fn went_away(&mut self) {
+        self.shutdown();
+        self.away_since = Some(Instant::now());
+    }
+
     /// Back in front after time in the background (a phone): connect again
     /// what dropped meanwhile. Lasting terminals come back as they were;
-    /// open files keep their edits.
+    /// open files keep their edits. With the app lock on, after half a
+    /// minute away it asks to be unlocked first.
     pub fn resumed(&mut self) {
+        if self.settings.app_lock
+            && crate::lock::available()
+            && self.away_since.take().is_some_and(|t| t.elapsed() > Duration::from_secs(30))
+        {
+            self.locked = true;
+            self.unlock_asked = false;
+        }
         let shared = self.shared.clone();
         for s in &mut self.sessions {
             s.check_alive();
@@ -2566,6 +2598,9 @@ impl App {
     /// status bar and the notch too), with the rest in the panel colour.
     pub fn frame_in_safe_area(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.lock_screen(ui) {
+            return;
+        }
         if let Some((id, text)) = self.paste_into.take() {
             // The Paste button below was tapped: the field has its focus back.
             ctx.memory_mut(|m| m.request_focus(id));
@@ -2594,6 +2629,44 @@ impl App {
             self.show_sidebar = true;
         }
         self.paste_button(&ctx);
+    }
+
+    /// Locked: the lock screen, and nothing else, until the system's prompt
+    /// says so. Returns whether it is locked.
+    fn lock_screen(&mut self, ui: &mut egui::Ui) -> bool {
+        if !self.locked {
+            return false;
+        }
+        if let Some(ok) = crate::lock::take_answer() {
+            self.unlock_asked = false;
+            if ok {
+                self.locked = false;
+                return false;
+            }
+        }
+        if !self.unlock_asked {
+            // Ask straight away; the button asks again after a cancel.
+            self.unlock_asked = true;
+            crate::lock::ask();
+        }
+        let ctx = ui.ctx().clone();
+        ui.painter().rect_filled(ctx.viewport_rect(), 0.0, ui.visuals().panel_fill);
+        let free = ctx.content_rect();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(free), |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(free.height() / 3.0);
+                ui.heading("MalasDoh is locked");
+                ui.label(RichText::new("Open connections stay open.").weak());
+                ui.add_space(12.0);
+                if ui.add(crate::look::primary(ui, "Unlock")).clicked() {
+                    self.unlock_asked = true;
+                    crate::lock::ask();
+                }
+            });
+        });
+        // The answer arrives from another thread: look again soon.
+        ctx.request_repaint_after(Duration::from_millis(250));
+        true
     }
 
     /// A touch screen's keyboard may have no way to paste (the iPhone's

@@ -59,6 +59,15 @@ one, for the App Store and TestFlight, is 99 USD a year).
 
    With your own bundle ID, also set `MALASDOH_IOS_BUNDLE_ID`.
 
+## Lock, share, hardware keyboard
+
+- **App lock:** Settings → General → "Lock with fingerprint, face or PIN" (Face ID, Touch ID or the passcode).
+  MalasDoh then asks when it starts and when you come back after half a
+  minute away; open connections stay open behind the lock.
+- **Share:** in "This device", Share… on a file hands it to another app
+  (mail, a viewer, a chat).
+- **A hardware keyboard** (a tablet's) hides the terminal's row of extra keys.
+
 ## How it fits together
 
 - `crates/malasdoh-ios`: the app's program: eframe's iOS window, the app,

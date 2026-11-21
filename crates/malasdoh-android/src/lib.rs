@@ -63,6 +63,17 @@ fn android_main(android: AndroidApp) {
         .and_then(|why: Option<String>| why.map_or(Ok(()), Err))
     });
 
+    let asker = android.clone();
+    malasdoh::lock::set_asker(move || {
+        if let Err(e) = with_activity(&asker, |env, activity| {
+            env.call_method(activity, "unlock", "()V", &[])?;
+            Ok(())
+        }) {
+            log::warn!("could not ask to unlock: {e}");
+            malasdoh::lock::answer(false);
+        }
+    });
+
     let picker = android.clone();
     malasdoh::dialogs::set_platform(malasdoh::dialogs::Platform {
         pick: Box::new(move |id, multiple| {
@@ -171,7 +182,7 @@ impl eframe::App for Mobile {
         let ctx = ui.ctx().clone();
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         if self.focused && !focused {
-            self.app.shutdown();
+            self.app.went_away();
         }
         if focused && !self.focused {
             self.settle_until = Instant::now() + SETTLE;
@@ -378,6 +389,19 @@ pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeKe
         _ => return,
     };
     typed(key_tap(key));
+}
+
+/// The app lock's prompt answered.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeUnlocked(
+    _env: JNIEnv,
+    _class: JClass,
+    ok: jni::sys::jboolean,
+) {
+    malasdoh::lock::answer(ok != 0);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
 }
 
 /// The files picked in the system's picker, copied into the app's cache.

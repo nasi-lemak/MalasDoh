@@ -31,6 +31,17 @@ jobs:
         run: ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME android/build-apk.sh
       - name: Pillow, for the screenshot
         run: python3 -m pip install --break-system-packages pillow
+      # For the phone's end-to-end run: a throwaway user with a password, on
+      # port 2222, which the emulator reaches as 10.0.2.2.
+      - name: An SSH server to connect to
+        if: matrix.device == 'pixel_7'
+        run: |
+          sudo apt-get update && sudo apt-get install -y openssh-server
+          sudo useradd -m -s /bin/bash demo
+          echo 'demo:malasdoh-ci-only' | sudo chpasswd
+          sudo ssh-keygen -A
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no
       - name: Let the emulator use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -44,7 +55,7 @@ jobs:
           target: google_apis
           profile: ${{ matrix.device }}
           disable-animations: true
-          script: sh .github/scripts/android-smoke.sh
+          script: E2E=${{ matrix.device == 'pixel_7' && '1' || '0' }} sh .github/scripts/android-smoke.sh
 
   ios:
     name: iOS (build, and run in the Simulator)

@@ -21,7 +21,23 @@ pub fn escape(ui: &egui::Ui) -> bool {
 }
 
 fn escape_ctx(ctx: &egui::Context) -> bool {
-    !egui::Popup::is_any_open(ctx) && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+    !egui::Popup::is_any_open(ctx)
+        && (ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) || take_back(ctx))
+}
+
+fn back_id() -> egui::Id {
+    egui::Id::new("malasdoh-back")
+}
+
+/// Android's Back button was pressed: the dialog or window it reaches
+/// closes, as with Escape (without the terminal seeing an Escape).
+pub fn press_back(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(back_id(), true));
+}
+
+/// Takes a Back press nothing has used yet.
+pub fn take_back(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(back_id())).unwrap_or(false)
 }
 
 /// Is the user working in this window (`layer`): its text box has the

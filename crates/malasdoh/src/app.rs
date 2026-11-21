@@ -320,6 +320,8 @@ struct ProfileForm {
     error: Option<String>,
     forget_password: bool,
     forget_sudo: bool,
+    /// Just opened: the cursor goes to Name (on a phone, with the keyboard).
+    focus_name: bool,
 }
 
 impl App {
@@ -1702,7 +1704,10 @@ crate::dlg::fit_modal(ui);
                 });
                 ui.end_row();
                 ui.label("Name");
-                ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("prod-web-1"));
+                let name = ui.add(egui::TextEdit::singleline(&mut p.name).hint_text("prod-web-1"));
+                if std::mem::take(&mut form.focus_name) {
+                    name.request_focus();
+                }
                 ui.end_row();
                 ui.label("Host");
                 ui.add(egui::TextEdit::singleline(&mut p.host).hint_text("10.0.0.5 or web.example.com"));
@@ -2331,6 +2336,7 @@ impl ProfileForm {
             error: None,
             forget_password: false,
             forget_sudo: false,
+            focus_name: true,
         }
     }
 }
@@ -2559,9 +2565,28 @@ impl App {
             ctx.memory_mut(|m| m.request_focus(id));
             ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
         }
+        // Android's Back: closes a menu, a dialog or a window, like Escape;
+        // with none open, goes from a connection back to the list.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)) {
+            if egui::Popup::is_any_open(&ctx) {
+                let ev = |pressed| egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                ctx.input_mut(|i| i.events.extend([ev(true), ev(false)]));
+            } else {
+                crate::dlg::press_back(&ctx);
+            }
+        }
         ui.painter().rect_filled(ctx.viewport_rect(), 0.0, ui.visuals().panel_fill);
         let free = ctx.content_rect();
         ui.scope_builder(egui::UiBuilder::new().max_rect(free), |ui| self.frame(ui));
+        if crate::dlg::take_back(&ctx) && self.compact && !self.show_sidebar && self.active.is_some() {
+            self.show_sidebar = true;
+        }
         self.paste_button(&ctx);
     }
 

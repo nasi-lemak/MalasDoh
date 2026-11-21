@@ -7,6 +7,9 @@ set -eu
 package=io.github.nasi_lemak.malasdoh
 apk=$(ls target/android/*.apk)
 adb install -r "$apk"
+# The notification for open connections: allowed up front, so Android's
+# question does not cover the app mid-test.
+adb shell pm grant "$package" android.permission.POST_NOTIFICATIONS || true
 adb logcat -c
 adb shell am start -W -n "$package/.MainActivity"
 sleep 20
@@ -44,6 +47,56 @@ alive() {
     fi
 }
 
+# The whole way, on a phone, against the SSH server the workflow started on
+# the host (10.0.2.2 from the emulator): make a connection with the form,
+# connect, trust the host key, log in with a password, run something, swipe
+# back through it, leave the app for a while and come back still connected.
+key() { adb shell input keyevent "$@"; sleep 1; }
+text() { adb shell input text "$1"; sleep 1; }
+end_to_end() {
+    echo "=== end to end"
+    key 4                     # Back: away from the form of the tour
+    key 4
+    tap 70 175                # New connection… (the cursor starts in Name)
+    text ci
+    key 61; text 10.0.2.2     # Tab: Host
+    key 61                    # Port: replace the 22
+    adb shell input keycombination 113 29; sleep 1
+    text 2222
+    key 61; text demo         # User
+    key 66                    # Enter: save
+    shot e2e-saved
+    tap 120 "$search_y"; text ci; key 66   # find it, Enter connects
+    sleep 4
+    shot e2e-hostkey
+    key 61; key 66            # Trust and connect
+    sleep 4
+    shot e2e-password
+    text malasdoh-ci-only; key 66
+    sleep 6
+    alive
+    text 'seq%s1%s200'; key 66
+    sleep 2
+    shot e2e-terminal
+    # A swipe down the terminal goes back through what scrolled away.
+    adb shell input swipe 540 1000 540 1900 500; sleep 2
+    shot e2e-swiped
+    alive
+    # Away for a while: the connection should stay up meanwhile.
+    key 3                     # Home
+    sleep 45
+    echo "--- notification"
+    adb shell dumpsys notification --noredact | grep -E "android.text=.*connection" | head -n 3 || true
+    alive
+    adb shell am start -n "$package/.MainActivity" >/dev/null
+    sleep 5
+    adb shell input tap 540 1500; sleep 1   # the terminal, to type into it
+    text 'echo%sstill-connected'; key 66
+    sleep 2
+    shot e2e-back
+    alive
+}
+
 alive
 shot start
 
@@ -75,11 +128,15 @@ tap 70 175 # New connection…
 shot form
 alive
 if [ "$wide" = 0 ]; then
-    tap 160 222 # Host
+    tap 160 232 # Host
     adb shell input text "example.com"
     sleep 2
     shot form-typing
     alive
+fi
+
+if [ "${E2E:-0}" = 1 ]; then
+    end_to_end
 fi
 
 echo "--- log"

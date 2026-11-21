@@ -1,6 +1,7 @@
 //! Compare two files: the same config on two servers, a server file and one
 //! on this computer, or a server file and one of its backups.
 
+use crate::dlg::FitScreen as _;
 use std::path::PathBuf;
 
 use egui::{Color32, RichText};
@@ -296,6 +297,7 @@ impl Compares {
                 .open(&mut open)
                 .default_size([900.0, 560.0])
                 .resizable(true)
+                .fit_to_screen(ctx)
                 .show(ctx, |ui| {
                     if window_ui(ui, w) {
                         reload = Some(w.id);
@@ -323,7 +325,8 @@ impl Compares {
             .collect();
         let mut result = None;
         egui::Modal::new("compare-pick".into()).show(ctx, |ui| {
-            ui.set_min_width(520.0);
+            crate::dlg::fit_modal(ui);
+            ui.set_min_width(crate::dlg::at_most(ui, 520.0));
             ui.heading("Compare with…");
             ui.monospace(p.left.label());
             ui.add_space(6.0);
@@ -357,7 +360,9 @@ impl Compares {
             ui.add_enabled_ui(p.mode == Mode::Local, |ui| {
                 ui.indent("local", |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut p.local).desired_width(400.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut p.local).desired_width(crate::dlg::field_width(ui, 400.0)),
+                        );
                         if (ui.button("Browse…").clicked() || crate::dialogs::ready("compare-with"))
                             && let Some(f) = crate::dialogs::FileDialog::new()
                                 .id("compare-with")

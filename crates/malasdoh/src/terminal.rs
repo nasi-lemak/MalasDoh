@@ -18,6 +18,9 @@ pub struct TermOptions {
     /// A touch screen: a row of keys phone keyboards lack (Esc, Tab, Ctrl,
     /// arrows), and the on-screen keyboard while the terminal has focus.
     pub touch: bool,
+    /// A phone's screen: the keys in one row that scrolls sideways, and Find
+    /// and Log in the session's menu instead of a row of their own.
+    pub compact: bool,
 }
 
 /// What the widget wants the session to do after a frame.
@@ -68,6 +71,12 @@ pub struct Terminal {
     pub take_focus: bool,
     /// The on-screen Ctrl key was tapped: the next key typed is sent with Ctrl.
     ctrl_latched: bool,
+    /// Had the keyboard last frame (on a phone, the rest makes room).
+    pub had_focus: bool,
+    /// Pinch (or Ctrl+scroll) zoom, on top of the font size in Settings.
+    zoom: f32,
+    /// Start logging, asked for from outside the terminal (the phone menu).
+    log_requested: bool,
 }
 
 impl Terminal {
@@ -89,6 +98,9 @@ impl Terminal {
             mouse_down: None,
             take_focus: false,
             ctrl_latched: false,
+            had_focus: false,
+            zoom: 1.0,
+            log_requested: false,
         }
     }
 
@@ -220,6 +232,22 @@ impl Terminal {
         total_sb - off
     }
 
+    /// Open the search over the scrollback.
+    pub fn open_search(&mut self) {
+        if self.search.is_none() {
+            self.search = Some(Search::default());
+        }
+    }
+
+    /// Start logging to a file (the session picks the file).
+    pub fn request_log(&mut self) {
+        self.log_requested = true;
+    }
+
+    pub fn stop_log(&mut self) {
+        self.log = None;
+    }
+
     pub fn set_font_size(&mut self, size: f32) {
         self.font_size = size;
     }
@@ -309,7 +337,7 @@ impl Terminal {
     }
 
     /// Keys phone and tablet keyboards do not have, over the terminal.
-    fn key_row_ui(&mut self, ui: &mut egui::Ui, out: &mut TerminalOutput) {
+    fn key_row_ui(&mut self, ui: &mut egui::Ui, out: &mut TerminalOutput, compact: bool) {
         let app_cursor = self.parser.screen().application_cursor();
         let special = |k: Key| key_bytes(k, Modifiers::NONE, app_cursor).unwrap_or_default();
         let keys: [(&str, Vec<u8>); 15] = [
@@ -330,34 +358,41 @@ impl Terminal {
             ("PgDn", special(Key::PageDown)),
         ];
         let mut tapped = false;
-        {
-            ui.horizontal_wrapped(|ui| {
-                for (n, (label, bytes)) in keys.iter().enumerate() {
-                    if n == 2
-                        && ui
-                            .selectable_label(self.ctrl_latched, "Ctrl")
-                            .on_hover_text("The next key is sent with Ctrl")
-                            .clicked()
-                    {
-                        self.ctrl_latched = !self.ctrl_latched;
-                        tapped = true;
-                    }
-                    if ui.button(*label).clicked() {
-                        out.send.extend_from_slice(bytes);
-                        tapped = true;
-                    }
-                }
-                // No Ctrl+V on a phone: paste from the system clipboard.
-                if crate::clipboard::available()
-                    && ui.button("Paste").clicked()
-                    && let Some(text) = crate::clipboard::read()
+        let mut row = |ui: &mut egui::Ui| {
+            for (n, (label, bytes)) in keys.iter().enumerate() {
+                if n == 2
+                    && ui
+                        .selectable_label(self.ctrl_latched, "Ctrl")
+                        .on_hover_text("The next key is sent with Ctrl")
+                        .clicked()
                 {
-                    // Handled below like a pasted Ctrl+V (asking first for
-                    // several lines into a shell).
-                    ui.ctx().input_mut(|i| i.events.push(Event::Paste(text)));
+                    self.ctrl_latched = !self.ctrl_latched;
                     tapped = true;
                 }
-            });
+                if ui.button(*label).clicked() {
+                    out.send.extend_from_slice(bytes);
+                    tapped = true;
+                }
+            }
+            // No Ctrl+V on a phone: paste from the system clipboard.
+            if crate::clipboard::available()
+                && ui.button("Paste").clicked()
+                && let Some(text) = crate::clipboard::read()
+            {
+                // Handled below like a pasted Ctrl+V (asking first for
+                // several lines into a shell).
+                ui.ctx().input_mut(|i| i.events.push(Event::Paste(text)));
+                tapped = true;
+            }
+        };
+        if compact {
+            // One row, swiped sideways: the terminal keeps the height.
+            egui::ScrollArea::horizontal()
+                .id_salt("term-keys")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| ui.horizontal(|ui| row(ui)));
+        } else {
+            ui.horizontal_wrapped(|ui| row(ui));
         }
         if tapped {
             // Keep the keyboard up: the terminal takes the focus back.
@@ -368,11 +403,24 @@ impl Terminal {
     pub fn ui(&mut self, ui: &mut egui::Ui, opts: &TermOptions) -> TerminalOutput {
         let mut out = TerminalOutput::default();
         self.theme = opts.theme;
-        if opts.touch {
-            self.key_row_ui(ui, &mut out);
+        // Pinch (or Ctrl+scroll) over the terminal: bigger or smaller text.
+        let area = ui.available_rect_before_wrap();
+        let (zoom, over) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos().is_some_and(|p| area.contains(p))));
+        if zoom != 1.0 && over {
+            self.zoom = (self.zoom * zoom).clamp(7.0 / self.font_size, 40.0 / self.font_size);
         }
-        self.toolbar_ui(ui, &mut out);
-        let font = FontId::monospace(self.font_size);
+        if opts.touch {
+            self.key_row_ui(ui, &mut out, opts.compact);
+        }
+        // On a phone, Find and Log are in the session's menu; the search row
+        // shows only once opened.
+        if !opts.compact || self.search.is_some() {
+            self.toolbar_ui(ui, &mut out);
+        }
+        if std::mem::take(&mut self.log_requested) {
+            out.start_log = true;
+        }
+        let font = FontId::monospace(self.font_size * self.zoom);
         let (cell_w, cell_h) = ui.ctx().fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let avail = ui.available_size();
         // A margin inside the terminal's background, so text does not touch
@@ -398,6 +446,7 @@ impl Terminal {
             response.request_focus();
         }
         let focused = response.has_focus();
+        self.had_focus = focused;
         if focused {
             // Tab, arrows and Escape belong to the remote program, not egui.
             ui.memory_mut(|m| {
@@ -616,6 +665,7 @@ impl Terminal {
         let lines: Vec<&str> = text.lines().collect();
         let mut result = None;
         egui::Modal::new(id.with("paste")).show(ctx, |ui| {
+            crate::dlg::fit_modal(ui);
             ui.set_max_width(560.0);
             ui.heading(format!("Paste {} lines?", lines.len()));
             ui.label("In a shell each line runs as a command as soon as it arrives.");

@@ -1,5 +1,6 @@
 //! Run one command on many hosts and compare the results side by side.
 
+use crate::dlg::FitScreen as _;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -165,6 +166,7 @@ impl MultiRun {
             .open(&mut open)
             .default_width(900.0)
             .default_height(600.0)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 let busy = self.running();
                 egui::Panel::left("multi-hosts").resizable(true).default_size(240.0).show(ui, |ui| {

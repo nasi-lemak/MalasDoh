@@ -1,5 +1,6 @@
 //! The folder compare / synchronise window.
 
+use crate::dlg::FitScreen as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -88,6 +89,7 @@ impl SyncWindow {
             .id(egui::Id::new(("sync", session)))
             .open(&mut open)
             .default_width(720.0)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 let busy = matches!(self.phase, Phase::Planning | Phase::Running(_));
                 ui.add_enabled_ui(!busy, |ui| {
@@ -96,7 +98,7 @@ impl SyncWindow {
                         ui.horizontal(|ui| {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.local)
-                                    .desired_width(420.0)
+                                    .desired_width(crate::dlg::field_width(ui, 420.0))
                                     .hint_text("C:\\site or ~/site"),
                             );
                             if ui.button("Browse…").clicked()
@@ -110,7 +112,10 @@ impl SyncWindow {
                         });
                         ui.end_row();
                         ui.label("Server");
-                        ui.add(egui::TextEdit::singleline(&mut self.remote).desired_width(420.0));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.remote)
+                                .desired_width(crate::dlg::field_width(ui, 420.0)),
+                        );
                         ui.end_row();
                         ui.label("Direction");
                         ui.horizontal(|ui| {
@@ -134,7 +139,7 @@ impl SyncWindow {
                         ui.label("Skip names");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.exclude_text)
-                                .desired_width(420.0)
+                                .desired_width(crate::dlg::field_width(ui, 420.0))
                                 .hint_text(".git, node_modules, *.log"),
                         );
                         ui.end_row();

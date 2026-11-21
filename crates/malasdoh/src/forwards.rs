@@ -1,6 +1,7 @@
 //! The port-forwarding window of a session, and the spec editor shared with
 //! the profile form.
 
+use crate::dlg::FitScreen as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -146,7 +147,7 @@ impl Forwards {
             .id(egui::Id::new(("forwards", session)))
             .open(&mut open)
             .default_width(640.0)
-            .show(ctx, |ui| {
+            .fit_to_screen(ctx).show(ctx, |ui| {
                 if self.items.is_empty() {
                     ui.label("No forwards yet. Add one below, or in the connection's settings.");
                 }

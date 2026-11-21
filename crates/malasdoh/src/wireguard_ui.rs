@@ -1,6 +1,7 @@
 //! Connection → WireGuard…: import a WireGuard configuration so connections
 //! can go through MalasDoh's own tunnel (no WireGuard install, no admin).
 
+use crate::dlg::FitScreen as _;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -205,7 +206,7 @@ impl WireGuardWindow {
         }
         let mut open = true;
         let running = wireguard::running();
-        let shown = egui::Window::new("WireGuard").open(&mut open).default_width(640.0).show(ctx, |ui| {
+        let shown = egui::Window::new("WireGuard").open(&mut open).default_width(640.0).fit_to_screen(ctx).show(ctx, |ui| {
             ui.label(
                 RichText::new(
                     "MalasDoh can reach servers through a WireGuard tunnel of its own: nothing to install, no admin \
@@ -323,7 +324,7 @@ impl WireGuardWindow {
                     ui.add(
                         egui::TextEdit::singleline(target)
                             .hint_text("and a server through it, e.g. 10.0.0.5:22 (optional)")
-                            .desired_width(300.0),
+                            .desired_width(crate::dlg::field_width(ui, 300.0)),
                     );
                     if let Err(m) = parsed {
                         ui.colored_label(ui.visuals().error_fg_color, RichText::new(m).small());

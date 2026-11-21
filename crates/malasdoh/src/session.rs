@@ -1931,6 +1931,11 @@ impl Session {
         }
     }
 
+    /// The terminal shown has the keyboard (on a phone, the rest makes room).
+    pub fn typing_in_terminal(&self) -> bool {
+        matches!(self.active, Some(Pane::Term(id)) if self.terms.iter().any(|t| t.id == id && t.term.had_focus))
+    }
+
     pub fn close_terminal(&mut self, id: u64) {
         if let Some(name) = self.terms.iter().find(|t| t.id == id && t.is_live()).and_then(|t| t.lasting.clone()) {
             self.notify(
@@ -2113,6 +2118,7 @@ impl Session {
                     copy_on_select: settings.copy_on_select,
                     confirm_paste: settings.confirm_paste,
                     touch: crate::look::is_touch(ui.ctx()),
+                    compact: crate::dlg::narrow(ui.ctx()),
                 };
                 let out = t.term.ui(ui, &opts);
                 if out.start_log {
@@ -2339,6 +2345,7 @@ impl Session {
         let mut restore = None;
         let mut compare = None;
         egui::Modal::new(egui::Id::new(("backups", self.id))).show(ctx, |ui| {
+            crate::dlg::fit_modal(ui);
             ui.heading(format!("Local backups of {path}"));
             ui.label(RichText::new("Newest first. Times are UTC.").weak());
             if list.is_empty() {

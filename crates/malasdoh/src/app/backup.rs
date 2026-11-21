@@ -57,6 +57,7 @@ impl App {
         let mut go = false;
         let mut close = false;
         egui::Modal::new("export-dialog".into()).show(ctx, |ui| {
+            crate::dlg::fit_modal(ui);
             ui.set_max_width(460.0);
             ui.heading("Export connections");
             ui.label(format!("{} saved connection(s), encrypted with a passphrase.", self.profiles.profiles.len()));
@@ -132,6 +133,7 @@ impl App {
         let mut go = false;
         let mut close = false;
         egui::Modal::new("import-dialog".into()).show(ctx, |ui| {
+            crate::dlg::fit_modal(ui);
             ui.set_max_width(460.0);
             ui.heading("Import connections");
             ui.monospace(d.path.display().to_string());

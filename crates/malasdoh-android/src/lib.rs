@@ -86,6 +86,9 @@ fn android_main(android: AndroidApp) {
                 insets: Insets::default(),
                 keyboard: None,
                 settle_until: Instant::now() + SETTLE,
+                last_look: Instant::now() - SETTLE,
+                bar_bottom: 0,
+                keyboard_up: false,
             }))
         }),
     );
@@ -118,6 +121,12 @@ struct Mobile {
     /// Until when to look at the insets again every quarter second: Android
     /// changes them without an event that winit passes on.
     settle_until: Instant,
+    /// When the insets were last read.
+    last_look: Instant,
+    /// The bottom inset without the keyboard (the navigation bar's).
+    bar_bottom: i32,
+    /// Whether the keyboard is on screen, as last told to the app.
+    keyboard_up: bool,
 }
 
 impl eframe::App for Mobile {
@@ -151,19 +160,35 @@ impl eframe::App for Mobile {
         self.copy_to_clipboard(&ctx);
         self.keyboard(&ctx);
 
-        if Instant::now() < self.settle_until {
+        // Look at the insets for a while after something moved them, and
+        // twice a second while the keyboard is wanted (Back puts it away
+        // without telling the app).
+        let wanted = self.keyboard.is_some();
+        if (Instant::now() < self.settle_until || wanted) && self.last_look.elapsed() >= Duration::from_millis(200) {
+            self.last_look = Instant::now();
             match insets(&self.android) {
                 Ok(insets) if insets != self.insets => {
                     log::info!("insets (left, top, right, bottom): {insets:?}");
                     self.insets = insets;
                     ctx.request_repaint();
                 }
-                Ok(_) => ctx.request_repaint_after(Duration::from_millis(250)),
+                Ok(_) => ctx.request_repaint_after(Duration::from_millis(if wanted { 500 } else { 250 })),
                 Err(e) => {
                     log::warn!("could not read the window insets: {e}");
                     self.settle_until = Instant::now();
                 }
             }
+        }
+        // The keyboard is up when the bottom inset is well above the
+        // navigation bar's alone.
+        if !wanted {
+            self.bar_bottom = self.insets[3];
+        }
+        let up = wanted && self.insets[3] > self.bar_bottom + 100;
+        if up != self.keyboard_up {
+            self.keyboard_up = up;
+            self.app.set_keyboard_up(&ctx, up);
+            ctx.request_repaint();
         }
     }
 

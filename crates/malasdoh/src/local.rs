@@ -315,6 +315,7 @@ impl LocalBrowser {
             }
             Dialog::Delete { paths, error } => {
                 egui::Modal::new("local-delete".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.set_max_width(520.0);
                     ui.heading(if error.is_some() {
                         "Delete for good?".to_string()

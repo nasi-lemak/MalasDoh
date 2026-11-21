@@ -49,7 +49,7 @@ pub fn main() {
             let _ = CTX.set(cc.egui_ctx.clone());
             let mut app = App::with_context(&cc.egui_ctx, paths);
             app.set_touch(&cc.egui_ctx, true);
-            Ok(Box::new(Mobile { app, focused: true, insets: egui::SafeAreaInsets::default() }))
+            Ok(Box::new(Mobile { app, focused: true, insets: egui::SafeAreaInsets::default(), keyboard_up: false }))
         }),
     );
     if let Err(e) = result {
@@ -78,6 +78,8 @@ struct Mobile {
     focused: bool,
     /// The notch and home-indicator insets, as egui-winit last gave them.
     insets: egui::SafeAreaInsets,
+    /// Whether the keyboard is on screen, as last told to the app.
+    keyboard_up: bool,
 }
 
 impl eframe::App for Mobile {
@@ -92,6 +94,11 @@ impl eframe::App for Mobile {
         let mut insets = self.insets;
         insets.0.bottom = insets.0.bottom.max(covered);
         raw.safe_area_insets = Some(insets);
+        let up = covered > 0.0;
+        if up != self.keyboard_up {
+            self.keyboard_up = up;
+            self.app.set_keyboard_up(ctx, up);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

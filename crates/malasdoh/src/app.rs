@@ -1,10 +1,12 @@
 //! The main window: connection list, session tabs, and the dialogs that answer
 //! a connection's questions.
 
+use crate::dlg::FitScreen as _;
 use crate::listsel::KeyAction;
 
 mod appearance;
 mod backup;
+mod compact;
 mod keys;
 mod rdp;
 mod shortcuts;
@@ -191,7 +193,11 @@ fn transfers_ui(ui: &mut egui::Ui, t: &mut malasdoh_core::transfer::TransferOpti
     ui.add_space(6.0);
     ui.label("Leave out of folder transfers (names or patterns, separated by commas):");
     if ui
-        .add(egui::TextEdit::singleline(skip_text).hint_text(".git, node_modules, *.tmp").desired_width(420.0))
+        .add(
+            egui::TextEdit::singleline(skip_text)
+                .hint_text(".git, node_modules, *.tmp")
+                .desired_width(crate::dlg::field_width(ui, 420.0)),
+        )
         .changed()
     {
         t.skip = skip_text.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -240,7 +246,11 @@ fn checks_ui(ui: &mut egui::Ui, rules: &mut Vec<ValidationRule>) {
                         .desired_width(170.0)
                         .hint_text("/etc/nginx/** or *.json"),
                 );
-                ui.add(egui::TextEdit::singleline(&mut r.check).desired_width(250.0).font(egui::TextStyle::Monospace));
+                ui.add(
+                    egui::TextEdit::singleline(&mut r.check)
+                        .desired_width(crate::dlg::field_width(ui, 250.0))
+                        .font(egui::TextStyle::Monospace),
+                );
                 egui::ComboBox::from_id_salt(("when", i))
                     .width(70.0)
                     .selected_text(match r.when {
@@ -1086,6 +1096,7 @@ impl App {
         }
 
         let compact = self.compact;
+        let mut chosen_snippet = None;
         if compact {
             // A phone: the server's files, this device's and the terminals
             // take turns.
@@ -1101,16 +1112,15 @@ impl App {
                 }
                 s.compact_seen = s.active;
             }
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut s.compact_view, V::Panes, "⌨ Terminals");
-                ui.selectable_value(&mut s.compact_view, V::Files, "📁 Files");
-                if s.local.is_some() {
-                    ui.selectable_value(&mut s.compact_view, V::Local, "🖥 This device");
-                }
-            });
-            ui.separator();
+            // Typing in the terminal with the keyboard up: the terminal gets
+            // all the room there is.
+            let typing = s.compact_view == V::Panes && s.typing_in_terminal() && keyboard_up(ui.ctx());
+            if !typing {
+                chosen_snippet = compact::bar(ui, s, &shared, &settings, &self.snippets, &mut self.last_local_dir);
+                ui.separator();
+            }
             match s.compact_view {
-                V::Panes => {}
+                V::Panes => s.pane_ui(ui, &shared, &settings),
                 V::Files => {
                     let actions = s.browser.ui(ui, settings.confirm_delete);
                     for a in actions {
@@ -1136,11 +1146,8 @@ impl App {
                 }
             });
         }
-        let show_panes = !compact || s.compact_view == crate::session::CompactView::Panes;
-
-        let mut chosen_snippet = None;
         // Pane tabs: terminals, then open files.
-        if show_panes {
+        if !compact {
             ui.horizontal_wrapped(|ui| {
                 let mut close_term = None;
                 let mut close_editor = None;
@@ -1389,9 +1396,10 @@ impl App {
         if self.show_snippets {
             let mut open = true;
             let mut changed = false;
-            let shown = egui::Window::new("Snippets").open(&mut open).default_width(760.0).show(ctx, |ui| {
-                changed = snippets::manager_ui(ui, &mut self.snippets);
-            });
+            let shown =
+                egui::Window::new("Snippets").open(&mut open).default_width(760.0).fit_to_screen(ctx).show(ctx, |ui| {
+                    changed = snippets::manager_ui(ui, &mut self.snippets);
+                });
             if crate::dlg::closes(ctx, &shown) {
                 open = false;
             }
@@ -1403,6 +1411,7 @@ impl App {
         let mut result = None;
         if let Some(p) = &mut self.pending_snippet {
             egui::Modal::new("snippet-values".into()).show(ctx, |ui| {
+                crate::dlg::fit_modal(ui);
                 ui.heading(&p.snippet.name);
                 ui.monospace(&p.snippet.command);
                 egui::Grid::new("snippet-values-grid").num_columns(2).show(ui, |ui| {
@@ -1516,6 +1525,7 @@ impl App {
         let mut done: Option<bool> = None;
         let a = &mut self.answer;
         egui::Modal::new("question".into()).show(ctx, |ui| {
+crate::dlg::fit_modal(ui);
             ui.set_max_width(520.0);
             match q {
                 Question::HostKey(p, _) => {
@@ -1660,6 +1670,7 @@ impl App {
             .collect();
         let groups = self.profiles.groups();
         egui::Modal::new("profile-form".into()).show(ctx, |ui| {
+crate::dlg::fit_modal(ui);
             // On a phone: as wide as the screen, each label above its field.
             let screen = ctx.content_rect();
             let compact = screen.width() < COMPACT_WIDTH;
@@ -1763,7 +1774,7 @@ impl App {
                                 ui.add(
                                     egui::TextEdit::singleline(path)
                                         .hint_text("~/.ssh/id_ed25519")
-                                        .desired_width(260.0),
+                                        .desired_width(crate::dlg::field_width(ui, 260.0)),
                                 );
                                 if (ui.button("Browse…").clicked() || crate::dialogs::ready("profile-key"))
                                     && let Some(f) = crate::dialogs::FileDialog::new()
@@ -1990,6 +2001,7 @@ impl App {
             .collect();
         let mut result = None;
         egui::Modal::new("cross-copy".into()).show(ctx, |ui| {
+crate::dlg::fit_modal(ui);
             ui.set_min_width(460.0);
             ui.heading("Copy to another server");
             for p in c.paths.iter().take(8) {
@@ -2009,7 +2021,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.label("Into folder");
-                ui.add(egui::TextEdit::singleline(&mut c.dest).desired_width(320.0));
+                ui.add(egui::TextEdit::singleline(&mut c.dest).desired_width(crate::dlg::field_width(ui, 320.0)));
             });
             ui.checkbox(&mut c.replace, "Replace items that already exist there");
             ui.label(RichText::new("Files pass through this computer (a private temporary folder), so both servers only need to reach you.").weak().small());
@@ -2080,6 +2092,7 @@ impl App {
             let name = self.profiles.get(id).map(|p| p.display_name()).unwrap_or_default();
             let mut close = false;
             egui::Modal::new("confirm-delete-profile".into()).show(ctx, |ui| {
+                crate::dlg::fit_modal(ui);
                 ui.heading(format!("Delete “{name}”?"));
                 ui.label("The saved connection is removed. Nothing on the server is touched.");
                 ui.horizontal(|ui| {
@@ -2114,6 +2127,7 @@ impl App {
         if let Some(id) = self.confirm_close {
             let mut result = None;
             egui::Modal::new("confirm-close".into()).show(ctx, |ui| {
+                crate::dlg::fit_modal(ui);
                 ui.heading("Unsaved changes");
                 ui.label("Some open files have changes that are not saved to the server.");
                 ui.horizontal(|ui| {
@@ -2162,6 +2176,7 @@ impl App {
             .collapsible(false)
             .resizable(true)
             .default_width(1040.0)
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(tab, SettingsTab::General, "General");
@@ -2414,7 +2429,7 @@ fn proxy_editor(ui: &mut egui::Ui, proxy: &mut malasdoh_core::proxy::Proxy, tunn
                 });
             }
             Proxy::Command { command } => {
-                ui.add(egui::TextEdit::singleline(command).desired_width(320.0)).on_hover_text(
+                ui.add(egui::TextEdit::singleline(command).desired_width(crate::dlg::field_width(ui, 320.0))).on_hover_text(
                     "Run on this computer; its input and output carry the SSH connection. %h, %p, %r: host, port, user",
                 );
             }
@@ -2481,15 +2496,31 @@ impl eframe::App for App {
     }
 }
 
+fn keyboard_up_id() -> egui::Id {
+    egui::Id::new("malasdoh-keyboard-up")
+}
+
+/// Whether the on-screen keyboard is showing (as the platform said).
+fn keyboard_up(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(keyboard_up_id())).unwrap_or(false)
+}
+
 /// Narrower than this (in points), the window is a phone's: one part at a
 /// time instead of side by side.
-const COMPACT_WIDTH: f32 = 640.0;
+const COMPACT_WIDTH: f32 = crate::dlg::NARROW;
 
 impl App {
     /// Sizes for a touch screen (phones, tablets): larger buttons and rows,
     /// and on-screen keys over the terminal.
     pub fn set_touch(&mut self, ctx: &egui::Context, touch: bool) {
         crate::look::set_touch(ctx, touch);
+    }
+
+    /// The platform says whether the on-screen keyboard is showing: while it
+    /// is, typing in a terminal on a phone hides all but the terminal and its
+    /// keys.
+    pub fn set_keyboard_up(&self, ctx: &egui::Context, up: bool) {
+        ctx.data_mut(|d| d.insert_temp(keyboard_up_id(), up));
     }
 
     /// Remember what is open, and keep unsaved edits as drafts.
@@ -2560,18 +2591,26 @@ impl App {
         }
 
         self.shortcuts(&ctx);
+        self.compact = ui.available_width() < COMPACT_WIDTH;
+        let typing = self.compact
+            && keyboard_up(&ctx)
+            && self
+                .active
+                .and_then(|id| self.sessions.iter().find(|s| s.id == id))
+                .is_some_and(|s| s.compact_view == crate::session::CompactView::Panes && s.typing_in_terminal());
         // An export picked for import (on phones, the picker answers later).
         if crate::dialogs::ready(backup::IMPORT_ID) {
             self.start_import();
         }
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
+        if !typing {
+            egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
+        }
         if self.broadcast.is_some() {
             egui::Panel::top("broadcast")
                 .frame(egui::Frame::side_top_panel(ui.style()).fill(crate::look::sem(ui.ctx()).danger))
                 .show(ui, |ui| self.broadcast_ui(ui));
         }
-        self.compact = ui.available_width() < COMPACT_WIDTH;
         if self.compact && self.show_sidebar {
             // A phone: the connection list fills the screen until one is picked.
             let before = self.active;

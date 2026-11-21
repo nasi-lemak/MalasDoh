@@ -674,6 +674,7 @@ impl Browser {
             }
             Dialog::ConfirmDelete(paths) => {
                 egui::Modal::new("confirm-delete".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Delete from the server?");
                     for p in paths.iter().take(10) {
                         ui.monospace(p);
@@ -732,6 +733,7 @@ impl Browser {
             }
             Dialog::Owner { paths, owner, recursive, sudo, has_dir } => {
                 egui::Modal::new("owner-dialog".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Change owner");
                     for p in paths.iter().take(6) {
                         ui.monospace(p);
@@ -774,6 +776,7 @@ impl Browser {
             }
             Dialog::Symlink { name, target } => {
                 egui::Modal::new("symlink-dialog".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("New symlink");
                     egui::Grid::new("symlink-grid").num_columns(2).show(ui, |ui| {
                         ui.label("Name");
@@ -803,6 +806,7 @@ impl Browser {
             }
             Dialog::Compress { names, out, kind } => {
                 egui::Modal::new("compress-dialog".into()).show(ctx, |ui| {
+                    crate::dlg::fit_modal(ui);
                     ui.heading("Compress");
                     ui.label(format!("{} item(s) from {dir}", names.len()));
                     ui.horizontal(|ui| {
@@ -877,6 +881,7 @@ fn short_time(t: u32) -> String {
 pub(crate) fn name_dialog(ctx: &egui::Context, title: &str, value: &mut String) -> Option<bool> {
     let mut result = None;
     egui::Modal::new(egui::Id::new(("name-dialog", title))).show(ctx, |ui| {
+        crate::dlg::fit_modal(ui);
         ui.heading(title);
         let r = ui.text_edit_singleline(value);
         r.request_focus();

@@ -159,11 +159,20 @@ pub fn spacing(style: &mut egui::Style, touch: bool) {
         style.spacing.button_padding = egui::vec2(10.0, 7.0);
         style.spacing.item_spacing = egui::vec2(10.0, 8.0);
         style.spacing.interact_size.y = 36.0;
-        style.spacing.text_edit_width = 320.0;
+        style.spacing.text_edit_width = 240.0;
         style.spacing.icon_width = 20.0;
         style.spacing.icon_width_inner = 12.0;
         style.spacing.scroll = egui::style::ScrollStyle::solid();
         style.spacing.scroll.bar_width = 10.0;
+        // Text a little larger than egui's desktop sizes, as phones use.
+        use egui::{FontId, TextStyle};
+        style.text_styles.insert(TextStyle::Body, FontId::proportional(14.5));
+        style.text_styles.insert(TextStyle::Button, FontId::proportional(14.5));
+        style.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
+        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.5));
+        style.text_styles.insert(TextStyle::Heading, FontId::proportional(20.0));
+        // Holding a finger on a control shows what it does, a little sooner.
+        style.interaction.tooltip_delay = 0.3;
     }
 }
 

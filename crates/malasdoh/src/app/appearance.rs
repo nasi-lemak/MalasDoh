@@ -71,8 +71,12 @@ pub(super) fn appearance_ui(
         ui.end_row();
         ui.label("Monospace font");
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut s.mono_font_file).hint_text("built-in (Hack)").desired_width(260.0))
-                .on_hover_text("A monospace .ttf or .otf, used by terminals and the editor");
+            ui.add(
+                egui::TextEdit::singleline(&mut s.mono_font_file)
+                    .hint_text("built-in (Hack)")
+                    .desired_width(crate::dlg::field_width(ui, 260.0)),
+            )
+            .on_hover_text("A monospace .ttf or .otf, used by terminals and the editor");
             if (ui.button("Browse…").clicked() || crate::dialogs::ready("mono-font"))
                 && let Some(f) = crate::dialogs::FileDialog::new()
                     .id("mono-font")

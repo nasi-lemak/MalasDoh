@@ -2,6 +2,7 @@
 //! first (every hunk must match), see each file's change, then save them
 //! one by one the safe way (conflict check, backup, config check, journal).
 
+use crate::dlg::FitScreen as _;
 use egui::RichText;
 use malasdoh_core::diff;
 use malasdoh_core::edit::EditSession;
@@ -102,7 +103,7 @@ impl PatchWindow {
             .id(egui::Id::new(("patch", session)))
             .open(&mut open)
             .default_size([760.0, 560.0])
-            .show(ctx, |ui| {
+            .fit_to_screen(ctx).show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Patch (diff -u or git diff):");
                     if (ui.button("Open file…").clicked() || crate::dialogs::ready("patch-file"))

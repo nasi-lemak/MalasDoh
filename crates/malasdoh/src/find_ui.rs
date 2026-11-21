@@ -1,5 +1,6 @@
 //! Find files on the server by name, and optionally by what they contain.
 
+use crate::dlg::FitScreen as _;
 use egui::RichText;
 
 use crate::listsel::KeyAction;
@@ -94,15 +95,18 @@ impl FindWindow {
             .id(egui::Id::new(("find", session)))
             .open(&mut open)
             .default_size([620.0, 460.0])
+            .fit_to_screen(ctx)
             .show(ctx, |ui| {
                 let mut go = false;
                 egui::Grid::new("find-form").num_columns(2).show(ui, |ui| {
                     ui.label("In folder");
-                    ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(400.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.dir).desired_width(crate::dlg::field_width(ui, 400.0)));
                     ui.end_row();
                     ui.label("Name");
                     let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.name).hint_text("*.conf, nginx*, …").desired_width(250.0),
+                        egui::TextEdit::singleline(&mut self.name)
+                            .hint_text("*.conf, nginx*, …")
+                            .desired_width(crate::dlg::field_width(ui, 250.0)),
                     );
                     go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.end_row();
@@ -110,7 +114,7 @@ impl FindWindow {
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.contains)
                             .hint_text("text inside the file (optional)")
-                            .desired_width(250.0),
+                            .desired_width(crate::dlg::field_width(ui, 250.0)),
                     );
                     go |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.end_row();

@@ -7,6 +7,7 @@
 # newer) and the NDK (ANDROID_NDK_HOME, else the newest under ndk/); a JDK
 # (javac, keytool); and the Rust targets, once:
 #   rustup target add aarch64-linux-android x86_64-linux-android
+# DEBUGGABLE=1 marks the APK debuggable (CI's tests use it to seed data).
 # ABIS="arm64-v8a" builds for phones only (default: arm64-v8a x86_64, the
 # second for the emulator and Chromebooks).
 #
@@ -65,7 +66,7 @@ done
 "$tools/aapt2" link -o "$work/unaligned.apk" -I "$platform/android.jar" \
     --manifest "$here/AndroidManifest.xml" "$work/res.zip" \
     --min-sdk-version "$min_sdk" --target-sdk-version "$target_sdk" \
-    --version-code "$code" --version-name "$version"
+    --version-code "$code" --version-name "$version" ${DEBUGGABLE:+--debug-mode}
 # The Java part (MainActivity: the keyboard and the clipboard), compiled
 # against the platform, then to Android's bytecode.
 mkdir -p "$work/classes"

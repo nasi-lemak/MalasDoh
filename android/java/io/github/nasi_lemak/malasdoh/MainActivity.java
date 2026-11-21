@@ -51,6 +51,9 @@ public class MainActivity extends NativeActivity {
     /** An Android key code (Enter, Del, ForwardDel, arrows…). */
     static native void nativeKey(int keyCode);
 
+    /** The keyboard's select all, cut, copy or paste (android.R.id.…). */
+    static native void nativeAction(int id);
+
     /** The files picked for the dialog with this id (none: cancelled). */
     static native void nativePicked(String id, String[] paths);
 
@@ -332,8 +335,18 @@ public class MainActivity extends NativeActivity {
             return new BaseInputConnection(this, false) {
                 @Override
                 public boolean commitText(CharSequence text, int newCursorPosition) {
+                    android.util.Log.v("malasdoh", "keyboard: commit " + text.length() + " chars");
                     composing = "";
                     nativeCommit(text.toString());
+                    return true;
+                }
+
+                // Select all, cut, copy and paste from the keyboard's
+                // toolbar, or Ctrl+A/X/C/V on a keyboard it handles.
+                @Override
+                public boolean performContextMenuAction(int id) {
+                    android.util.Log.v("malasdoh", "keyboard: action " + id);
+                    nativeAction(id);
                     return true;
                 }
 
@@ -352,6 +365,7 @@ public class MainActivity extends NativeActivity {
 
                 @Override
                 public boolean deleteSurroundingText(int before, int after) {
+                    android.util.Log.v("malasdoh", "keyboard: delete " + before + " before, " + after + " after");
                     for (int i = 0; i < before; i++) nativeKey(KeyEvent.KEYCODE_DEL);
                     for (int i = 0; i < after; i++) nativeKey(KeyEvent.KEYCODE_FORWARD_DEL);
                     return true;
@@ -360,6 +374,7 @@ public class MainActivity extends NativeActivity {
                 @Override
                 public boolean sendKeyEvent(KeyEvent event) {
                     if (event.getAction() != KeyEvent.ACTION_DOWN) return true;
+                    android.util.Log.v("malasdoh", "keyboard: key " + event.getKeyCode());
                     int code = event.getKeyCode();
                     int ch = event.getUnicodeChar();
                     if (code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_DEL

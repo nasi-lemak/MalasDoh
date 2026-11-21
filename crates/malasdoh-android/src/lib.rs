@@ -428,6 +428,39 @@ pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativePi
     }
 }
 
+/// Select all, cut, copy or paste from the keyboard (android.R.id values).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeAction(
+    _env: JNIEnv,
+    _class: JClass,
+    id: jint,
+) {
+    const SELECT_ALL: jint = 0x0102001f;
+    const CUT: jint = 0x01020020;
+    const COPY: jint = 0x01020021;
+    const PASTE: jint = 0x01020022;
+    match id {
+        SELECT_ALL => {
+            let ev = |pressed| egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            };
+            typed([ev(true), ev(false)]);
+        }
+        CUT => typed([egui::Event::Cut]),
+        COPY => typed([egui::Event::Copy]),
+        PASTE => {
+            if let Some(text) = malasdoh::clipboard::read() {
+                typed([egui::Event::Paste(text)]);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Calling Java.
 

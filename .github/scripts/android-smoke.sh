@@ -11,6 +11,21 @@ adb install -r "$apk"
 # question does not cover the app mid-test.
 adb shell pm grant "$package" android.permission.POST_NOTIFICATIONS || true
 adb logcat -c
+if [ "${E2E:-0}" = 1 ]; then
+    # The end-to-end run's connection, put in place before the app starts
+    # (the CI build is debuggable, so run-as may write the app's files).
+    cat > target/android/profiles.toml <<'TOML'
+[[profile]]
+id = "6f1d2c3e-1111-4a5b-9c1d-0123456789ab"
+name = "ci"
+host = "10.0.2.2"
+port = 2222
+user = "demo"
+TOML
+    adb shell "run-as $package sh -c 'mkdir -p files/malasdoh; cat > files/malasdoh/profiles.toml'" \
+        < target/android/profiles.toml
+    adb shell "run-as $package cat files/malasdoh/profiles.toml"
+fi
 adb shell am start -W -n "$package/.MainActivity"
 sleep 20
 
@@ -69,27 +84,12 @@ expect_file() {
 text() { adb shell input text "$1"; sleep 1; }
 end_to_end() {
     echo "=== end to end"
-    key 4                     # Back: the keyboard goes away
-    key 4                     # Back again closes the tour's form
-    # Clear the search the tour typed (Ctrl+A: a hardware keyboard's Ctrl).
-    tap 120 "$search_y"
-    adb shell input keycombination 113 29; sleep 1
-    key 67
-    key 4
-    shot e2e-cleared
-    tap 388 68                # + : New connection (the cursor starts in Name)
-    text ci
-    key 61; text 10.0.2.2     # Tab: Host
-    key 61                    # Port: replace the 22
-    adb shell input keycombination 113 29; sleep 1
-    text 2222
-    key 61; text demo         # User
-    key 66                    # Enter: save
-    shot e2e-saved
-    tap 120 "$search_y"; text ci; key 66   # find it, Enter connects
+    # The connection was put in place before the app started (seed below):
+    # find it, and Enter connects to it.
+    tap 120 "$search_y"; text ci; key 66
     sleep 4
     shot e2e-hostkey
-    key 61; key 66            # Trust and connect
+    key 61; key 66            # Tab to Trust and connect, Enter
     sleep 4
     shot e2e-password
     text malasdoh-ci-only; key 66
@@ -123,6 +123,8 @@ end_to_end() {
     expect_file e2e-still-connected "the same connection after 45 seconds in the background"
     shot e2e-back
     alive
+    # Back to the connection list for the tour.
+    key 4; key 4
 }
 
 alive
@@ -142,8 +144,12 @@ tap() { # x y in points
     sleep 2
 }
 echo "density $density, top inset $top px, width $width px, wide layout: $wide"
-
 if [ "$wide" = 1 ]; then search_y=96; else search_y=102; fi
+
+if [ "${E2E:-0}" = 1 ]; then
+    end_to_end
+fi
+
 tap 120 "$search_y"
 adb shell input text "web"
 sleep 2
@@ -161,10 +167,6 @@ if [ "$wide" = 0 ]; then
     sleep 2
     shot form-typing
     alive
-fi
-
-if [ "${E2E:-0}" = 1 ]; then
-    end_to_end
 fi
 
 echo "--- log"

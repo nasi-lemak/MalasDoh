@@ -27,8 +27,9 @@ jobs:
         with:
           targets: aarch64-linux-android, x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
+      # Debuggable, so the end-to-end run may put its connection in place.
       - name: Build the APK
-        run: ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME android/build-apk.sh
+        run: DEBUGGABLE=1 ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME android/build-apk.sh
       - name: Pillow, for the screenshot
         run: python3 -m pip install --break-system-packages pillow
       # For the phone's end-to-end run: a throwaway user with a password, on

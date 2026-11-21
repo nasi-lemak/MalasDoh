@@ -2529,6 +2529,12 @@ impl App {
         ctx.data_mut(|d| d.insert_temp(keyboard_up_id(), up));
     }
 
+    /// The platform says whether a hardware keyboard is attached: if so, the
+    /// terminal's row of extra keys goes.
+    pub fn set_hardware_keyboard(&self, ctx: &egui::Context, attached: bool) {
+        crate::look::set_hardware_keyboard(ctx, attached);
+    }
+
     /// Connections open or opening: a phone keeps the app running for them.
     pub fn open_connections(&self) -> usize {
         self.sessions.iter().filter(|s| matches!(s.state, ConnState::Connected | ConnState::Connecting(_))).count()

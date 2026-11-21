@@ -168,7 +168,7 @@ pub fn spacing(style: &mut egui::Style, touch: bool) {
         use egui::{FontId, TextStyle};
         style.text_styles.insert(TextStyle::Body, FontId::proportional(14.5));
         style.text_styles.insert(TextStyle::Button, FontId::proportional(14.5));
-        style.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
+        style.text_styles.insert(TextStyle::Small, FontId::proportional(12.5));
         style.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.5));
         style.text_styles.insert(TextStyle::Heading, FontId::proportional(20.0));
         // Holding a finger on a control shows what it does, a little sooner.
@@ -185,6 +185,20 @@ fn touch_id() -> egui::Id {
 pub fn set_touch(ctx: &egui::Context, touch: bool) {
     ctx.data_mut(|d| d.insert_temp(touch_id(), touch));
     ctx.all_styles_mut(|s| spacing(s, touch));
+}
+
+fn keyboard_id() -> egui::Id {
+    egui::Id::new("malasdoh-hardware-keyboard")
+}
+
+/// A hardware keyboard is attached (a tablet's): the terminal's row of
+/// extra keys is not needed.
+pub fn set_hardware_keyboard(ctx: &egui::Context, attached: bool) {
+    ctx.data_mut(|d| d.insert_temp(keyboard_id(), attached));
+}
+
+pub fn hardware_keyboard(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp(keyboard_id())).unwrap_or(false)
 }
 
 /// Whether [`set_touch`] asked for touch-screen sizes.

@@ -534,9 +534,14 @@ impl Terminal {
             scroll += response.drag_delta().y;
         }
         if touch && response.secondary_clicked() && !handled_click {
+            // A long press selects the word under the finger; dragging on
+            // extends the selection.
             if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) {
-                let c = to_cell(p);
-                self.selection = Some((c, c));
+                let (row, col) = to_cell(p);
+                let line: Vec<char> =
+                    self.parser.screen().rows(0, cols).nth(row as usize).unwrap_or_default().chars().collect();
+                let (start, end) = word_at(&line, col as usize);
+                self.selection = Some(((row, start as u16), (row, end as u16)));
                 self.touch_selecting = true;
             }
         } else if touch && self.touch_selecting {
@@ -989,6 +994,24 @@ impl AnsiStrip {
 }
 
 /// Bytes xterm sends for a key press that does not produce text.
+/// The word (a run of non-blank characters) around column `col`: its first
+/// and last columns. On a blank, just that column.
+fn word_at(line: &[char], col: usize) -> (usize, usize) {
+    let blank = |i: usize| line.get(i).is_none_or(|c| c.is_whitespace());
+    if blank(col) {
+        return (col, col);
+    }
+    let mut start = col;
+    while start > 0 && !blank(start - 1) {
+        start -= 1;
+    }
+    let mut end = col;
+    while !blank(end + 1) {
+        end += 1;
+    }
+    (start, end)
+}
+
 /// The byte Ctrl and `c` make in a terminal (Ctrl+C is 3), for the
 /// on-screen Ctrl key.
 fn ctrl_byte(c: char) -> Option<u8> {
@@ -1188,6 +1211,15 @@ mod tests {
 
     const NONE: Modifiers = Modifiers::NONE;
     const CTRL: Modifiers = Modifiers::CTRL;
+
+    #[test]
+    fn long_press_selects_a_word() {
+        let line: Vec<char> = "ls -la /var/log  done".chars().collect();
+        assert_eq!(super::word_at(&line, 9), (7, 14));
+        assert_eq!(super::word_at(&line, 0), (0, 1));
+        assert_eq!(super::word_at(&line, 15), (15, 15));
+        assert_eq!(super::word_at(&line, 30), (30, 30));
+    }
 
     #[test]
     fn on_screen_ctrl() {

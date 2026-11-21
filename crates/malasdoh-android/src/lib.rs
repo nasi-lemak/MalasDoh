@@ -90,6 +90,7 @@ fn android_main(android: AndroidApp) {
                 bar_bottom: 0,
                 keyboard_up: false,
                 connections: 0,
+                hardware_keyboard: false,
             }))
         }),
     );
@@ -130,6 +131,8 @@ struct Mobile {
     keyboard_up: bool,
     /// Open connections, as last told to the activity.
     connections: usize,
+    /// Whether a hardware keyboard is attached, as last told to the app.
+    hardware_keyboard: bool,
 }
 
 impl eframe::App for Mobile {
@@ -165,6 +168,16 @@ impl eframe::App for Mobile {
         self.copy_to_clipboard(&ctx);
         self.keyboard(&ctx);
         self.keep_alive();
+
+        // A hardware keyboard (attached to a tablet, say) has the keys the
+        // terminal's row would add.
+        use winit::platform::android::activity::ndk::configuration::{Keyboard, KeysHidden};
+        let config = self.android.config();
+        let attached = config.keyboard() == Keyboard::Qwerty && config.keys_hidden() == KeysHidden::No;
+        if attached != self.hardware_keyboard {
+            self.hardware_keyboard = attached;
+            self.app.set_hardware_keyboard(&ctx, attached);
+        }
 
         // Look at the insets for a while after something moved them, and
         // twice a second while the keyboard is wanted (Back puts it away

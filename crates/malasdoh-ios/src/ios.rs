@@ -49,7 +49,13 @@ pub fn main() {
             let _ = CTX.set(cc.egui_ctx.clone());
             let mut app = App::with_context(&cc.egui_ctx, paths);
             app.set_touch(&cc.egui_ctx, true);
-            Ok(Box::new(Mobile { app, focused: true, insets: egui::SafeAreaInsets::default(), keyboard_up: false }))
+            Ok(Box::new(Mobile {
+                app,
+                focused: true,
+                insets: egui::SafeAreaInsets::default(),
+                keyboard_up: false,
+                hardware_keyboard: false,
+            }))
         }),
     );
     if let Err(e) = result {
@@ -80,6 +86,8 @@ struct Mobile {
     insets: egui::SafeAreaInsets,
     /// Whether the keyboard is on screen, as last told to the app.
     keyboard_up: bool,
+    /// Whether a hardware keyboard is attached, as last told to the app.
+    hardware_keyboard: bool,
 }
 
 impl eframe::App for Mobile {
@@ -115,6 +123,14 @@ impl eframe::App for Mobile {
             self.app.resumed();
         }
         self.focused = focused;
+        // A hardware keyboard (an iPad's, say) has the keys the terminal's
+        // row would add.
+        // SAFETY: a class property, read on the main thread.
+        let attached = unsafe { objc2_game_controller::GCKeyboard::coalescedKeyboard() }.is_some();
+        if attached != self.hardware_keyboard {
+            self.hardware_keyboard = attached;
+            self.app.set_hardware_keyboard(&ctx, attached);
+        }
         self.app.frame_in_safe_area(ui);
         copy_to_clipboard(&ctx);
     }

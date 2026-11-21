@@ -11,22 +11,35 @@ adb logcat -c
 adb shell am start -W -n "$package/.MainActivity"
 sleep 20
 
+# What went on, when something fails.
+diagnose() {
+    echo "--- activities"
+    adb shell dumpsys activity activities | grep -iE "resumed|focused|malasdoh" | head -n 20 || true
+    echo "--- window focus"
+    adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp" || true
+    echo "--- system log"
+    adb logcat -d -s ActivityTaskManager:I ActivityManager:I WindowManager:W malasdoh:V RustStdoutStderr:V \
+        AndroidRuntime:E DEBUG:V libc:F | tail -n 120
+}
 shot() {
     echo "--- screenshot: $1"
     adb exec-out screencap -p > "target/android/$1.png"
-    python3 .github/scripts/show-screenshot.py "target/android/$1.png" "$1"
+    if ! python3 .github/scripts/show-screenshot.py "target/android/$1.png" "$1"; then
+        diagnose
+        exit 1
+    fi
 }
 alive() {
     pid=$(adb shell pidof "$package" || true)
     if [ -z "$pid" ]; then
         echo "MalasDoh is not running: it crashed or did not start."
-        adb logcat -d -s malasdoh:V RustStdoutStderr:V AndroidRuntime:E DEBUG:V libc:F | tail -n 150
+        diagnose
         exit 1
     fi
     if adb logcat -d | grep -q "ANR in $package"; then
         echo "MalasDoh stopped responding (ANR)."
         adb logcat -d | grep -A 20 "ANR in $package" | head -n 40
-        adb logcat -d -s malasdoh:V | tail -n 60
+        diagnose
         exit 1
     fi
 }

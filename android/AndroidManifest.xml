@@ -17,15 +17,15 @@
         android:extractNativeLibs="false"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <!-- configChanges, all of them: turning the device, plugging in a
-             keyboard, dark mode and the like resize or redraw the window
-             instead of restarting the activity, which the Rust app (one per
-             process) could not follow. -->
+             keyboard, dark mode, wallpaper colours (assetsPaths) and the like
+             resize or redraw the window instead of restarting the activity,
+             which the Rust app (one per process) could not follow. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|fontScale|colorMode|layoutDirection|locale|touchscreen|mcc|mnc|fontWeightAdjustment|grammaticalGender">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode|fontScale|colorMode|layoutDirection|locale|touchscreen|mcc|mnc|fontWeightAdjustment|grammaticalGender|assetsPaths">
             <meta-data android:name="android.app.lib_name" android:value="malasdoh_android" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

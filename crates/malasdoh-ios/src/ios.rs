@@ -4,11 +4,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use block2::RcBlock;
 use malasdoh::app::App;
+use objc2::DefinedClass as _;
 use objc2::rc::Retained;
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue, NSString, NSValue};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol, NSOperationQueue, NSString, NSValue};
 use objc2_ui_kit::{
-    NSValueUIGeometryExtensions, UIKeyboardFrameEndUserInfoKey, UIKeyboardWillChangeFrameNotification,
-    UIKeyboardWillHideNotification, UIPasteboard,
+    NSValueUIGeometryExtensions, UIDocumentPickerDelegate, UIKeyboardFrameEndUserInfoKey,
+    UIKeyboardWillChangeFrameNotification, UIKeyboardWillHideNotification, UIPasteboard,
 };
 
 pub fn main() {
@@ -26,6 +27,12 @@ pub fn main() {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let paths = malasdoh_core::AppPaths::rooted(home.join("Library/Application Support/MalasDoh"));
 
+    malasdoh::dialogs::set_platform(malasdoh::dialogs::Platform {
+        pick: Box::new(pick_files),
+        // Downloads and saved files: Documents, which the Files app shows
+        // (UIFileSharingEnabled in Info.plist).
+        documents: home.join("Documents"),
+    });
     malasdoh::clipboard::set_reader(|| {
         // SAFETY: UIPasteboard may be used from any thread.
         unsafe { UIPasteboard::generalPasteboard().string() }.map(|s| s.to_string())
@@ -175,4 +182,84 @@ fn watch_keyboard() {
         // Observed for as long as the app runs.
         std::mem::forget((a, b));
     }
+}
+
+// ---------------------------------------------------------------------------
+// The file picker.
+
+/// What the picker was opened for.
+struct PickerIvars {
+    id: std::cell::RefCell<&'static str>,
+}
+
+objc2::define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and Picker does not
+    // implement Drop.
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = objc2::MainThreadOnly]
+    #[name = "MalasDohPicker"]
+    #[ivars = PickerIvars]
+    struct Picker;
+
+    unsafe impl NSObjectProtocol for Picker {}
+
+    unsafe impl UIDocumentPickerDelegate for Picker {
+        #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
+        fn did_pick(
+            &self,
+            _picker: &objc2_ui_kit::UIDocumentPickerViewController,
+            urls: &objc2_foundation::NSArray<objc2_foundation::NSURL>,
+        ) {
+            // Copies (asCopy), so plain files the app may read.
+            let paths = urls.iter().filter_map(|u| u.path()).map(|p| std::path::PathBuf::from(p.to_string())).collect();
+            picked(*self.ivars().id.borrow(), paths);
+        }
+
+        #[unsafe(method(documentPickerWasCancelled:))]
+        fn cancelled(&self, _picker: &objc2_ui_kit::UIDocumentPickerViewController) {
+            picked(*self.ivars().id.borrow(), Vec::new());
+        }
+    }
+);
+
+thread_local! {
+    /// The picker's delegate, kept alive while it is open (UIKit holds it weakly).
+    static DELEGATE: std::cell::RefCell<Option<Retained<Picker>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn picked(id: &'static str, paths: Vec<std::path::PathBuf>) {
+    malasdoh::dialogs::deliver(id, paths);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
+/// Opens UIKit's document picker over the app (called on the main thread).
+fn pick_files(id: &'static str, multiple: bool) {
+    use objc2::{MainThreadOnly as _, msg_send};
+    use objc2_ui_kit::{UIApplication, UIDocumentPickerViewController};
+
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return };
+    let delegate: Retained<Picker> = {
+        let this = Picker::alloc(mtm).set_ivars(PickerIvars { id: std::cell::RefCell::new(id) });
+        // SAFETY: NSObject's init.
+        unsafe { msg_send![super(this), init] }
+    };
+    // SAFETY: a UIKit constant, valid for the whole run.
+    let types = objc2_foundation::NSArray::from_slice(&[unsafe { objc2_uniform_type_identifiers::UTTypeItem }]);
+    let picker = UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(
+        UIDocumentPickerViewController::alloc(mtm),
+        &types,
+        true,
+    );
+    picker.setAllowsMultipleSelection(multiple);
+    picker.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate)));
+    #[allow(deprecated)] // One window: the key window is the app's.
+    let root = UIApplication::sharedApplication(mtm).keyWindow().and_then(|w| w.rootViewController());
+    let Some(root) = root else {
+        picked(id, Vec::new());
+        return;
+    };
+    root.presentViewController_animated_completion(&picker, true, None);
+    DELEGATE.with(|d| *d.borrow_mut() = Some(delegate));
 }

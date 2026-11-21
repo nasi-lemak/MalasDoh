@@ -7,7 +7,7 @@ mod bridge;
 mod browser;
 pub mod clipboard;
 mod compare;
-mod dialogs;
+pub mod dialogs;
 mod dlg;
 mod editor;
 mod find_ui;

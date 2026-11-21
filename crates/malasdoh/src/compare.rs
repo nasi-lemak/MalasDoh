@@ -358,8 +358,11 @@ impl Compares {
                 ui.indent("local", |ui| {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut p.local).desired_width(400.0));
-                        if ui.button("Browse…").clicked()
-                            && let Some(f) = crate::dialogs::FileDialog::new().set_title("Compare with").pick_file()
+                        if (ui.button("Browse…").clicked() || crate::dialogs::ready("compare-with"))
+                            && let Some(f) = crate::dialogs::FileDialog::new()
+                                .id("compare-with")
+                                .set_title("Compare with")
+                                .pick_file()
                         {
                             p.local = f.display().to_string();
                         }

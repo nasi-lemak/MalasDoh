@@ -28,6 +28,9 @@ impl Default for ExportDialog {
     }
 }
 
+/// The import's file dialog, whose answer may come later (phones).
+pub(super) const IMPORT_ID: &str = "export-import";
+
 impl App {
     pub(super) fn start_export(&mut self) {
         self.export_dlg = Some(ExportDialog::default());
@@ -35,6 +38,7 @@ impl App {
 
     pub(super) fn start_import(&mut self) {
         if let Some(path) = crate::dialogs::FileDialog::new()
+            .id(IMPORT_ID)
             .set_title("Import a MalasDoh export")
             .add_filter("MalasDoh export", &["malasdoh"])
             .pick_file()
@@ -100,6 +104,7 @@ impl App {
             };
             let result = export::seal(&bundle, &d.pass).and_then(|text| {
                 let Some(path) = crate::dialogs::FileDialog::new()
+                    .id("export-save")
                     .set_title("Save the export")
                     .set_file_name("connections.malasdoh")
                     .save_file()

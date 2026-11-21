@@ -3,16 +3,27 @@
 //  - a proper connection to the on-screen keyboard, so word suggestions,
 //    swipe typing and composing input methods work (NativeActivity only
 //    gets single key presses);
-//  - the clipboard.
-// The Rust side calls showKeyboard, setClipboard and getClipboard, and gets
-// what is typed through the native methods below.
+//  - the clipboard;
+//  - the system's file picker.
+// The Rust side calls showKeyboard, setClipboard, getClipboard and
+// pickFiles, and gets what is typed and picked through the native methods
+// below.
 package io.github.nasi_lemak.malasdoh;
 
 import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.database.Cursor;
+import android.net.Uri;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
 import android.text.InputType;
 import android.view.KeyEvent;
 import android.view.View;
@@ -38,6 +49,12 @@ public class MainActivity extends NativeActivity {
 
     /** An Android key code (Enter, Del, ForwardDel, arrows…). */
     static native void nativeKey(int keyCode);
+
+    /** The files picked for the dialog with this id (none: cancelled). */
+    static native void nativePicked(String id, String[] paths);
+
+    private static final int PICK = 4711;
+    private String pickId;
 
     private InputView input;
 
@@ -81,6 +98,71 @@ public class MainActivity extends NativeActivity {
         if (clip == null || clip.getItemCount() == 0) return null;
         CharSequence text = clip.getItemAt(0).coerceToText(this);
         return text == null ? null : text.toString();
+    }
+
+    /** Called from Rust: open the system's file picker. */
+    public void pickFiles(final String id, final boolean multiple) {
+        runOnUiThread(() -> {
+            pickId = id;
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
+            try {
+                startActivityForResult(intent, PICK);
+            } catch (RuntimeException e) {
+                nativePicked(id, new String[0]);
+            }
+        });
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != PICK || pickId == null) return;
+        final String id = pickId;
+        pickId = null;
+        final ArrayList<Uri> uris = new ArrayList<>();
+        if (result == RESULT_OK && data != null) {
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                    uris.add(data.getClipData().getItemAt(i).getUri());
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+        }
+        // The app reads files by path: copy the picked ones into its cache,
+        // away from the UI thread.
+        new Thread(() -> {
+            ArrayList<String> paths = new ArrayList<>();
+            File dir = new File(getCacheDir(), "picked/" + System.currentTimeMillis());
+            dir.mkdirs();
+            for (Uri uri : uris) {
+                File out = new File(dir, displayName(uri));
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     OutputStream o = new FileOutputStream(out)) {
+                    byte[] buf = new byte[65536];
+                    for (int n; (n = in.read(buf)) > 0; ) o.write(buf, 0, n);
+                    paths.add(out.getAbsolutePath());
+                } catch (Exception e) {
+                    android.util.Log.w("malasdoh", "could not read " + uri, e);
+                }
+            }
+            nativePicked(id, paths.toArray(new String[0]));
+        }).start();
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null,
+                null)) {
+            if (c != null && c.moveToFirst()) {
+                String name = c.getString(0);
+                if (name != null && !name.isEmpty() && !name.contains("/")) return name;
+            }
+        } catch (Exception ignored) {
+        }
+        return "picked";
     }
 
     /** A view the keyboard types into; everything goes to the Rust app. */

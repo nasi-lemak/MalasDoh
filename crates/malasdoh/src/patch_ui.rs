@@ -105,8 +105,11 @@ impl PatchWindow {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Patch (diff -u or git diff):");
-                    if ui.button("Open file…").clicked()
-                        && let Some(f) = crate::dialogs::FileDialog::new().add_filter("Patch", &["patch", "diff", "txt"]).pick_file()
+                    if (ui.button("Open file…").clicked() || crate::dialogs::ready("patch-file"))
+                        && let Some(f) = crate::dialogs::FileDialog::new()
+                            .id("patch-file")
+                            .add_filter("Patch", &["patch", "diff", "txt"])
+                            .pick_file()
                     {
                         match std::fs::read_to_string(&f) {
                             Ok(t) => {

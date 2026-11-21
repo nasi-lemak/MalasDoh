@@ -658,8 +658,12 @@ impl App {
                     self.add_imported(found, "WinSCP");
                     ui.close();
                 }
-                if ui.button("Import a WinSCP.ini file…").clicked() {
-                    if let Some(f) = crate::dialogs::FileDialog::new().add_filter("WinSCP.ini", &["ini"]).pick_file() {
+                if ui.button("Import a WinSCP.ini file…").clicked() || crate::dialogs::ready("winscp-ini") {
+                    if let Some(f) = crate::dialogs::FileDialog::new()
+                        .id("winscp-ini")
+                        .add_filter("WinSCP.ini", &["ini"])
+                        .pick_file()
+                    {
                         let found = std::fs::read_to_string(&f)
                             .map(|t| malasdoh_core::import::parse_winscp_ini(&t))
                             .map_err(|e| anyhow::anyhow!("reading {}: {e}", f.display()));
@@ -1029,6 +1033,10 @@ impl App {
         let mut forget = false;
         let s = &mut self.sessions[idx];
         s.check_alive();
+        // Files picked for an upload (on phones, the picker answers later).
+        if crate::dialogs::ready(crate::session::UPLOAD_ID) {
+            s.browser_action(crate::browser::Action::UploadPick, &shared);
+        }
         s.poll_external(&shared, &settings);
 
         // Connection status bar.
@@ -1757,9 +1765,11 @@ impl App {
                                         .hint_text("~/.ssh/id_ed25519")
                                         .desired_width(260.0),
                                 );
-                                if ui.button("Browse…").clicked()
-                                    && let Some(f) =
-                                        crate::dialogs::FileDialog::new().set_title("Choose a private key").pick_file()
+                                if (ui.button("Browse…").clicked() || crate::dialogs::ready("profile-key"))
+                                    && let Some(f) = crate::dialogs::FileDialog::new()
+                                        .id("profile-key")
+                                        .set_title("Choose a private key")
+                                        .pick_file()
                                 {
                                     *path = f.display().to_string();
                                 }
@@ -2550,6 +2560,10 @@ impl App {
         }
 
         self.shortcuts(&ctx);
+        // An export picked for import (on phones, the picker answers later).
+        if crate::dialogs::ready(backup::IMPORT_ID) {
+            self.start_import();
+        }
         egui::Panel::top("menu").show(ui, |ui| self.menu_ui(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_ui(ui));
         if self.broadcast.is_some() {

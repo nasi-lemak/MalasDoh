@@ -166,8 +166,9 @@ impl WireGuardWindow {
                         Err(e) => ed.error = Some(format!("Not saved: {e:#}")),
                     }
                 }
-                if ui.button("Replace from a .conf file…").clicked()
+                if (ui.button("Replace from a .conf file…").clicked() || crate::dialogs::ready("wg-replace"))
                     && let Some(f) = crate::dialogs::FileDialog::new()
+                        .id("wg-replace")
                         .add_filter("WireGuard", &["conf"])
                         .set_title("WireGuard configuration")
                         .pick_file()
@@ -338,9 +339,12 @@ impl WireGuardWindow {
             ui.horizontal(|ui| {
                 ui.label("Name");
                 ui.add(egui::TextEdit::singleline(&mut self.name).hint_text("e.g. office").desired_width(160.0));
-                if ui.button("Open a .conf file…").clicked()
-                    && let Some(f) =
-                        crate::dialogs::FileDialog::new().add_filter("WireGuard", &["conf"]).set_title("WireGuard configuration").pick_file()
+                if (ui.button("Open a .conf file…").clicked() || crate::dialogs::ready("wg-open"))
+                    && let Some(f) = crate::dialogs::FileDialog::new()
+                        .id("wg-open")
+                        .add_filter("WireGuard", &["conf"])
+                        .set_title("WireGuard configuration")
+                        .pick_file()
                 {
                     match std::fs::read_to_string(&f) {
                         Ok(t) => {

@@ -109,8 +109,10 @@ fn without_verbatim(p: PathBuf) -> PathBuf {
     }
 }
 
+/// Where browsing starts: the home folder, or on a phone the app's own
+/// documents folder (all it may see).
 fn home() -> PathBuf {
-    malasdoh_core::paths::expand_tilde("~")
+    crate::dialogs::documents().unwrap_or_else(|| malasdoh_core::paths::expand_tilde("~"))
 }
 
 impl LocalBrowser {

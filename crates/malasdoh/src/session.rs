@@ -273,6 +273,9 @@ pub enum CompactView {
     Local,
 }
 
+/// The upload's file dialog, whose answer may come later (phones).
+pub const UPLOAD_ID: &str = "upload";
+
 pub struct Session {
     pub id: SessionId,
     pub profile: Profile,
@@ -1589,7 +1592,11 @@ impl Session {
                 // With the local pane open, download into its folder.
                 let dir = match &self.local {
                     Some(l) => l.path.clone(),
-                    None => match crate::dialogs::FileDialog::new().set_title("Download to folder").pick_folder() {
+                    None => match crate::dialogs::FileDialog::new()
+                        .id("download-to")
+                        .set_title("Download to folder")
+                        .pick_folder()
+                    {
                         Some(d) => d,
                         None => return,
                     },
@@ -1597,7 +1604,9 @@ impl Session {
                 self.download_to(paths, dir, shared);
             }
             A::UploadPick => {
-                if let Some(files) = crate::dialogs::FileDialog::new().set_title("Upload files").pick_files() {
+                if let Some(files) =
+                    crate::dialogs::FileDialog::new().id(UPLOAD_ID).set_title("Upload files").pick_files()
+                {
                     self.browser_action(A::Upload(files), shared);
                 }
             }

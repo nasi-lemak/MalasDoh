@@ -60,6 +60,11 @@
 	<!-- Without a launch screen iOS runs the app in a small, letterboxed window. -->
 	<key>UILaunchScreen</key>
 	<dict/>
+	<!-- Downloads and saved files go to Documents: show it in the Files app. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<!-- Mouse and trackpad on iPad. -->
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>

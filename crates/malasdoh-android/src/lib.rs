@@ -46,6 +46,27 @@ fn android_main(android: AndroidApp) {
         })
     });
 
+    let picker = android.clone();
+    malasdoh::dialogs::set_platform(malasdoh::dialogs::Platform {
+        pick: Box::new(move |id, multiple| {
+            let opened = with_activity(&picker, |env, activity| {
+                let id = env.new_string(id)?;
+                env.call_method(
+                    activity,
+                    "pickFiles",
+                    "(Ljava/lang/String;Z)V",
+                    &[JValue::Object(&id), JValue::Bool(multiple.into())],
+                )?;
+                Ok(())
+            });
+            if let Err(e) = opened {
+                log::warn!("could not open the file picker: {e}");
+            }
+        }),
+        // Downloads and saved files: the app's own storage ("This device").
+        documents: android.internal_data_path().unwrap_or_else(|| "/data/local/tmp".into()).join("Documents"),
+    });
+
     let options = eframe::NativeOptions {
         android_app: Some(android.clone()),
         renderer: eframe::Renderer::Glow,
@@ -279,6 +300,30 @@ pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeKe
         _ => return,
     };
     typed(key_tap(key));
+}
+
+/// The files picked in the system's picker, copied into the app's cache.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativePicked(
+    mut env: JNIEnv,
+    _class: JClass,
+    id: JString,
+    paths: jni::objects::JObjectArray,
+) {
+    let Ok(id) = env.get_string(&id).map(String::from) else { return };
+    let mut picked = Vec::new();
+    let n = env.get_array_length(&paths).unwrap_or(0);
+    for i in 0..n {
+        if let Ok(p) = env.get_object_array_element(&paths, i)
+            && let Ok(p) = env.get_string(&JString::from(p))
+        {
+            picked.push(std::path::PathBuf::from(String::from(p)));
+        }
+    }
+    malasdoh::dialogs::deliver(&id, picked);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
 }
 
 // ---------------------------------------------------------------------------

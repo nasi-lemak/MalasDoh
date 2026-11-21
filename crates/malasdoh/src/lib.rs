@@ -1,10 +1,11 @@
 //! MalasDoh's whole app, as a library: the desktop program (`main.rs`, with
-//! eframe) and the HarmonyOS module (`crates/malasdoh-ohos`) each give it a
-//! window. Start it with [`app::App::with_context`].
+//! eframe) and the Android, iOS and HarmonyOS glue (`crates/malasdoh-*`)
+//! each give it a window. Start it with [`app::App::with_context`].
 
 pub mod app;
 mod bridge;
 mod browser;
+pub mod clipboard;
 mod compare;
 mod dialogs;
 mod dlg;

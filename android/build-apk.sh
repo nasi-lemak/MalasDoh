@@ -4,8 +4,8 @@
 #   ANDROID_HOME=/path/to/Android/Sdk android/build-apk.sh
 #
 # Needs, in the SDK: build-tools 35 or newer, a platform (android-35 or
-# newer) and the NDK (ANDROID_NDK_HOME, else the newest under ndk/). And the
-# Rust targets, once:
+# newer) and the NDK (ANDROID_NDK_HOME, else the newest under ndk/); a JDK
+# (javac, keytool); and the Rust targets, once:
 #   rustup target add aarch64-linux-android x86_64-linux-android
 # ABIS="arm64-v8a" builds for phones only (default: arm64-v8a x86_64, the
 # second for the emulator and Chromebooks).
@@ -66,6 +66,13 @@ done
     --manifest "$here/AndroidManifest.xml" "$work/res.zip" \
     --min-sdk-version "$min_sdk" --target-sdk-version "$target_sdk" \
     --version-code "$code" --version-name "$version"
+# The Java part (MainActivity: the keyboard and the clipboard), compiled
+# against the platform, then to Android's bytecode.
+mkdir -p "$work/classes"
+javac --release 11 -nowarn -cp "$platform/android.jar" -d "$work/classes" $(find "$here/java" -name '*.java')
+"$tools/d8" --release --min-api "$min_sdk" --lib "$platform/android.jar" --output "$work" \
+    $(find "$work/classes" -name '*.class')
+(cd "$work" && zip -q unaligned.apk classes.dex)
 # Native libraries go in uncompressed, so Android maps them straight from
 # the APK (extractNativeLibs="false").
 (cd "$work" && zip -q -0 -r unaligned.apk lib)

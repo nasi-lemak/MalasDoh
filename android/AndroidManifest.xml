@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The whole app is the Rust library libmalasdoh_android.so
-     (crates/malasdoh-android), run by Android's own NativeActivity: there is
-     no Java or Kotlin code. build-apk.sh sets the version and
-     SDK levels. -->
+<!-- The app is the Rust library libmalasdoh_android.so
+     (crates/malasdoh-android), run by MainActivity: Android's own
+     NativeActivity with a little Java for the keyboard and the clipboard
+     (java/). build-apk.sh sets the version and SDK levels. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.nasi_lemak.malasdoh">
     <!-- SSH connections. -->
@@ -12,14 +12,14 @@
     <application
         android:label="MalasDoh"
         android:icon="@mipmap/ic_launcher"
-        android:hasCode="false"
+        android:hasCode="true"
         android:allowBackup="false"
         android:extractNativeLibs="false"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <!-- configChanges: turning the device or plugging in a keyboard resizes
              the window instead of restarting the app (and its connections). -->
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"

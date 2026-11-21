@@ -65,6 +65,8 @@ pub struct App {
     show_sidebar: bool,
     /// The window is narrow (a phone): one thing at a time, not side by side.
     compact: bool,
+    /// Text for the field with this id, from the touch-screen Paste button.
+    paste_into: Option<(egui::Id, String)>,
     /// The list of keyboard shortcuts (F1).
     show_keys_help: bool,
     /// Built-in themes, then those from the themes folder.
@@ -387,6 +389,7 @@ impl App {
             multi_edit: MultiEdit::default(),
             show_sidebar: true,
             compact: false,
+            paste_into: None,
             show_keys_help: false,
             themes,
             theme_errors,
@@ -2492,9 +2495,39 @@ impl App {
     /// status bar and the notch too), with the rest in the panel colour.
     pub fn frame_in_safe_area(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if let Some((id, text)) = self.paste_into.take() {
+            // The Paste button below was tapped: the field has its focus back.
+            ctx.memory_mut(|m| m.request_focus(id));
+            ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
+        }
         ui.painter().rect_filled(ctx.viewport_rect(), 0.0, ui.visuals().panel_fill);
         let free = ctx.content_rect();
         ui.scope_builder(egui::UiBuilder::new().max_rect(free), |ui| self.frame(ui));
+        self.paste_button(&ctx);
+    }
+
+    /// A touch screen's keyboard may have no way to paste (the iPhone's
+    /// has none): a Paste button under the text field being typed in.
+    fn paste_button(&mut self, ctx: &egui::Context) {
+        if !crate::look::is_touch(ctx) || !crate::clipboard::available() {
+            return;
+        }
+        let Some(ime) = ctx.output(|o| o.ime) else { return };
+        let Some(field) = ctx.memory(|m| m.focused()) else { return };
+        if ime.purpose == egui::IMEPurpose::Terminal {
+            return; // The terminal has its own, in its row of keys.
+        }
+        egui::Area::new(egui::Id::new("paste-button"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(ime.rect.left_bottom() + egui::vec2(0.0, 4.0))
+            .show(ctx, |ui| {
+                if ui.button("📋 Paste").clicked()
+                    && let Some(text) = crate::clipboard::read()
+                {
+                    self.paste_into = Some((field, text));
+                    ctx.request_repaint();
+                }
+            });
     }
 
     /// One frame of the whole window, drawn into `ui` (the window's root).

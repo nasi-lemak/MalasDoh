@@ -15,8 +15,12 @@ env:
 
 jobs:
   android:
-    name: Android (build, and run in the emulator)
+    name: Android (build, and run in the ${{ matrix.device }} emulator)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [pixel_7, pixel_tablet]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,7 +42,7 @@ jobs:
           api-level: 35
           arch: x86_64
           target: google_apis
-          profile: pixel_tablet
+          profile: ${{ matrix.device }}
           disable-animations: true
           script: sh .github/scripts/android-smoke.sh
 

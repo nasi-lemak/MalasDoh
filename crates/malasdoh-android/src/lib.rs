@@ -1,13 +1,17 @@
 //! MalasDoh on Android: the same app as on the desktop, in eframe's Android
-//! window (a `NativeActivity`, so the app needs no Java or Kotlin code).
-//!
-//! The on-screen keyboard comes up by itself while a text field has focus:
-//! egui asks winit for text input, and winit's Android backend shows it.
+//! window. The activity is Android's `NativeActivity` with a little Java on
+//! top (`android/java/…/MainActivity.java`) for what it lacks: a real
+//! connection to the on-screen keyboard (suggestions, swipe typing,
+//! composing input methods) and the clipboard.
 #![cfg(target_os = "android")]
 
-use malasdoh::app::App;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use jni::JNIEnv;
+use jni::objects::{JClass, JObject, JString, JValue};
+use jni::sys::jint;
+use malasdoh::app::App;
 use winit::platform::android::activity::AndroidApp;
 
 /// Called by `android-activity` on the app's own thread once the activity
@@ -27,6 +31,21 @@ fn android_main(android: AndroidApp) {
     let root = android.internal_data_path().unwrap_or_else(|| "/data/local/tmp".into()).join("malasdoh");
     let paths = malasdoh_core::AppPaths::rooted(root);
 
+    let reader = android.clone();
+    malasdoh::clipboard::set_reader(move || {
+        with_activity(&reader, |env, activity| {
+            let text = env.call_method(activity, "getClipboard", "()Ljava/lang/String;", &[])?.l()?;
+            if text.is_null() {
+                return Ok(None);
+            }
+            Ok(Some(env.get_string(&JString::from(text))?.into()))
+        })
+        .unwrap_or_else(|e| {
+            log::warn!("could not read the clipboard: {e}");
+            None
+        })
+    });
+
     let options = eframe::NativeOptions {
         android_app: Some(android.clone()),
         renderer: eframe::Renderer::Glow,
@@ -36,6 +55,7 @@ fn android_main(android: AndroidApp) {
         "MalasDoh",
         options,
         Box::new(move |cc| {
+            let _ = CTX.set(cc.egui_ctx.clone());
             let mut app = App::with_context(&cc.egui_ctx, paths);
             app.set_touch(&cc.egui_ctx, true);
             Ok(Box::new(Mobile {
@@ -43,7 +63,7 @@ fn android_main(android: AndroidApp) {
                 android,
                 focused: true,
                 insets: Insets::default(),
-                keyboard: false,
+                keyboard: None,
                 settle_until: Instant::now() + SETTLE,
             }))
         }),
@@ -61,14 +81,19 @@ const SETTLE: Duration = Duration::from_secs(3);
 /// cutout or the on-screen keyboard, in pixels: left, top, right, bottom.
 type Insets = [i32; 4];
 
+/// The keyboard modes of `MainActivity.showKeyboard`.
+const TEXT: i32 = 0;
+const PASSWORD: i32 = 1;
+const TERMINAL: i32 = 2;
+
 struct Mobile {
     app: App,
     android: AndroidApp,
     focused: bool,
     /// The covered edges last seen.
     insets: Insets,
-    /// Whether a text field had focus (the on-screen keyboard is up).
-    keyboard: bool,
+    /// The on-screen keyboard as last asked for: up, in which mode.
+    keyboard: Option<i32>,
     /// Until when to look at the insets again every quarter second: Android
     /// changes them without an event that winit passes on.
     settle_until: Instant,
@@ -83,6 +108,8 @@ impl eframe::App for Mobile {
             let [left, top, right, bottom] = self.insets.map(|px| px.max(0) as f32 / ppp);
             raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 { left, right, top, bottom }));
         }
+        // What the on-screen keyboard typed.
+        raw.events.append(&mut TYPED.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -100,11 +127,9 @@ impl eframe::App for Mobile {
 
         self.app.frame_in_safe_area(ui);
 
-        let keyboard = ctx.egui_wants_keyboard_input();
-        if keyboard != self.keyboard {
-            self.keyboard = keyboard;
-            self.settle_until = Instant::now() + SETTLE;
-        }
+        self.copy_to_clipboard(&ctx);
+        self.keyboard(&ctx);
+
         if Instant::now() < self.settle_until {
             match insets(&self.android) {
                 Ok(insets) if insets != self.insets => {
@@ -126,19 +151,165 @@ impl eframe::App for Mobile {
     }
 }
 
-/// The window's insets, from Java: `getWindow().getDecorView()
-/// .getRootWindowInsets()`, for the system bars, the display cutout and the
-/// keyboard (Android 11+), or the older system-window insets (Android 8-10).
-fn insets(android: &AndroidApp) -> Result<Insets, jni::errors::Error> {
-    use jni::objects::{JObject, JValue};
+impl Mobile {
+    /// Show the on-screen keyboard while something wants text, in the mode
+    /// that suits it, and hide it after. NativeActivity's own keyboard (which
+    /// winit would show) only sends key presses, so egui's request for it is
+    /// taken here instead.
+    fn keyboard(&mut self, ctx: &egui::Context) {
+        let wanted = ctx.output_mut(|o| o.ime.take()).map(|ime| match ime.purpose {
+            egui::IMEPurpose::Password => PASSWORD,
+            egui::IMEPurpose::Terminal => TERMINAL,
+            egui::IMEPurpose::Normal => TEXT,
+        });
+        // A tap brings it back after the Back key put it away.
+        let tapped = ctx.input(|i| i.pointer.any_pressed());
+        if wanted != self.keyboard || (wanted.is_some() && tapped) {
+            if wanted.is_some() != self.keyboard.is_some() {
+                self.settle_until = Instant::now() + SETTLE;
+            }
+            self.keyboard = wanted;
+            let shown = with_activity(&self.android, |env, activity| {
+                let (show, mode) = (wanted.is_some(), wanted.unwrap_or(TEXT));
+                env.call_method(activity, "showKeyboard", "(ZI)V", &[JValue::Bool(show.into()), JValue::Int(mode)])?;
+                Ok(())
+            });
+            if let Err(e) = shown {
+                log::warn!("could not show or hide the keyboard: {e}");
+            }
+        }
+    }
 
+    /// What egui copied, onto Android's clipboard too. (egui keeps its own
+    /// copy, which a hardware keyboard's Ctrl+V pastes: winit gives that key
+    /// to egui, not to the app.)
+    fn copy_to_clipboard(&self, ctx: &egui::Context) {
+        let copied: Vec<String> = ctx.output(|o| {
+            o.commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for text in copied {
+            let done = with_activity(&self.android, |env, activity| {
+                let text = env.new_string(&text)?;
+                env.call_method(activity, "setClipboard", "(Ljava/lang/String;)V", &[JValue::Object(&text)])?;
+                Ok(())
+            });
+            if let Err(e) = done {
+                log::warn!("could not copy to the clipboard: {e}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// From the Java side: what the on-screen keyboard types.
+
+/// Events from the keyboard, for the next frame.
+static TYPED: Mutex<Vec<egui::Event>> = Mutex::new(Vec::new());
+/// To wake the app up when the keyboard typed something.
+static CTX: OnceLock<egui::Context> = OnceLock::new();
+
+fn typed(events: impl IntoIterator<Item = egui::Event>) {
+    TYPED.lock().unwrap_or_else(|e| e.into_inner()).extend(events);
+    if let Some(ctx) = CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
+fn key_tap(key: egui::Key) -> [egui::Event; 2] {
+    let ev = |pressed| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    [ev(true), ev(false)]
+}
+
+/// Text the keyboard settled on: a key, a word, a suggestion, pasted text.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeCommit(
+    mut env: JNIEnv,
+    _class: JClass,
+    text: JString,
+) {
+    let Ok(text) = env.get_string(&text).map(String::from) else { return };
+    match text.as_str() {
+        // Enter, as text: the key, which text fields and terminals expect.
+        "\n" | "\r" => typed(key_tap(egui::Key::Enter)),
+        _ => typed([egui::Event::Ime(egui::ImeEvent::Commit(text))]),
+    }
+}
+
+/// A word being typed or swiped, not settled yet (shown underlined).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeComposing(
+    mut env: JNIEnv,
+    _class: JClass,
+    text: JString,
+) {
+    let Ok(text) = env.get_string(&text).map(String::from) else { return };
+    typed([egui::Event::Ime(egui::ImeEvent::Preedit { text, active_range_chars: None })]);
+}
+
+/// A key the keyboard sent as a key (Enter, Backspace…), by Android key code.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_nasi_1lemak_malasdoh_MainActivity_nativeKey(
+    _env: JNIEnv,
+    _class: JClass,
+    code: jint,
+) {
+    use egui::Key as K;
+    let key = match code {
+        66 => K::Enter,
+        67 => K::Backspace,
+        112 => K::Delete,
+        61 => K::Tab,
+        111 => K::Escape,
+        19 => K::ArrowUp,
+        20 => K::ArrowDown,
+        21 => K::ArrowLeft,
+        22 => K::ArrowRight,
+        _ => return,
+    };
+    typed(key_tap(key));
+}
+
+// ---------------------------------------------------------------------------
+// Calling Java.
+
+/// Runs `f` with the activity (`MainActivity`) and a JNI environment for this
+/// thread, freeing the local references it made and clearing any Java
+/// exception it caused.
+fn with_activity<T>(
+    android: &AndroidApp,
+    f: impl FnOnce(&mut JNIEnv, &JObject) -> Result<T, jni::errors::Error>,
+) -> Result<T, jni::errors::Error> {
     // SAFETY: android-activity keeps the VM and the activity alive for as long
     // as the app runs; the activity is a global reference we only borrow.
     let vm = unsafe { jni::JavaVM::from_raw(android.vm_as_ptr().cast()) }?;
     let mut env = vm.attach_current_thread_permanently()?;
     let activity = unsafe { JObject::from_raw(android.activity_as_ptr().cast()) };
-    let result = env.with_local_frame(16, |env| -> Result<Insets, jni::errors::Error> {
-        let window = env.call_method(&activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
+    let result = env.with_local_frame(16, |env| f(env, &activity));
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result
+}
+
+/// The window's insets, from Java: `getWindow().getDecorView()
+/// .getRootWindowInsets()`, for the system bars, the display cutout and the
+/// keyboard (Android 11+), or the older system-window insets (Android 8-10).
+fn insets(android: &AndroidApp) -> Result<Insets, jni::errors::Error> {
+    with_activity(android, |env, activity| {
+        let window = env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
         let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
         let all = env.call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?.l()?;
         if all.is_null() {
@@ -162,10 +333,5 @@ fn insets(android: &AndroidApp) -> Result<Insets, jni::errors::Error> {
                 edge("getSystemWindowInsetBottom")?,
             ])
         }
-    });
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
-    result
+    })
 }

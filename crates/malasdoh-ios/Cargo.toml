@@ -22,3 +22,9 @@ egui.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The clipboard (UIPasteboard) and where the on-screen keyboard is.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSDictionary", "NSNotification", "NSObject", "NSOperation", "NSString", "NSValue"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "UIGeometry", "UIPasteboard", "UIWindow"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }

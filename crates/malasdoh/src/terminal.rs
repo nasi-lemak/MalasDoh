@@ -347,6 +347,16 @@ impl Terminal {
                         tapped = true;
                     }
                 }
+                // No Ctrl+V on a phone: paste from the system clipboard.
+                if crate::clipboard::available()
+                    && ui.button("📋 Paste").clicked()
+                    && let Some(text) = crate::clipboard::read()
+                {
+                    // Handled below like a pasted Ctrl+V (asking first for
+                    // several lines into a shell).
+                    ui.ctx().input_mut(|i| i.events.push(Event::Paste(text)));
+                    tapped = true;
+                }
             });
         }
         if tapped {
@@ -658,7 +668,7 @@ impl Terminal {
                         ctrl_used = true;
                     }
                 }
-                Event::Text(t) => out.send.extend_from_slice(t.as_bytes()),
+                Event::Text(t) | Event::Ime(egui::ImeEvent::Commit(t)) => out.send.extend_from_slice(t.as_bytes()),
                 // Several lines into a plain shell: ask first. Programs that
                 // asked for bracketed paste (editors, modern shells) get it
                 // as text and do not run it.

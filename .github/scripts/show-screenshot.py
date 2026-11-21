@@ -17,14 +17,15 @@ w, h = im.size
 middle = im.crop((0, h // 10, w, h - h // 10)).getcolors(1 << 24) or []
 print(f"middle of the screen: {len(middle)} colours")
 blank = len(middle) < 10
-im.thumbnail((640, 640))
+im.thumbnail((900, 900))
 buf = io.BytesIO()
 im.save(buf, "JPEG", quality=70)
 data = base64.b64encode(buf.getvalue()).decode()
-print("SCREENSHOT-BEGIN")
+name = sys.argv[2] if len(sys.argv) > 2 else "screen"
+print(f"SCREENSHOT-BEGIN {name}")
 for i in range(0, len(data), 1000):
     print(data[i : i + 1000])
-print("SCREENSHOT-END")
+print(f"SCREENSHOT-END {name}")
 if blank:
     print("The screen is blank: the app drew nothing.")
     sys.exit(1)

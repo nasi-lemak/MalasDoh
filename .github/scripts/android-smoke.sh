@@ -52,6 +52,20 @@ alive() {
 # connect, trust the host key, log in with a password, run something, swipe
 # back through it, leave the app for a while and come back still connected.
 key() { adb shell input keyevent "$@"; sleep 1; }
+# What the shell in the app did shows on the server, this machine: a file
+# made there proves the keys got through and the connection is up.
+expect_file() {
+    for _ in $(seq 1 15); do
+        if sudo test -f "/home/demo/$1"; then
+            echo "ok: the app's shell made $1 on the server"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "FAILED: no $1 on the server ($2)"
+    diagnose
+    exit 1
+}
 text() { adb shell input text "$1"; sleep 1; }
 end_to_end() {
     echo "=== end to end"
@@ -75,6 +89,8 @@ end_to_end() {
     text malasdoh-ci-only; key 66
     sleep 6
     alive
+    text 'touch%se2e-connected'; key 66
+    expect_file e2e-connected "connecting, logging in and typing in the terminal"
     text 'seq%s1%s200'; key 66
     sleep 2
     shot e2e-terminal
@@ -85,14 +101,20 @@ end_to_end() {
     # Away for a while: the connection should stay up meanwhile.
     key 3                     # Home
     sleep 45
-    echo "--- notification"
-    adb shell dumpsys notification --noredact | grep -E "android.text=.*connection" | head -n 3 || true
     alive
+    if adb shell dumpsys activity services "$package" | grep -q "isForeground=true"; then
+        echo "ok: kept running in the background by its foreground service"
+    else
+        echo "FAILED: no foreground service while in the background"
+        adb shell dumpsys activity services "$package" | head -n 40
+        diagnose
+        exit 1
+    fi
     adb shell am start -n "$package/.MainActivity" >/dev/null
     sleep 5
     adb shell input tap 540 1500; sleep 1   # the terminal, to type into it
-    text 'echo%sstill-connected'; key 66
-    sleep 2
+    text 'touch%se2e-still-connected'; key 66
+    expect_file e2e-still-connected "the same connection after 45 seconds in the background"
     shot e2e-back
     alive
 }

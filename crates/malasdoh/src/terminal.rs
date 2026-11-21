@@ -50,6 +50,10 @@ struct Search {
 }
 
 pub struct Terminal {
+    /// The terminal's own widget id: the same whatever is shown above it
+    /// (the key row comes and goes with the on-screen keyboard), so it keeps
+    /// the focus.
+    widget_id: egui::Id,
     parser: vt100::Parser,
     font_size: f32,
     /// Selection in screen cells (row, col), anchor and current end.
@@ -90,7 +94,10 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new(font_size: f32) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
+            widget_id: egui::Id::new(("malasdoh-terminal", n)),
             parser: vt100::Parser::new(24, 80, SCROLLBACK),
             font_size,
             selection: None,
@@ -457,7 +464,8 @@ impl Terminal {
             out.resize = Some((cols, rows));
         }
 
-        let (outer, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+        let (outer, _) = ui.allocate_exact_size(avail, Sense::hover());
+        let response = ui.interact(outer, self.widget_id, Sense::click_and_drag());
         ui.painter().rect_filled(outer, 0.0, self.theme.bg);
         let rect = Rect::from_min_size(outer.min + pad, outer.size() - 2.0 * pad);
         let id = response.id;

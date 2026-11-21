@@ -69,9 +69,15 @@ expect_file() {
 text() { adb shell input text "$1"; sleep 1; }
 end_to_end() {
     echo "=== end to end"
-    key 4                     # Back: away from the form of the tour
+    key 4                     # Back: the keyboard goes away
+    key 4                     # Back again closes the tour's form
+    # Clear the search the tour typed (Ctrl+A: a hardware keyboard's Ctrl).
+    tap 120 "$search_y"
+    adb shell input keycombination 113 29; sleep 1
+    key 67
     key 4
-    tap 70 175                # New connection… (the cursor starts in Name)
+    shot e2e-cleared
+    tap 388 68                # + : New connection (the cursor starts in Name)
     text ci
     key 61; text 10.0.2.2     # Tab: Host
     key 61                    # Port: replace the 22

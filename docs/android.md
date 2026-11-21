@@ -1,11 +1,18 @@
 # MalasDoh on Android
 
 MalasDoh runs on Android 8 and newer (phones, tablets, Chromebooks). It is
-the same app as on the desktop, in a window Android gives it through its own
-`NativeActivity`: there is no Java or Kotlin code.
+the same app as on the desktop, in a window Android gives it through its
+own `NativeActivity`, with a little Java on top for the keyboard, the
+clipboard and the file picker.
 
-**Status: early.** The layout is still the desktop one, so it is at home on
-a tablet or a phone held sideways, with a keyboard if you have one.
+**Status: early.** It has run in the Android emulator (phone and tablet) but
+not yet on a real device.
+
+On a phone it uses its phone layout: the connection list fills the screen
+until you pick one, and inside a connection Terminals, Files and This
+device take turns. Taps open things (a long press shows the menu), and the
+terminal has a row of the keys phone keyboards lack: Esc, Tab, Ctrl, the
+arrows, `| ~ / - :`, Home, End, PgUp, PgDn and Paste.
 
 ## Install
 
@@ -45,21 +52,26 @@ Logs: `adb logcat -s malasdoh`.
 ## How it fits together
 
 - `crates/malasdoh-android`: the native library, `libmalasdoh_android.so`:
-  eframe's Android window, the app, and a little glue to keep the app clear
-  of the status bar, the navigation bar and the on-screen keyboard.
-- `android/AndroidManifest.xml` and `android/res/`: the app's manifest and
-  icon. `android/build-apk.sh` builds the library for each ABI, packs it with
-  the manifest, aligns and signs the APK.
+  eframe's Android window, the app, and the glue: the window insets (status
+  bar, navigation bar, keyboard) through JNI, the keyboard, the clipboard
+  and the file picker.
+- `android/java/…/MainActivity.java`: NativeActivity plus an input view
+  with a real connection to the on-screen keyboard (suggestions, swipe
+  typing, composing input methods; in a terminal every key goes straight
+  through), the clipboard, and the system file picker.
+- `android/AndroidManifest.xml` and `android/res/`: the manifest and icon.
+  `android/build-apk.sh` builds the library for each ABI and the Java, packs
+  them with the manifest, aligns and signs the APK.
 - Passwords you ask it to remember are kept in the Android Keystore.
+- Files you pick are copied into the app; downloads and saved files go to
+  its Documents folder, where "This device" starts.
 
-CI builds the APK and starts it in an Android tablet emulator on every pull
-request (`.github/workflows/mobile.yml`).
+CI builds the APK and runs it in a phone and a tablet emulator on every pull
+request, tapping through the search box (with the keyboard up) and the new
+connection form (`.github/workflows/mobile.yml`).
 
 ## Not there yet
 
-- **A phone layout.** On a phone held upright the panels are cramped.
-- **The on-screen keyboard** types plain characters; word suggestions,
-  swipe typing and some languages' input methods do not work yet.
-- **File pickers.** The "Browse…" buttons do nothing yet; type the path.
-- **Clipboard** between MalasDoh and other apps.
-- "Local files" sees only the app's own storage.
+- **Downloads you can open from other apps:** they stay in the app's own
+  storage for now (a Share button is next).
+- Not yet tried on a real phone or tablet.

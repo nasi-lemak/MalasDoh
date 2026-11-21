@@ -1,12 +1,18 @@
 # MalasDoh on iPhone and iPad
 
 MalasDoh runs on iOS and iPadOS 15 and newer. It is the same app as on the
-desktop, drawn with Metal through wgpu; it keeps clear of the notch and the
-home indicator, and the on-screen keyboard comes up when you tap a text
-field.
+desktop, drawn with Metal through wgpu; it keeps clear of the notch, the
+home indicator and the on-screen keyboard, and the keyboard comes up when
+you tap a text field or the terminal.
 
-**Status: early.** The layout is still the desktop one, so it is at home on
-an iPad, best with a keyboard and trackpad.
+**Status: early.** It has run in the iPad Simulator but not yet on a real
+device.
+
+On an iPhone it uses its phone layout: the connection list fills the screen
+until you pick one, and inside a connection Terminals, Files and This
+device take turns. Taps open things, the terminal has a row of the keys an
+iPhone keyboard lacks (Esc, Tab, Ctrl, arrows, Paste…), and a text field
+being typed in has a Paste button under it.
 
 Building needs a Mac with Xcode, and the Rust targets:
 
@@ -49,19 +55,20 @@ one, for the App Store and TestFlight, is 99 USD a year).
 
 ## How it fits together
 
-- `crates/malasdoh-ios`: the app's program: eframe's iOS window and the app.
+- `crates/malasdoh-ios`: the app's program: eframe's iOS window, the app,
+  and the glue: the keyboard's frame, the clipboard (UIPasteboard) and the
+  document picker.
 - `ios/Info.plist` and `ios/icons/`: the bundle's description and icons.
   `ios/build-app.sh` builds the program and assembles and signs
   `MalasDoh.app` around it.
 - Passwords you ask it to remember are kept in the iOS Keychain.
+- Files you pick are copied into the app; downloads and saved files go to
+  its Documents folder, which the Files app shows under "On My iPhone".
 
 CI builds the app for devices and for the Simulator, and starts it in an
 iPad Simulator on every pull request (`.github/workflows/mobile.yml`).
 
 ## Not there yet
 
-- **A phone layout.** On an iPhone the panels are cramped.
-- **The keyboard can cover** the bottom of the window while it is up.
-- **File pickers.** The "Browse…" buttons do nothing yet; type the path.
-- **Clipboard** between MalasDoh and other apps.
 - **App Store packaging** (an `.ipa` and its review): later.
+- Not yet tried on a real iPhone or iPad.

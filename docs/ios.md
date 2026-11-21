@@ -12,7 +12,13 @@ On an iPhone it uses its phone layout: the connection list fills the screen
 until you pick one, and inside a connection Terminals, Files and This
 device take turns. Taps open things, the terminal has a row of the keys an
 iPhone keyboard lacks (Esc, Tab, Ctrl, arrows, Paste…), and a text field
-being typed in has a Paste button under it.
+being typed in has a Paste button under it. In the terminal, swipe to
+scroll back, pinch to zoom, and press and hold to select text.
+
+iOS stops an app's connections soon after it goes to the background.
+MalasDoh reconnects them when you come back; what ran in a lasting terminal
+(… menu, tmux on the server) is still there, while an ordinary terminal
+starts again.
 
 Building needs a Mac with Xcode, and the Rust targets:
 

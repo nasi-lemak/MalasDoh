@@ -325,6 +325,8 @@ pub struct Session {
     pub bookmarks_changed: bool,
     /// The pane shown beside the active one.
     pub split: Option<Pane>,
+    /// Disconnected on purpose (not dropped): not reconnected by itself.
+    pub disconnected_by_user: bool,
     /// On a narrow screen, which one of the side-by-side parts is shown.
     pub compact_view: CompactView,
     /// The active pane last frame: a file that opens is shown.
@@ -383,6 +385,7 @@ impl Session {
             find: FindWindow::default(),
             bookmarks_changed: false,
             split: None,
+            disconnected_by_user: false,
             compact_view: CompactView::default(),
             compact_seen: None,
             typed: Vec::new(),
@@ -415,6 +418,7 @@ impl Session {
     }
 
     pub fn connect(&mut self, shared: &Shared) {
+        self.disconnected_by_user = false;
         self.state = ConnState::Connecting("Connecting…".into());
         let chain = self.chain.clone();
         let shared2 = shared.clone();
@@ -479,6 +483,7 @@ impl Session {
         }
         self.forwards.on_disconnected();
         self.state = ConnState::Disconnected;
+        self.disconnected_by_user = true;
     }
 
     pub fn open_terminal(&mut self, shared: &Shared, settings: &Settings) {

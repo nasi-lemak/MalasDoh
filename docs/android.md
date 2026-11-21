@@ -14,6 +14,16 @@ device take turns. Taps open things (a long press shows the menu), and the
 terminal has a row of the keys phone keyboards lack: Esc, Tab, Ctrl, the
 arrows, `| ~ / - :`, Home, End, PgUp, PgDn and Paste.
 
+In the terminal, swipe to scroll back (or to scroll a full-screen program),
+pinch to zoom, and press and hold to start selecting text; Copy then
+appears in the row of keys.
+
+While connections are open, MalasDoh keeps running in the background with a
+notification ("2 connections open"), so switching apps does not drop them.
+Android's battery saving can still pause it after a long while; MalasDoh
+then reconnects when you come back. For long jobs, use a lasting terminal
+(… menu): it keeps running on the server whatever happens to the phone.
+
 ## Install
 
 Build the APK (below), copy it to the device, and open it; Android asks you

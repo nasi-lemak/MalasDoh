@@ -7,6 +7,11 @@
     package="io.github.nasi_lemak.malasdoh">
     <!-- SSH connections. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Keeping open connections alive while the app is in the background,
+         with a notification saying so. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- allowBackup: profiles and known hosts stay on the device. -->
     <application
@@ -32,5 +37,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's open SSH connections (terminals, file transfers) alive while the app is in the background." />
+        </service>
     </application>
 </manifest>

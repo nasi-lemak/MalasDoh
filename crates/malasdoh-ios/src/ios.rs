@@ -109,6 +109,11 @@ impl eframe::App for Mobile {
         if self.focused && !focused {
             self.app.shutdown();
         }
+        if focused && !self.focused {
+            // Back from the background, where iOS stops apps' connections:
+            // connect again.
+            self.app.resumed();
+        }
         self.focused = focused;
         self.app.frame_in_safe_area(ui);
         copy_to_clipboard(&ctx);

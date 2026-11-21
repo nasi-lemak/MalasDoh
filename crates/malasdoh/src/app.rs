@@ -2523,6 +2523,24 @@ impl App {
         ctx.data_mut(|d| d.insert_temp(keyboard_up_id(), up));
     }
 
+    /// Connections open or opening: a phone keeps the app running for them.
+    pub fn open_connections(&self) -> usize {
+        self.sessions.iter().filter(|s| matches!(s.state, ConnState::Connected | ConnState::Connecting(_))).count()
+    }
+
+    /// Back in front after time in the background (a phone): connect again
+    /// what dropped meanwhile. Lasting terminals come back as they were;
+    /// open files keep their edits.
+    pub fn resumed(&mut self) {
+        let shared = self.shared.clone();
+        for s in &mut self.sessions {
+            s.check_alive();
+            if s.state == ConnState::Disconnected && !s.disconnected_by_user {
+                s.connect(&shared);
+            }
+        }
+    }
+
     /// Remember what is open, and keep unsaved edits as drafts.
     pub fn shutdown(&mut self) {
         self.persist_session();

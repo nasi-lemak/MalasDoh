@@ -77,6 +77,9 @@ pub struct Terminal {
     zoom: f32,
     /// Start logging, asked for from outside the terminal (the phone menu).
     log_requested: bool,
+    /// On a touch screen, a long press started a selection: dragging now
+    /// extends it instead of scrolling.
+    touch_selecting: bool,
 }
 
 impl Terminal {
@@ -101,6 +104,7 @@ impl Terminal {
             had_focus: false,
             zoom: 1.0,
             log_requested: false,
+            touch_selecting: false,
         }
     }
 
@@ -358,7 +362,17 @@ impl Terminal {
             ("PgDn", special(Key::PageDown)),
         ];
         let mut tapped = false;
+        let selected = self.selected_text();
+        let mut copied = false;
         let mut row = |ui: &mut egui::Ui| {
+            // Text selected with a long press: copy it.
+            if let Some(t) = &selected
+                && ui.button("Copy").clicked()
+            {
+                ui.ctx().copy_text(t.clone());
+                copied = true;
+                tapped = true;
+            }
             for (n, (label, bytes)) in keys.iter().enumerate() {
                 if n == 2
                     && ui
@@ -393,6 +407,9 @@ impl Terminal {
                 .show(ui, |ui| ui.horizontal(|ui| row(ui)));
         } else {
             ui.horizontal_wrapped(|ui| row(ui));
+        }
+        if copied {
+            self.selection = None;
         }
         if tapped {
             // Keep the keyboard up: the terminal takes the focus back.
@@ -505,8 +522,40 @@ impl Terminal {
             handled_click = true;
         }
 
-        if reporting && focused {
-            self.report_mouse(ui, rect, &to_cell, mode, sgr, &mut out);
+        // On a touch screen a swipe scrolls (the scrollback, or the program
+        // with the mouse wheel), and a long press starts selecting text.
+        let touch = opts.touch;
+        let swiping = touch && !self.touch_selecting && (response.dragged() || response.drag_stopped());
+        let mut scroll = 0.0;
+        if response.hovered() || response.dragged() {
+            scroll += ui.input(|i| i.smooth_scroll_delta.y);
+        }
+        if swiping {
+            scroll += response.drag_delta().y;
+        }
+        if touch && response.secondary_clicked() && !handled_click {
+            if let Some(p) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) {
+                let c = to_cell(p);
+                self.selection = Some((c, c));
+                self.touch_selecting = true;
+            }
+        } else if touch && self.touch_selecting {
+            if response.dragged()
+                && let (Some(p), Some((anchor, _))) = (response.interact_pointer_pos(), self.selection)
+            {
+                self.selection = Some((anchor, to_cell(p)));
+            }
+            if response.drag_stopped() || ui.input(|i| i.pointer.any_released()) {
+                self.touch_selecting = false;
+            }
+        } else if touch && !reporting {
+            if response.clicked() {
+                self.selection = None;
+            }
+        } else if reporting && focused {
+            if !swiping {
+                self.report_mouse(ui, rect, &to_cell, mode, sgr, &mut out);
+            }
         } else if !handled_click {
             // From where the button went down, not where the drag was noticed.
             if response.drag_started()
@@ -545,8 +594,8 @@ impl Terminal {
             }
         }
 
-        if response.hovered() && !reporting {
-            self.scroll_accum += ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 && !reporting {
+            self.scroll_accum += scroll;
             let lines = (self.scroll_accum / cell_h).trunc() as i64;
             if lines != 0 {
                 self.scroll_accum -= lines as f32 * cell_h;
@@ -564,12 +613,12 @@ impl Terminal {
             }
         }
 
-        if response.hovered() && reporting {
+        if scroll != 0.0 && reporting {
             // One wheel report per line scrolled, like a real mouse wheel.
-            self.scroll_accum += ui.input(|i| i.smooth_scroll_delta.y);
+            self.scroll_accum += scroll;
             let lines = (self.scroll_accum / cell_h).trunc() as i64;
             if lines != 0
-                && let Some(p) = response.hover_pos()
+                && let Some(p) = response.hover_pos().or(response.interact_pointer_pos())
             {
                 self.scroll_accum -= lines as f32 * cell_h;
                 let (r, c) = to_cell(p);

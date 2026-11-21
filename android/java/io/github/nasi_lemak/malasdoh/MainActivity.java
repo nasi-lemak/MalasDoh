@@ -17,6 +17,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import java.io.File;
@@ -69,6 +70,7 @@ public class MainActivity extends NativeActivity {
     protected void onDestroy() {
         android.util.Log.i("malasdoh", "activity destroyed (finishing: " + isFinishing() + ", changing configuration: "
                 + isChangingConfigurations() + ")");
+        stopService(new Intent(this, KeepAliveService.class));
         super.onDestroy();
         // The Rust app runs once per process: a new activity in this one would
         // have no app behind it (and Android would call it not responding).
@@ -109,6 +111,33 @@ public class MainActivity extends NativeActivity {
         if (clip == null || clip.getItemCount() == 0) return null;
         CharSequence text = clip.getItemAt(0).coerceToText(this);
         return text == null ? null : text.toString();
+    }
+
+    /**
+     * Called from Rust when the number of open connections changes: while
+     * there are any, a foreground service keeps the app running in the
+     * background (with its notification).
+     */
+    public void keepAlive(final int connections) {
+        runOnUiThread(() -> {
+            Intent service = new Intent(this, KeepAliveService.class);
+            try {
+                if (connections > 0) {
+                    if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(
+                            "android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        // Without it the service still runs; the notification is only hidden.
+                        requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 1);
+                    }
+                    service.putExtra(KeepAliveService.COUNT, connections);
+                    startForegroundService(service);
+                } else {
+                    stopService(service);
+                }
+            } catch (RuntimeException e) {
+                // Android may refuse to start it from the background.
+                android.util.Log.w("malasdoh", "could not keep the connections alive in the background", e);
+            }
+        });
     }
 
     /** Called from Rust: open the system's file picker. */

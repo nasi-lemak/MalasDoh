@@ -89,6 +89,7 @@ fn android_main(android: AndroidApp) {
                 last_look: Instant::now() - SETTLE,
                 bar_bottom: 0,
                 keyboard_up: false,
+                connections: 0,
             }))
         }),
     );
@@ -127,6 +128,8 @@ struct Mobile {
     bar_bottom: i32,
     /// Whether the keyboard is on screen, as last told to the app.
     keyboard_up: bool,
+    /// Open connections, as last told to the activity.
+    connections: usize,
 }
 
 impl eframe::App for Mobile {
@@ -152,6 +155,8 @@ impl eframe::App for Mobile {
         }
         if focused && !self.focused {
             self.settle_until = Instant::now() + SETTLE;
+            // Back from the background: connect again what dropped.
+            self.app.resumed();
         }
         self.focused = focused;
 
@@ -159,6 +164,7 @@ impl eframe::App for Mobile {
 
         self.copy_to_clipboard(&ctx);
         self.keyboard(&ctx);
+        self.keep_alive();
 
         // Look at the insets for a while after something moved them, and
         // twice a second while the keyboard is wanted (Back puts it away
@@ -223,6 +229,23 @@ impl Mobile {
             if let Err(e) = shown {
                 log::warn!("could not show or hide the keyboard: {e}");
             }
+        }
+    }
+
+    /// While connections are open, a foreground service (and its
+    /// notification) keeps the app running in the background.
+    fn keep_alive(&mut self) {
+        let open = self.app.open_connections();
+        if open == self.connections {
+            return;
+        }
+        self.connections = open;
+        let done = with_activity(&self.android, |env, activity| {
+            env.call_method(activity, "keepAlive", "(I)V", &[JValue::Int(open as i32)])?;
+            Ok(())
+        });
+        if let Err(e) = done {
+            log::warn!("could not keep the connections alive: {e}");
         }
     }
 
